@@ -1,0 +1,34 @@
+# Go binaries and build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace and vendor
+go.work
+go.work.sum
+vendor/
+
+# Build directory
+bin/
+dist/
+
+# Test data
+ivcs/testdata/repo
+
+# Project binary
+ivcs/ivcs
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
