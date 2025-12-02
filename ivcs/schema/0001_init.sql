@@ -19,3 +19,29 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 CREATE INDEX IF NOT EXISTS edges_type ON edges(type);
+
+-- Named references (aliases)
+CREATE TABLE IF NOT EXISTS refs (
+  name TEXT PRIMARY KEY,           -- e.g., 'snap.main', 'cs.latest', 'ws.feature/auth.head'
+  target_id BLOB NOT NULL,         -- nodes.id
+  target_kind TEXT NOT NULL,       -- 'Snapshot' | 'ChangeSet' | ...
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refs_kind ON refs(target_kind);
+
+-- Human-readable slugs
+CREATE TABLE IF NOT EXISTS slugs (
+  target_id BLOB PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL       -- 'snap_20241202-143000_001', 'cs_00042'
+);
+
+-- Sequence log for navigation
+CREATE TABLE IF NOT EXISTS logs (
+  kind TEXT NOT NULL,              -- 'ChangeSet' or 'Snapshot'
+  seq INTEGER NOT NULL,            -- monotonic sequence number
+  id BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, seq)
+);
+CREATE INDEX IF NOT EXISTS logs_id ON logs(id);

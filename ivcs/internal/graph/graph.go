@@ -17,24 +17,28 @@ import (
 type NodeKind string
 
 const (
-	KindFile      NodeKind = "File"
-	KindModule    NodeKind = "Module"
-	KindSymbol    NodeKind = "Symbol"
-	KindSnapshot  NodeKind = "Snapshot"
-	KindChangeSet NodeKind = "ChangeSet"
+	KindFile       NodeKind = "File"
+	KindModule     NodeKind = "Module"
+	KindSymbol     NodeKind = "Symbol"
+	KindSnapshot   NodeKind = "Snapshot"
+	KindChangeSet  NodeKind = "ChangeSet"
 	KindChangeType NodeKind = "ChangeType"
+	KindWorkspace  NodeKind = "Workspace"
 )
 
 // EdgeType represents the type of relationship between nodes.
 type EdgeType string
 
 const (
-	EdgeContains  EdgeType = "CONTAINS"
-	EdgeDefinesIn EdgeType = "DEFINES_IN"
-	EdgeHasFile   EdgeType = "HAS_FILE"
-	EdgeModifies  EdgeType = "MODIFIES"
-	EdgeHas       EdgeType = "HAS"
-	EdgeAffects   EdgeType = "AFFECTS"
+	EdgeContains     EdgeType = "CONTAINS"
+	EdgeDefinesIn    EdgeType = "DEFINES_IN"
+	EdgeHasFile      EdgeType = "HAS_FILE"
+	EdgeModifies     EdgeType = "MODIFIES"
+	EdgeHas          EdgeType = "HAS"
+	EdgeAffects      EdgeType = "AFFECTS"
+	EdgeBasedOn      EdgeType = "BASED_ON"      // Workspace -> base Snapshot
+	EdgeHeadAt       EdgeType = "HEAD_AT"       // Workspace -> head Snapshot
+	EdgeHasChangeSet EdgeType = "HAS_CHANGESET" // Workspace -> ChangeSet (ordered)
 )
 
 // Node represents a node in the graph.
@@ -425,4 +429,111 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 	result["edges"] = relatedEdges
 
 	return result, nil
+}
+
+// InsertWorkspace inserts a workspace with a provided ID (UUID-based, not content-addressed).
+func (db *DB) InsertWorkspace(tx *sql.Tx, id []byte, payload map[string]interface{}) error {
+	payloadJSON, err := util.CanonicalJSON(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO nodes (id, kind, payload, created_at)
+		VALUES (?, ?, ?, ?)
+	`, id, string(KindWorkspace), string(payloadJSON), util.NowMs())
+	if err != nil {
+		return fmt.Errorf("inserting workspace: %w", err)
+	}
+
+	return nil
+}
+
+// GetWorkspaceByName finds a workspace by name.
+func (db *DB) GetWorkspaceByName(name string) (*Node, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, payload, created_at FROM nodes WHERE kind = ?
+	`, string(KindWorkspace))
+	if err != nil {
+		return nil, fmt.Errorf("querying workspaces: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id []byte
+		var payloadJSON string
+		var createdAt int64
+		if err := rows.Scan(&id, &payloadJSON, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, fmt.Errorf("unmarshaling payload: %w", err)
+		}
+
+		if wsName, ok := payload["name"].(string); ok && wsName == name {
+			return &Node{
+				ID:        id,
+				Kind:      KindWorkspace,
+				Payload:   payload,
+				CreatedAt: createdAt,
+			}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// DeleteEdge deletes an edge.
+func (db *DB) DeleteEdge(tx *sql.Tx, src []byte, edgeType EdgeType, dst []byte) error {
+	_, err := tx.Exec(`
+		DELETE FROM edges WHERE src = ? AND type = ? AND dst = ?
+	`, src, string(edgeType), dst)
+	return err
+}
+
+// Query executes a query that returns rows.
+func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return db.conn.Query(query, args...)
+}
+
+// QueryRow executes a query that returns a single row.
+func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
+	return db.conn.QueryRow(query, args...)
+}
+
+// Exec executes a query that doesn't return rows.
+func (db *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return db.conn.Exec(query, args...)
+}
+
+// GetEdgesTo retrieves edges pointing to a destination node.
+func (db *DB) GetEdgesTo(dst []byte, edgeType EdgeType) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT src, at, created_at FROM edges WHERE dst = ? AND type = ?
+	`, dst, string(edgeType))
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var src, at []byte
+		var createdAt int64
+		if err := rows.Scan(&src, &at, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+
+		edges = append(edges, &Edge{
+			Src:       src,
+			Type:      edgeType,
+			Dst:       dst,
+			At:        at,
+			CreatedAt: createdAt,
+		})
+	}
+
+	return edges, rows.Err()
 }

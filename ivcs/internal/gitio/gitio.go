@@ -10,19 +10,21 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-)
 
-// FileInfo contains information about a file in a commit.
-type FileInfo struct {
-	Path    string
-	Content []byte
-	Lang    string // "ts", "js", or empty
-}
+	"ivcs/internal/filesource"
+)
 
 // Repository wraps a go-git repository.
 type Repository struct {
 	repo *git.Repository
 	path string
+}
+
+// GitSource implements filesource.FileSource for Git commits.
+type GitSource struct {
+	repo   *Repository
+	commit *object.Commit
+	files  []*filesource.FileInfo
 }
 
 // Open opens an existing Git repository.
@@ -65,43 +67,39 @@ func (r *Repository) ResolveRef(refName string) (*object.Commit, error) {
 	return commit, nil
 }
 
-// GetTreeFiles returns all files in the tree at a given commit.
-func (r *Repository) GetTreeFiles(commit *object.Commit) ([]*FileInfo, error) {
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("getting tree: %w", err)
-	}
-
-	var files []*FileInfo
-	err = tree.Files().ForEach(func(f *object.File) error {
-		// Only process TS/JS files
-		lang := detectLang(f.Name)
-		if lang == "" {
-			return nil
-		}
-
-		content, err := f.Contents()
-		if err != nil {
-			return fmt.Errorf("reading file %s: %w", f.Name, err)
-		}
-
-		files = append(files, &FileInfo{
-			Path:    f.Name,
-			Content: []byte(content),
-			Lang:    lang,
-		})
-		return nil
-	})
+// OpenSource opens a Git repository and resolves a ref to create a FileSource.
+func OpenSource(repoPath, gitRef string) (*GitSource, error) {
+	repo, err := Open(repoPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return files, nil
+	commit, err := repo.ResolveRef(gitRef)
+	if err != nil {
+		return nil, err
+	}
+
+	gs := &GitSource{
+		repo:   repo,
+		commit: commit,
+	}
+
+	// Pre-load files
+	if err := gs.loadFiles(); err != nil {
+		return nil, err
+	}
+
+	return gs, nil
 }
 
-// GetFile returns a specific file from a commit.
-func (r *Repository) GetFile(commit *object.Commit, path string) (*FileInfo, error) {
-	tree, err := commit.Tree()
+// GetFiles returns all supported source files from the commit.
+func (gs *GitSource) GetFiles() ([]*filesource.FileInfo, error) {
+	return gs.files, nil
+}
+
+// GetFile returns a specific file by path from the commit.
+func (gs *GitSource) GetFile(path string) (*filesource.FileInfo, error) {
+	tree, err := gs.commit.Tree()
 	if err != nil {
 		return nil, fmt.Errorf("getting tree: %w", err)
 	}
@@ -122,11 +120,66 @@ func (r *Repository) GetFile(commit *object.Commit, path string) (*FileInfo, err
 		return nil, fmt.Errorf("reading file %s: %w", path, err)
 	}
 
-	return &FileInfo{
+	return &filesource.FileInfo{
 		Path:    path,
 		Content: content,
 		Lang:    detectLang(path),
 	}, nil
+}
+
+// Identifier returns the commit hash.
+func (gs *GitSource) Identifier() string {
+	return gs.commit.Hash.String()
+}
+
+// SourceType returns "git".
+func (gs *GitSource) SourceType() string {
+	return "git"
+}
+
+// Commit returns the underlying commit object (for Git-specific operations like diff).
+func (gs *GitSource) Commit() *object.Commit {
+	return gs.commit
+}
+
+// Repository returns the underlying repository (for Git-specific operations).
+func (gs *GitSource) Repository() *Repository {
+	return gs.repo
+}
+
+// loadFiles loads all files from the commit tree.
+func (gs *GitSource) loadFiles() error {
+	tree, err := gs.commit.Tree()
+	if err != nil {
+		return fmt.Errorf("getting tree: %w", err)
+	}
+
+	var files []*filesource.FileInfo
+	err = tree.Files().ForEach(func(f *object.File) error {
+		// Only process TS/JS files
+		lang := detectLang(f.Name)
+		if lang == "" {
+			return nil
+		}
+
+		content, err := f.Contents()
+		if err != nil {
+			return fmt.Errorf("reading file %s: %w", f.Name, err)
+		}
+
+		files = append(files, &filesource.FileInfo{
+			Path:    f.Name,
+			Content: []byte(content),
+			Lang:    lang,
+		})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	gs.files = files
+	return nil
 }
 
 // DiffFiles returns the paths of files that differ between two commits.

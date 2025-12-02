@@ -9,6 +9,8 @@ Unlike traditional diff tools that show line-by-line text changes, IVCS understa
 - [Key Concepts](#key-concepts)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Human-Friendly References](#human-friendly-references)
+- [Workspace Workflow](#workspace-workflow)
 - [Complete Workflow Tutorial](#complete-workflow-tutorial)
 - [Command Reference](#command-reference)
 - [Configuration](#configuration)
@@ -59,6 +61,14 @@ IVCS classifies changes into semantic categories:
 ### Intent
 An **intent** is a human-readable sentence summarizing what a changeset accomplishes, like "Update Auth login" or "Modify Billing invoice calculation".
 
+### Workspaces
+A **workspace** is a lightweight, mutable branch-like overlay on top of immutable snapshots. Workspaces allow you to:
+- Accumulate multiple staged changes (as ChangeSets)
+- Isolate work without affecting the main snapshot lineage
+- Integrate (merge) changes back into a target snapshot
+
+Workspaces have three states: `active` (can stage changes), `shelved` (frozen), and `closed` (permanent).
+
 ---
 
 ## Installation
@@ -66,7 +76,7 @@ An **intent** is a human-readable sentence summarizing what a changeset accompli
 ### Prerequisites
 
 - **Go 1.22+** (uses Go 1.24 features)
-- **Git** (for the repositories you want to analyze)
+- **Git** (optional - only needed for Git-based snapshots)
 
 ### Building from Source
 
@@ -129,6 +139,171 @@ ivcs intent render ghi789...
 
 # 8. View the full changeset as JSON
 ivcs dump ghi789... --json
+```
+
+---
+
+## Human-Friendly References
+
+You don't need to juggle 64-character BLAKE3 hashes! IVCS provides multiple ways to reference snapshots and changesets using human-readable handles.
+
+### Short IDs
+
+Use the first 8-12 hex characters of any ID. IVCS will resolve it if unambiguous:
+
+```bash
+# Instead of the full 64-char ID:
+ivcs analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+
+# Use a short prefix:
+ivcs analyze symbols d9ec9902
+```
+
+If the prefix is ambiguous, IVCS shows matching candidates:
+
+```
+ambiguous prefix '4a2556c0' matches:
+  Snapshot 4a2556c086b1... created 2024-12-02 14:32Z
+  ChangeSet 4a2556c0f31a... intent="Update Auth login"
+provide more characters or use a ref
+```
+
+### Named References (Refs)
+
+Create and use named pointers like Git does:
+
+```bash
+# Create refs
+ivcs ref set snap.main d9ec9902
+ivcs ref set snap.feature 4a2556c0
+ivcs ref set cs.login_fix 90cd7264
+
+# List all refs
+ivcs ref list
+
+# Use refs in any command
+ivcs analyze symbols snap.main
+ivcs changeset create snap.main snap.feature
+ivcs intent render cs.login_fix
+ivcs dump cs.login_fix --json
+
+# Delete refs
+ivcs ref del cs.login_fix
+```
+
+### Auto-Updated Refs
+
+IVCS automatically maintains helpful refs:
+
+| Ref | Updated When | Points To |
+|-----|--------------|-----------|
+| `snap.latest` | Creating a snapshot | The most recent snapshot |
+| `cs.latest` | Creating a changeset | The most recent changeset |
+| `ws.<name>.base` | Creating a workspace | The workspace's base snapshot |
+| `ws.<name>.head` | Staging changes | The workspace's head snapshot |
+
+```bash
+# Use auto-refs in commands
+ivcs analyze symbols snap.latest
+ivcs changeset create @snap:prev @snap:last
+ivcs intent render cs.latest
+```
+
+### Selectors
+
+Use selector syntax for dynamic references:
+
+| Selector | Meaning |
+|----------|---------|
+| `@snap:last` | The most recent snapshot |
+| `@snap:prev` | The second-most recent snapshot |
+| `@cs:last` | The most recent changeset |
+| `@cs:prev` | The second-most recent changeset |
+| `@cs:last~2` | Two changesets back (relative navigation) |
+| `@ws:name:head` | The head snapshot of workspace "name" |
+| `@ws:name:base` | The base snapshot of workspace "name" |
+
+```bash
+# Common workflow using selectors
+ivcs snapshot main --repo .
+ivcs snapshot feature --repo .
+ivcs analyze symbols @snap:last
+ivcs changeset create @snap:prev @snap:last
+ivcs intent render @cs:last
+ivcs dump @cs:last --json
+```
+
+### Pick Command
+
+Search and select nodes interactively:
+
+```bash
+# List recent snapshots
+ivcs pick Snapshot
+
+# Filter by substring
+ivcs pick Snapshot --filter auth
+
+# List changesets without interactive selection
+ivcs pick ChangeSet --no-ui
+
+# Output format shows ID, kind-specific info
+#   %-4s  %-16s  %s
+1     d9ec990243e5...  main (git)
+2     4a2556c086b1...  feature (git)
+```
+
+### Shell Completion
+
+Enable tab completion for refs, selectors, and short IDs:
+
+```bash
+# Bash
+source <(ivcs completion bash)
+# Add to ~/.bashrc for persistence
+
+# Zsh
+source <(ivcs completion zsh)
+# Add to ~/.zshrc for persistence
+
+# Fish
+ivcs completion fish | source
+# Or save to ~/.config/fish/completions/ivcs.fish
+
+# PowerShell
+ivcs completion powershell | Out-String | Invoke-Expression
+```
+
+With completion enabled, pressing Tab will suggest:
+- Named refs (`snap.main`, `cs.latest`)
+- Selectors (`@snap:last`, `@cs:prev`)
+- Recent short IDs
+
+### Complete Example Without Long IDs
+
+```bash
+# Initialize and create snapshots
+ivcs init
+ivcs snapshot main --repo .
+ivcs snapshot feature --repo .
+
+# Analyze using selectors
+ivcs analyze symbols @snap:last
+ivcs analyze symbols @snap:prev
+
+# Create and inspect changeset
+ivcs changeset create @snap:prev @snap:last
+ivcs intent render @cs:last
+ivcs dump @cs:last --json
+
+# Name important refs
+ivcs ref set snap.main @snap:prev
+ivcs ref set snap.feature @snap:last
+ivcs ref set cs.feature_changes @cs:last
+
+# Use your named refs
+ivcs changeset create snap.main snap.feature
+ivcs checkout snap.main --dir ./restore
 ```
 
 ---
@@ -362,31 +537,32 @@ ivcs init
 
 ### `ivcs snapshot`
 
-Create a semantic snapshot from a Git ref.
+Create a semantic snapshot from a Git ref or directory.
 
 ```bash
-ivcs snapshot <git-ref> [flags]
+ivcs snapshot [git-ref] [flags]
 ```
 
 **Arguments:**
-- `<git-ref>` - Branch name, tag, or commit hash
+- `[git-ref]` - Branch name, tag, or commit hash (required for Git mode)
 
 **Flags:**
 - `--repo <path>` - Path to Git repository (default: current directory)
+- `--dir <path>` - Path to directory (creates snapshot without Git)
 
 **Examples:**
 ```bash
-# Snapshot the main branch
+# Snapshot from Git ref
 ivcs snapshot main --repo .
+
+# Snapshot from directory (no Git required)
+ivcs snapshot --dir ./src
 
 # Snapshot a specific commit
 ivcs snapshot abc123def456
 
 # Snapshot a tag
 ivcs snapshot v1.2.3 --repo /path/to/repo
-
-# Snapshot a remote branch
-ivcs snapshot origin/feature-x --repo .
 ```
 
 **Output:**
@@ -558,6 +734,339 @@ ivcs dump abc123... --json | jq .
     { "src": "...", "type": "AFFECTS", "dst": "..." }
   ]
 }
+```
+
+---
+
+### `ivcs status`
+
+Show IVCS status and pending changes since last snapshot.
+
+```bash
+ivcs status [flags]
+```
+
+**Flags:**
+- `--dir <path>` - Directory to check for changes (default: current directory)
+
+**Example:**
+```bash
+ivcs status --dir ./src
+```
+
+**Output:**
+```
+IVCS initialized
+
+Snapshots:  3
+Changesets: 1
+
+Latest snapshot: a1b2c3d4e5f6
+  Source: abc123... (directory)
+  Date:   2024-12-02 14:30:45
+
+Changes since last snapshot:
+
+  Added (1):
+    + auth/newfile.ts
+
+  Modified (2):
+    ~ auth/login.ts
+    ~ billing/invoice.ts
+```
+
+---
+
+### `ivcs log`
+
+Show chronological log of snapshots and changesets.
+
+```bash
+ivcs log [flags]
+```
+
+**Flags:**
+- `-n, --limit <count>` - Number of entries to show (default: 10)
+
+**Example:**
+```bash
+ivcs log -n 5
+```
+
+---
+
+### `ivcs ws create`
+
+Create a new workspace (branch) based on a snapshot.
+
+```bash
+ivcs ws create --name <name> --base <snapshot-id> [flags]
+```
+
+**Flags:**
+- `--name <name>` - Workspace name (required)
+- `--base <snapshot-id>` - Base snapshot ID (required)
+- `--desc <description>` - Optional description
+
+**Example:**
+```bash
+ivcs ws create --name feature/auth --base abc123...
+```
+
+---
+
+### `ivcs ws list`
+
+List all workspaces.
+
+```bash
+ivcs ws list
+```
+
+**Output:**
+```
+NAME                  STATUS      BASE          HEAD          CHANGESETS
+feature/auth          active      a1b2c3d4e5f6  d4e5f6a1b2c3  2
+bugfix/login          shelved     a1b2c3d4e5f6  a1b2c3d4e5f6  0
+```
+
+---
+
+### `ivcs ws stage`
+
+Stage changes from a directory into a workspace.
+
+```bash
+ivcs ws stage --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dir <path>` - Directory to stage from (default: current directory)
+
+**Example:**
+```bash
+ivcs ws stage --ws feature/auth --dir ./src
+```
+
+**Output:**
+```
+Staged changes:
+  Changeset: d4e5f6a1b2c3
+  New head:  e5f6a1b2c3d4
+  Files:     3 changed
+  Changes:   2 change types detected
+```
+
+---
+
+### `ivcs ws log`
+
+Show the changelog for a workspace.
+
+```bash
+ivcs ws log --ws <name>
+```
+
+**Example:**
+```bash
+ivcs ws log --ws feature/auth
+```
+
+---
+
+### `ivcs ws shelve`
+
+Shelve a workspace (freeze staging).
+
+```bash
+ivcs ws shelve --ws <name>
+```
+
+---
+
+### `ivcs ws unshelve`
+
+Unshelve a workspace (resume staging).
+
+```bash
+ivcs ws unshelve --ws <name>
+```
+
+---
+
+### `ivcs ws close`
+
+Permanently close a workspace.
+
+```bash
+ivcs ws close --ws <name>
+```
+
+---
+
+### `ivcs integrate`
+
+Integrate workspace changes into a target snapshot.
+
+```bash
+ivcs integrate --ws <name> --into <snapshot-id>
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--into <snapshot-id>` - Target snapshot ID (required)
+
+**Example:**
+```bash
+ivcs integrate --ws feature/auth --into abc123...
+```
+
+**Output:**
+```
+Integration successful!
+  Result snapshot: f6a1b2c3d4e5...
+  Applied 2 changeset(s)
+  Auto-resolved: 3 change(s)
+```
+
+If there are conflicts:
+```
+Integration conflicts (1):
+  auth/login.ts: File modified in both workspace and target
+```
+
+---
+
+### `ivcs ref list`
+
+List all named references.
+
+```bash
+ivcs ref list [flags]
+```
+
+**Flags:**
+- `--kind <kind>` - Filter by kind (Snapshot, ChangeSet, Workspace)
+
+**Example:**
+```bash
+ivcs ref list
+ivcs ref list --kind Snapshot
+```
+
+**Output:**
+```
+NAME                            KIND          TARGET
+snap.latest                     Snapshot      d9ec990243e5efea...
+snap.main                       Snapshot      d9ec990243e5efea...
+cs.latest                       ChangeSet     90cd726437a465b9...
+ws.feature/auth.head            Snapshot      4a2556c086b1f664...
+```
+
+---
+
+### `ivcs ref set`
+
+Create or update a named reference.
+
+```bash
+ivcs ref set <name> <target>
+```
+
+**Arguments:**
+- `<name>` - Reference name (e.g., `snap.main`, `cs.bugfix`)
+- `<target>` - Target ID (full hex, short prefix, ref name, or selector)
+
+**Examples:**
+```bash
+# Set using short ID
+ivcs ref set snap.main d9ec9902
+
+# Set using another ref
+ivcs ref set snap.backup snap.main
+
+# Set using selector
+ivcs ref set snap.before_feature @snap:prev
+ivcs ref set cs.last_change @cs:last
+```
+
+---
+
+### `ivcs ref del`
+
+Delete a named reference.
+
+```bash
+ivcs ref del <name>
+```
+
+**Arguments:**
+- `<name>` - Reference name to delete
+
+**Example:**
+```bash
+ivcs ref del snap.old_backup
+```
+
+---
+
+### `ivcs pick`
+
+Search and select nodes interactively.
+
+```bash
+ivcs pick <kind> [flags]
+```
+
+**Arguments:**
+- `<kind>` - Node kind: `Snapshot`, `ChangeSet`, or `Workspace` (aliases: `snap`, `cs`, `ws`)
+
+**Flags:**
+- `--filter <substring>` - Filter by substring in ID or payload
+- `--no-ui` - Output matches without interactive selection
+
+**Examples:**
+```bash
+# List all snapshots
+ivcs pick Snapshot
+
+# Search snapshots containing "auth"
+ivcs pick snap --filter auth
+
+# List changesets non-interactively
+ivcs pick cs --no-ui
+```
+
+---
+
+### `ivcs completion`
+
+Generate shell completion scripts.
+
+```bash
+ivcs completion [bash|zsh|fish|powershell]
+```
+
+**Arguments:**
+- `bash` - Generate Bash completion script
+- `zsh` - Generate Zsh completion script
+- `fish` - Generate Fish completion script
+- `powershell` - Generate PowerShell completion script
+
+**Examples:**
+```bash
+# Bash - add to ~/.bashrc
+source <(ivcs completion bash)
+
+# Zsh - add to ~/.zshrc
+source <(ivcs completion zsh)
+
+# Fish - save to completions directory
+ivcs completion fish > ~/.config/fish/completions/ivcs.fish
+
+# PowerShell
+ivcs completion powershell | Out-String | Invoke-Expression
 ```
 
 ---

@@ -1,11 +1,14 @@
-// Package snapshot handles creating and managing snapshots from Git refs.
+// Package snapshot handles creating and managing snapshots from file sources.
 package snapshot
 
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
-	"ivcs/internal/gitio"
+	"ivcs/internal/filesource"
 	"ivcs/internal/graph"
 	"ivcs/internal/module"
 	"ivcs/internal/parse"
@@ -23,22 +26,10 @@ func NewCreator(db *graph.DB, matcher *module.Matcher) *Creator {
 	return &Creator{db: db, matcher: matcher}
 }
 
-// CreateSnapshot creates a snapshot from a Git ref.
-func (c *Creator) CreateSnapshot(repoPath, gitRef string) ([]byte, error) {
-	// Open the repository
-	repo, err := gitio.Open(repoPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening repo: %w", err)
-	}
-
-	// Resolve the ref to a commit
-	commit, err := repo.ResolveRef(gitRef)
-	if err != nil {
-		return nil, fmt.Errorf("resolving ref: %w", err)
-	}
-
-	// Get all TS/JS files
-	files, err := repo.GetTreeFiles(commit)
+// CreateSnapshot creates a snapshot from a file source.
+func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
+	// Get all files from source
+	files, err := source.GetFiles()
 	if err != nil {
 		return nil, fmt.Errorf("getting files: %w", err)
 	}
@@ -50,11 +41,12 @@ func (c *Creator) CreateSnapshot(repoPath, gitRef string) ([]byte, error) {
 	}
 	defer tx.Rollback()
 
-	// Create snapshot node
+	// Create snapshot node with source-agnostic payload
 	snapshotPayload := map[string]interface{}{
-		"gitRef":    gitRef,
-		"fileCount": len(files),
-		"createdAt": util.NowMs(),
+		"sourceType": source.SourceType(),
+		"sourceRef":  source.Identifier(),
+		"fileCount":  len(files),
+		"createdAt":  util.NowMs(),
 	}
 	snapshotID, err := c.db.InsertNode(tx, graph.KindSnapshot, snapshotPayload)
 	if err != nil {
@@ -230,15 +222,20 @@ func (c *Creator) GetSymbolsInFile(fileID, snapshotID []byte) ([]*graph.Node, er
 	return symbols, nil
 }
 
-// FindSnapshotByRef finds a snapshot by its git ref.
-func FindSnapshotByRef(db *graph.DB, gitRef string) ([]byte, error) {
+// FindSnapshotByRef finds a snapshot by its source ref (git ref or content hash).
+func FindSnapshotByRef(db *graph.DB, sourceRef string) ([]byte, error) {
 	snapshots, err := db.GetNodesByKind(graph.KindSnapshot)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, snap := range snapshots {
-		if ref, ok := snap.Payload["gitRef"].(string); ok && ref == gitRef {
+		// Check new sourceRef field
+		if ref, ok := snap.Payload["sourceRef"].(string); ok && ref == sourceRef {
+			return snap.ID, nil
+		}
+		// Backward compatibility: check old gitRef field
+		if ref, ok := snap.Payload["gitRef"].(string); ok && ref == sourceRef {
 			return snap.ID, nil
 		}
 	}
@@ -266,4 +263,134 @@ func GetFileByPath(db *graph.DB, snapshotID []byte, path string) (*graph.Node, e
 	}
 
 	return nil, nil
+}
+
+// CheckoutResult contains the result of a checkout operation.
+type CheckoutResult struct {
+	FilesWritten  int
+	FilesDeleted  int
+	FilesSkipped  int
+	TargetDir     string
+}
+
+// Checkout restores the filesystem to match a snapshot's state.
+func (c *Creator) Checkout(snapshotID []byte, targetDir string, clean bool) (*CheckoutResult, error) {
+	// Get the snapshot node to verify it exists
+	snapNode, err := c.db.GetNode(snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("getting snapshot: %w", err)
+	}
+	if snapNode == nil {
+		return nil, fmt.Errorf("snapshot not found")
+	}
+	if snapNode.Kind != graph.KindSnapshot {
+		return nil, fmt.Errorf("not a snapshot: %s", snapNode.Kind)
+	}
+
+	// Get all files in the snapshot
+	files, err := c.GetSnapshotFiles(snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	result := &CheckoutResult{
+		TargetDir: targetDir,
+	}
+
+	// Build a map of paths in the snapshot
+	snapshotPaths := make(map[string]bool)
+
+	// Write each file from the snapshot
+	for _, fileNode := range files {
+		path, ok := fileNode.Payload["path"].(string)
+		if !ok {
+			continue
+		}
+		snapshotPaths[path] = true
+
+		digest, ok := fileNode.Payload["digest"].(string)
+		if !ok {
+			result.FilesSkipped++
+			continue
+		}
+
+		// Read content from object store
+		content, err := c.db.ReadObject(digest)
+		if err != nil {
+			return nil, fmt.Errorf("reading object %s: %w", digest[:12], err)
+		}
+
+		// Build full path
+		fullPath := filepath.Join(targetDir, path)
+
+		// Create parent directories
+		parentDir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(parentDir, 0755); err != nil {
+			return nil, fmt.Errorf("creating directory %s: %w", parentDir, err)
+		}
+
+		// Write the file
+		if err := os.WriteFile(fullPath, content, 0644); err != nil {
+			return nil, fmt.Errorf("writing file %s: %w", path, err)
+		}
+
+		result.FilesWritten++
+	}
+
+	// If clean mode, delete files not in snapshot
+	if clean {
+		deleted, err := cleanDirectory(targetDir, snapshotPaths)
+		if err != nil {
+			return nil, fmt.Errorf("cleaning directory: %w", err)
+		}
+		result.FilesDeleted = deleted
+	}
+
+	return result, nil
+}
+
+// cleanDirectory removes files that aren't in the snapshot
+func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error) {
+	deleted := 0
+
+	err := filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories and hidden files/directories
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Skip hidden files
+		if strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+
+		// Get relative path
+		relPath, err := filepath.Rel(targetDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Check if this file is in the snapshot
+		if !snapshotPaths[relPath] {
+			// Only delete supported file types
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" {
+				if err := os.Remove(path); err != nil {
+					return fmt.Errorf("removing %s: %w", relPath, err)
+				}
+				deleted++
+			}
+		}
+
+		return nil
+	})
+
+	return deleted, err
 }
