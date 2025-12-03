@@ -17,10 +17,15 @@ bin/
 dist/
 
 # Test data
-ivcs/testdata/repo
+kai-cli/testdata/repo
 
-# Project binary
-ivcs/ivcs
+# Project binaries
+kai-cli/kai
+kailab/kailabd
+
+# Kailab data
+kailab/.kailab/
+kailab/data/
 
 # IDE and editor
 .idea/

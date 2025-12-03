@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"kai/internal/intent"
 	"kai/internal/module"
 	"kai/internal/ref"
+	"kai/internal/remote"
 	"kai/internal/snapshot"
 	"kai/internal/status"
 	"kai/internal/util"
@@ -306,6 +308,87 @@ PowerShell:
 	RunE:                  runCompletion,
 }
 
+// Remote commands
+var remoteCmd = &cobra.Command{
+	Use:   "remote",
+	Short: "Manage remote servers",
+	Long: `Configure remote Kailab servers for pushing and fetching.
+
+Examples:
+  kai remote set origin http://localhost:7447
+  kai remote get origin
+  kai remote list`,
+}
+
+var remoteSetCmd = &cobra.Command{
+	Use:   "set <name> <url>",
+	Short: "Set a remote URL",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runRemoteSet,
+}
+
+var remoteGetCmd = &cobra.Command{
+	Use:   "get <name>",
+	Short: "Get a remote URL",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRemoteGet,
+}
+
+var remoteListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all remotes",
+	RunE:  runRemoteList,
+}
+
+var remoteDelCmd = &cobra.Command{
+	Use:   "del <name>",
+	Short: "Delete a remote",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runRemoteDel,
+}
+
+var pushCmd = &cobra.Command{
+	Use:   "push [remote] [refs...]",
+	Short: "Push snapshots and refs to a remote server",
+	Long: `Push objects and refs to a remote Kailab server.
+
+By default, pushes to the 'origin' remote. You can specify refs to push,
+or push all local refs with --all.
+
+Examples:
+  kai push                        # Push snap.latest to origin
+  kai push origin snap.main       # Push specific ref
+  kai push --all                  # Push all refs
+  kai push --force snap.main      # Force push (non-fast-forward)`,
+	RunE: runPush,
+}
+
+var fetchCmd = &cobra.Command{
+	Use:   "fetch [remote] [refs...]",
+	Short: "Fetch refs and objects from a remote server",
+	Long: `Fetch refs and objects from a remote Kailab server.
+
+By default, fetches from the 'origin' remote.
+
+Examples:
+  kai fetch                       # Fetch all refs from origin
+  kai fetch origin                # Fetch all refs
+  kai fetch origin snap.main      # Fetch specific ref`,
+	RunE: runFetch,
+}
+
+var remoteLogCmd = &cobra.Command{
+	Use:   "remote-log [remote]",
+	Short: "Show remote ref history log",
+	Long: `Display the append-only ref history from a remote Kailab server.
+
+Examples:
+  kai remote-log                  # Show log from origin
+  kai remote-log origin -n 20    # Show 20 entries
+  kai remote-log --ref snap.main # Filter by ref`,
+	RunE: runRemoteLog,
+}
+
 var (
 	// Workspace flags
 	wsName        string
@@ -342,6 +425,12 @@ var (
 
 	// Snapshot flags
 	snapshotMessage string
+
+	// Push/fetch flags
+	pushForce     bool
+	pushAll       bool
+	remoteLogRef  string
+	remoteLogLimit int
 )
 
 func init() {
@@ -405,6 +494,18 @@ func init() {
 	pickCmd.Flags().StringVar(&pickFilter, "filter", "", "Filter by substring")
 	pickCmd.Flags().BoolVar(&pickNoUI, "no-ui", false, "Output matches without interactive selection")
 
+	// Push/fetch command flags
+	pushCmd.Flags().BoolVarP(&pushForce, "force", "f", false, "Force push (allow non-fast-forward)")
+	pushCmd.Flags().BoolVar(&pushAll, "all", false, "Push all refs")
+	remoteLogCmd.Flags().StringVar(&remoteLogRef, "ref", "", "Filter by ref name")
+	remoteLogCmd.Flags().IntVarP(&remoteLogLimit, "limit", "n", 20, "Number of entries to show")
+
+	// Add remote subcommands
+	remoteCmd.AddCommand(remoteSetCmd)
+	remoteCmd.AddCommand(remoteGetCmd)
+	remoteCmd.AddCommand(remoteListCmd)
+	remoteCmd.AddCommand(remoteDelCmd)
+
 	// Add ref subcommands
 	refCmd.AddCommand(refListCmd)
 	refCmd.AddCommand(refSetCmd)
@@ -452,6 +553,10 @@ func init() {
 	rootCmd.AddCommand(refCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(completionCmd)
+	rootCmd.AddCommand(remoteCmd)
+	rootCmd.AddCommand(pushCmd)
+	rootCmd.AddCommand(fetchCmd)
+	rootCmd.AddCommand(remoteLogCmd)
 }
 
 func main() {
@@ -2035,4 +2140,422 @@ func completeRefName(cmd *cobra.Command, args []string, toComplete string) ([]st
 	}
 
 	return completions, cobra.ShellCompDirectiveNoFileComp
+}
+
+// Remote command implementations
+
+func runRemoteSet(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	url := args[1]
+
+	if err := remote.SetRemoteURL(name, url); err != nil {
+		return fmt.Errorf("setting remote: %w", err)
+	}
+
+	fmt.Printf("Remote '%s' set to: %s\n", name, url)
+	return nil
+}
+
+func runRemoteGet(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	url, err := remote.GetRemoteURL(name)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(url)
+	return nil
+}
+
+func runRemoteList(cmd *cobra.Command, args []string) error {
+	cfg, err := remote.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	if len(cfg.Remotes) == 0 {
+		fmt.Println("No remotes configured.")
+		fmt.Println("Use 'kai remote set <name> <url>' to add a remote.")
+		return nil
+	}
+
+	fmt.Printf("%-20s  %s\n", "NAME", "URL")
+	fmt.Println(strings.Repeat("-", 60))
+	for name, url := range cfg.Remotes {
+		fmt.Printf("%-20s  %s\n", name, url)
+	}
+
+	return nil
+}
+
+func runRemoteDel(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	cfg, err := remote.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	if _, ok := cfg.Remotes[name]; !ok {
+		return fmt.Errorf("remote '%s' not found", name)
+	}
+
+	delete(cfg.Remotes, name)
+	if err := remote.SaveConfig(cfg); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+
+	fmt.Printf("Deleted remote '%s'\n", name)
+	return nil
+}
+
+func runPush(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Determine remote name
+	remoteName := "origin"
+	refsToPush := []string{}
+
+	if len(args) > 0 {
+		// Check if first arg is a remote name
+		if _, err := remote.GetRemoteURL(args[0]); err == nil {
+			remoteName = args[0]
+			refsToPush = args[1:]
+		} else {
+			// First arg is a ref
+			refsToPush = args
+		}
+	}
+
+	// Get remote URL
+	remoteURL, err := remote.GetRemoteURL(remoteName)
+	if err != nil {
+		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+	}
+
+	client := remote.NewClient(remoteURL)
+
+	// Check server health
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+	}
+
+	// Get refs to push
+	refMgr := ref.NewRefManager(db)
+	var refsToSync []*ref.Ref
+
+	if pushAll {
+		refsToSync, err = refMgr.List(nil)
+		if err != nil {
+			return fmt.Errorf("listing refs: %w", err)
+		}
+	} else if len(refsToPush) > 0 {
+		for _, name := range refsToPush {
+			r, err := refMgr.Get(name)
+			if err != nil {
+				return fmt.Errorf("getting ref '%s': %w", name, err)
+			}
+			if r != nil {
+				refsToSync = append(refsToSync, r)
+			}
+		}
+	} else {
+		// Default: push snap.latest if it exists
+		r, _ := refMgr.Get("snap.latest")
+		if r != nil {
+			refsToSync = append(refsToSync, r)
+		}
+		// Also push cs.latest
+		r, _ = refMgr.Get("cs.latest")
+		if r != nil {
+			refsToSync = append(refsToSync, r)
+		}
+	}
+
+	if len(refsToSync) == 0 {
+		fmt.Println("Nothing to push.")
+		return nil
+	}
+
+	// Collect all objects to push
+	var allDigests [][]byte
+	digestSet := make(map[string]bool)
+
+	for _, r := range refsToSync {
+		if !digestSet[hex.EncodeToString(r.TargetID)] {
+			digestSet[hex.EncodeToString(r.TargetID)] = true
+			allDigests = append(allDigests, r.TargetID)
+		}
+	}
+
+	fmt.Printf("Pushing to %s (%s)...\n", remoteName, remoteURL)
+
+	// Negotiate
+	missing, err := client.Negotiate(allDigests)
+	if err != nil {
+		return fmt.Errorf("negotiating: %w", err)
+	}
+
+	if len(missing) > 0 {
+		fmt.Printf("  Objects to push: %d\n", len(missing))
+
+		// Build pack from missing objects
+		var packObjects []remote.PackObject
+		for _, digest := range missing {
+			node, err := db.GetNode(digest)
+			if err != nil {
+				continue
+			}
+			if node == nil {
+				continue
+			}
+
+			// Content must match how the digest was computed:
+			// digest = blake3(kind + "\n" + canonicalJSON(payload))
+			payloadJSON, err := util.CanonicalJSON(node.Payload)
+			if err != nil {
+				continue
+			}
+			content := append([]byte(string(node.Kind)+"\n"), payloadJSON...)
+
+			packObjects = append(packObjects, remote.PackObject{
+				Digest:  digest,
+				Kind:    string(node.Kind),
+				Content: content,
+			})
+		}
+
+		if len(packObjects) > 0 {
+			result, err := client.PushPack(packObjects)
+			if err != nil {
+				return fmt.Errorf("pushing pack: %w", err)
+			}
+			fmt.Printf("  Pushed segment %d (%d objects)\n", result.SegmentID, result.Indexed)
+		}
+	} else {
+		fmt.Println("  All objects already on server.")
+	}
+
+	// Update refs
+	for _, r := range refsToSync {
+		// Get old value from remote
+		remoteRef, _ := client.GetRef(r.Name)
+		var oldTarget []byte
+		if remoteRef != nil {
+			oldTarget = remoteRef.Target
+		}
+
+		result, err := client.UpdateRef(r.Name, oldTarget, r.TargetID, pushForce)
+		if err != nil {
+			fmt.Printf("  Failed to update ref %s: %v\n", r.Name, err)
+			continue
+		}
+
+		if result.OK {
+			fmt.Printf("  %s -> %s (push %s)\n", r.Name, hex.EncodeToString(r.TargetID)[:12], result.PushID[:8])
+		} else {
+			fmt.Printf("  %s: %s\n", r.Name, result.Error)
+		}
+	}
+
+	fmt.Println("Push complete.")
+	return nil
+}
+
+func runFetch(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Determine remote name
+	remoteName := "origin"
+	refsToFetch := []string{}
+
+	if len(args) > 0 {
+		// Check if first arg is a remote name
+		if _, err := remote.GetRemoteURL(args[0]); err == nil {
+			remoteName = args[0]
+			refsToFetch = args[1:]
+		} else {
+			// First arg is a ref
+			refsToFetch = args
+		}
+	}
+
+	// Get remote URL
+	remoteURL, err := remote.GetRemoteURL(remoteName)
+	if err != nil {
+		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+	}
+
+	client := remote.NewClient(remoteURL)
+
+	// Check server health
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+	}
+
+	fmt.Printf("Fetching from %s (%s)...\n", remoteName, remoteURL)
+
+	// Get refs from remote
+	var remoteRefs []*remote.RefEntry
+	if len(refsToFetch) > 0 {
+		for _, name := range refsToFetch {
+			r, err := client.GetRef(name)
+			if err != nil {
+				fmt.Printf("  Warning: failed to get ref %s: %v\n", name, err)
+				continue
+			}
+			if r != nil {
+				remoteRefs = append(remoteRefs, r)
+			}
+		}
+	} else {
+		// Fetch all refs
+		remoteRefs, err = client.ListRefs("")
+		if err != nil {
+			return fmt.Errorf("listing refs: %w", err)
+		}
+	}
+
+	if len(remoteRefs) == 0 {
+		fmt.Println("No refs to fetch.")
+		return nil
+	}
+
+	fmt.Printf("  Found %d ref(s)\n", len(remoteRefs))
+
+	// Collect objects to fetch
+	var objectsToFetch [][]byte
+	for _, r := range remoteRefs {
+		exists, _ := db.HasNode(r.Target)
+		if !exists {
+			objectsToFetch = append(objectsToFetch, r.Target)
+		}
+	}
+
+	if len(objectsToFetch) > 0 {
+		fmt.Printf("  Objects to fetch: %d\n", len(objectsToFetch))
+
+		for _, digest := range objectsToFetch {
+			content, kind, err := client.GetObject(digest)
+			if err != nil {
+				fmt.Printf("  Warning: failed to get object %s: %v\n", hex.EncodeToString(digest)[:12], err)
+				continue
+			}
+
+			if content != nil {
+				// Parse and store the object
+				var payload map[string]interface{}
+				if err := json.Unmarshal(content, &payload); err != nil {
+					fmt.Printf("  Warning: failed to parse object %s: %v\n", hex.EncodeToString(digest)[:12], err)
+					continue
+				}
+
+				// Insert node directly
+				tx, err := db.BeginTx()
+				if err != nil {
+					continue
+				}
+				_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
+				if err != nil {
+					tx.Rollback()
+					continue
+				}
+				tx.Commit()
+			}
+		}
+	}
+
+	// Update local refs (prefixed with remote name)
+	refMgr := ref.NewRefManager(db)
+	for _, r := range remoteRefs {
+		// Store as remote/origin/snap.main style
+		localName := fmt.Sprintf("remote/%s/%s", remoteName, r.Name)
+		kind := ref.KindSnapshot // Default
+		if strings.HasPrefix(r.Name, "cs.") {
+			kind = ref.KindChangeSet
+		} else if strings.HasPrefix(r.Name, "ws.") {
+			kind = ref.KindWorkspace
+		}
+
+		if err := refMgr.Set(localName, r.Target, kind); err != nil {
+			fmt.Printf("  Warning: failed to set ref %s: %v\n", localName, err)
+			continue
+		}
+		fmt.Printf("  %s -> %s\n", localName, hex.EncodeToString(r.Target)[:12])
+	}
+
+	fmt.Println("Fetch complete.")
+	return nil
+}
+
+func runRemoteLog(cmd *cobra.Command, args []string) error {
+	// Determine remote name
+	remoteName := "origin"
+	if len(args) > 0 {
+		remoteName = args[0]
+	}
+
+	// Get remote URL
+	remoteURL, err := remote.GetRemoteURL(remoteName)
+	if err != nil {
+		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+	}
+
+	client := remote.NewClient(remoteURL)
+
+	// Check server health
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+	}
+
+	// Get log entries
+	entries, err := client.GetLogEntries(remoteLogRef, 0, remoteLogLimit)
+	if err != nil {
+		return fmt.Errorf("getting log: %w", err)
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No log entries found.")
+		return nil
+	}
+
+	// Get current head
+	head, _ := client.GetLogHead()
+
+	fmt.Printf("Remote log from %s (%s)\n", remoteName, remoteURL)
+	if head != nil {
+		fmt.Printf("Head: %s\n", hex.EncodeToString(head)[:16])
+	}
+	fmt.Println()
+
+	for _, e := range entries {
+		timestamp := time.UnixMilli(e.Time).Format("2006-01-02 15:04:05")
+
+		switch e.Kind {
+		case "REF_UPDATE":
+			oldStr := "(new)"
+			if len(e.Old) > 0 {
+				oldStr = hex.EncodeToString(e.Old)[:12]
+			}
+			newStr := hex.EncodeToString(e.New)[:12]
+			fmt.Printf("%s  %-10s  %-20s  %s -> %s\n",
+				timestamp, e.Actor, e.Ref, oldStr, newStr)
+		case "NODE_PUBLISH":
+			fmt.Printf("%s  %-10s  published %s (%s)\n",
+				timestamp, e.Actor, hex.EncodeToString(e.NodeID)[:12], e.NodeKind)
+		default:
+			fmt.Printf("%s  %-10s  %s\n", timestamp, e.Actor, e.Kind)
+		}
+	}
+
+	return nil
 }

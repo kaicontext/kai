@@ -1,0 +1,9 @@
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA mmap_size=268435456;
+PRAGMA page_size=4096;
+PRAGMA cache_size=-262144;
+PRAGMA wal_autocheckpoint=1000;
+PRAGMA temp_store=MEMORY;
+PRAGMA foreign_keys=OFF;
+PRAGMA busy_timeout=5000;

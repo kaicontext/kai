@@ -7,6 +7,7 @@ toolchain go1.24.10
 require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1
 	github.com/go-git/go-git/v5 v5.16.4
+	github.com/klauspost/compress v1.18.2
 	github.com/spf13/cobra v1.10.1
 	kai-core v0.0.0
 	lukechampine.com/blake3 v1.4.1

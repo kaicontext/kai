@@ -23,6 +23,7 @@ Unlike traditional diff tools that show line-by-line text changes, Kai understan
 - [Use Cases](#use-cases)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
+- [Kailab Server](#kailab-server)
 - [Roadmap](#roadmap)
 
 ---
@@ -53,11 +54,40 @@ A **changeset** represents the semantic difference between two snapshots:
 ### Change Types
 Kai classifies changes into semantic categories:
 
+**Code-Level Changes:**
+
 | Change Type | Description | Example |
 |-------------|-------------|---------|
+| `FUNCTION_ADDED` | New function defined | Added `validateToken()` |
+| `FUNCTION_REMOVED` | Function deleted | Removed `legacyAuth()` |
 | `CONDITION_CHANGED` | Logic/comparison operators or boundaries changed | `if (x > 100)` → `if (x > 50)` |
 | `CONSTANT_UPDATED` | Literal values (numbers, strings) changed | `const TIMEOUT = 3600` → `1800` |
 | `API_SURFACE_CHANGED` | Function signatures or exports changed | `login(user)` → `login(user, token)` |
+
+**File-Level Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `FILE_ADDED` | New file created | Added `auth/mfa.ts` |
+| `FILE_DELETED` | File removed | Removed `deprecated/old.ts` |
+| `FILE_CONTENT_CHANGED` | Non-parseable file modified | Binary or unsupported file changed |
+
+**JSON Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `JSON_FIELD_ADDED` | New key added to JSON | Added `"timeout": 30` to config |
+| `JSON_FIELD_REMOVED` | Key removed from JSON | Removed `"legacy"` field |
+| `JSON_VALUE_CHANGED` | Value changed for existing key | `"version": "1.0"` → `"2.0"` |
+| `JSON_ARRAY_CHANGED` | Array elements modified | Dependencies array changed |
+
+**YAML Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `YAML_KEY_ADDED` | New key added to YAML | Added `replicas: 3` |
+| `YAML_KEY_REMOVED` | Key removed from YAML | Removed deprecated config |
+| `YAML_VALUE_CHANGED` | Value changed for existing key | `port: 8080` → `port: 3000` |
 
 ### Modules
 **Modules** are logical groupings of files defined by path patterns. They help organize changes by feature area (e.g., "Auth", "Billing", "Profile").
@@ -86,7 +116,7 @@ Workspaces have three states: `active` (can stage changes), `shelved` (frozen), 
 
 ```bash
 # Clone or navigate to the kai directory
-cd kai
+cd kai/kai-cli
 
 # Build the CLI binary
 make build
@@ -102,10 +132,10 @@ go build -o kai ./cmd/kai
 
 ```bash
 # Add to your shell profile for global access
-export PATH="$PATH:/path/to/kai"
+export PATH="$PATH:/path/to/kai/kai-cli"
 
 # Or move/symlink to a directory in your PATH
-sudo ln -s /path/to/kai/kai /usr/local/bin/kai
+sudo ln -s /path/to/kai/kai-cli/kai /usr/local/bin/kai
 ```
 
 ---
@@ -1428,17 +1458,22 @@ kai init
 ### Building
 
 ```bash
-# Build binary
-make build
+# Build CLI
+cd kai-cli && make build
 
-# Run tests
-make test
+# Build server
+cd kailab && make build
 
-# Format code
-make fmt
+# Run CLI tests
+cd kai-cli && make test
 
-# Clean artifacts
-make clean
+# Run server tests
+cd kailab && make test
+
+# Run all tests
+(cd kai-core && go test ./...) && \
+(cd kai-cli && go test ./...) && \
+(cd kailab && go test ./...)
 ```
 
 ### Running Tests
@@ -1461,28 +1496,45 @@ go test -cover ./...
 
 ```
 kai/
-├── cmd/kai/
-│   └── main.go              # CLI entry point with Cobra commands
-├── internal/
-│   ├── util/                # Canonical JSON, BLAKE3 hashing
-│   ├── graph/               # SQLite node/edge storage
-│   ├── gitio/               # go-git repository operations
-│   ├── snapshot/            # Snapshot creation and symbol analysis
-│   ├── parse/               # Tree-sitter parsing
-│   ├── module/              # Path glob matching
-│   ├── classify/            # Change type detection
-│   └── intent/              # Intent generation
-├── schema/
-│   └── 0001_init.sql        # Database schema
-├── rules/
-│   ├── modules.yaml         # Default module patterns
-│   └── changetypes.yaml     # Change type definitions
-├── testdata/
-│   ├── repo/                # Sample Git repository
-│   └── expected/            # Golden test output
-├── go.mod
-├── go.sum
-├── Makefile
+├── kai-cli/                     # CLI application
+│   ├── cmd/kai/
+│   │   └── main.go              # CLI entry point with Cobra commands
+│   ├── internal/
+│   │   ├── graph/               # SQLite node/edge storage (local)
+│   │   ├── gitio/               # go-git repository operations
+│   │   ├── snapshot/            # Snapshot creation and symbol analysis
+│   │   ├── module/              # Path glob matching
+│   │   ├── classify/            # Change type detection
+│   │   └── remote/              # Kailab HTTP client
+│   ├── schema/
+│   │   └── 0001_init.sql        # Local database schema
+│   ├── rules/
+│   │   ├── modules.yaml         # Default module patterns
+│   │   └── changetypes.yaml     # Change type definitions
+│   ├── testdata/
+│   │   └── repo/                # Sample Git repository
+│   ├── go.mod
+│   └── Makefile
+│
+├── kai-core/                    # Shared library
+│   ├── cas/                     # Content-addressed storage (BLAKE3)
+│   ├── util/                    # Canonical JSON utilities
+│   ├── parse/                   # Tree-sitter parsing
+│   ├── detect/                  # Change type detection
+│   ├── intent/                  # Intent generation
+│   └── go.mod
+│
+├── kailab/                      # Remote server
+│   ├── cmd/kailabd/
+│   │   └── main.go              # Server entry point
+│   ├── api/                     # HTTP handlers and middleware
+│   ├── store/                   # SQLite storage layer
+│   ├── pack/                    # Pack format encoding/decoding
+│   ├── proto/                   # Wire protocol DTOs
+│   ├── background/              # Background enrichment workers
+│   ├── config/                  # Environment configuration
+│   └── go.mod
+│
 └── README.md
 ```
 
@@ -1499,6 +1551,221 @@ kai/
 2. Update `internal/parse/parse.go` with language detection
 3. Add symbol extraction logic for new AST node types
 4. Update `internal/gitio/gitio.go` file extension detection
+
+---
+
+## Kailab Server
+
+Kailab is a fast, DB-backed server for hosting Kai repositories remotely. It provides HTTP APIs for pushing and fetching snapshots, changesets, and other semantic objects.
+
+### Running the Server
+
+```bash
+# Build and run
+cd kailab
+make build
+./kailabd
+
+# Or with custom configuration
+KAILAB_ADDR=:8080 KAILAB_DATA_DIR=/var/lib/kailab ./kailabd
+```
+
+### Server Configuration
+
+Environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KAILAB_ADDR` | `:9123` | HTTP listen address |
+| `KAILAB_DATA_DIR` | `./data` | Base directory for database and objects |
+| `KAILAB_TENANT` | `default` | Tenant namespace |
+| `KAILAB_REPO` | `main` | Repository name |
+
+### Remote Commands
+
+#### `kai remote set`
+
+Configure a remote server.
+
+```bash
+kai remote set <name> <url>
+```
+
+**Examples:**
+```bash
+kai remote set origin http://localhost:9123
+kai remote set production https://kailab.example.com
+```
+
+---
+
+#### `kai remote get`
+
+Get a remote's URL.
+
+```bash
+kai remote get <name>
+```
+
+**Example:**
+```bash
+kai remote get origin
+# Output: http://localhost:9123
+```
+
+---
+
+#### `kai remote list`
+
+List all configured remotes.
+
+```bash
+kai remote list
+```
+
+**Output:**
+```
+origin       http://localhost:9123
+production   https://kailab.example.com
+```
+
+---
+
+#### `kai remote del`
+
+Delete a remote.
+
+```bash
+kai remote del <name>
+```
+
+---
+
+#### `kai push`
+
+Push snapshots and changesets to a remote server.
+
+```bash
+kai push [remote] [refs...]
+```
+
+**Arguments:**
+- `[remote]` - Remote name (default: `origin`)
+- `[refs...]` - Refs to push (default: `snap.latest`)
+
+**Examples:**
+```bash
+# Push latest snapshot to origin
+kai push
+
+# Push specific refs
+kai push origin snap.main cs.latest
+
+# Push to a different remote
+kai push production snap.release
+```
+
+**What happens:**
+1. Client sends list of object digests to server's negotiate endpoint
+2. Server responds with which objects it needs
+3. Client builds a zstd-compressed pack of missing objects
+4. Pack is uploaded and ingested
+5. Refs are updated on the server
+
+---
+
+#### `kai fetch`
+
+Fetch refs and objects from a remote server.
+
+```bash
+kai fetch [remote] [refs...]
+```
+
+**Arguments:**
+- `[remote]` - Remote name (default: `origin`)
+- `[refs...]` - Refs to fetch (default: `snap.latest`)
+
+**Examples:**
+```bash
+# Fetch latest from origin
+kai fetch
+
+# Fetch specific refs
+kai fetch origin snap.main snap.feature
+
+# Fetch from production
+kai fetch production snap.release
+```
+
+---
+
+#### `kai remote-log`
+
+Show the ref history from a remote server.
+
+```bash
+kai remote-log [remote]
+```
+
+**Arguments:**
+- `[remote]` - Remote name (default: `origin`)
+
+**Example:**
+```bash
+kai remote-log origin
+```
+
+**Output:**
+```
+snap.latest  abc123...  user@example.com  2024-12-02T15:30:00Z
+snap.main    def456...  user@example.com  2024-12-02T14:00:00Z
+```
+
+### Server API
+
+The Kailab server exposes these HTTP endpoints:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/push/negotiate` | Object negotiation (client sends have, server returns need) |
+| `POST` | `/v1/objects/pack` | Ingest zstd-compressed pack of objects |
+| `GET` | `/v1/objects/{digest}` | Get a single object by digest |
+| `PUT` | `/v1/refs/{name}` | Update a ref (with fast-forward check) |
+| `GET` | `/v1/refs` | List all refs |
+| `GET` | `/v1/log/head` | Get the latest log entry |
+| `GET` | `/v1/log/entries` | Get paginated ref history |
+
+### Pack Format
+
+Objects are transferred in zstd-compressed packs:
+
+```
+[4-byte header length][header JSON][object data...]
+```
+
+Header JSON structure:
+```json
+{
+  "objects": [
+    {"digest": "abc123...", "kind": "Snapshot", "offset": 0, "size": 1234},
+    {"digest": "def456...", "kind": "File", "offset": 1234, "size": 567}
+  ]
+}
+```
+
+### Ref History
+
+All ref updates are logged in an append-only history with hash chaining:
+
+```
+entry_hash = BLAKE3(prev_hash || ref_name || target || actor || timestamp)
+```
+
+This provides:
+- Audit trail of all ref changes
+- Tamper detection via hash chain
+- Attribution to actors (users/systems)
 
 ---
 

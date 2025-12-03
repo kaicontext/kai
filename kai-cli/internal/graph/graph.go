@@ -201,6 +201,16 @@ func (db *DB) GetNode(id []byte) (*Node, error) {
 	}, nil
 }
 
+// HasNode checks if a node with the given ID exists.
+func (db *DB) HasNode(id []byte) (bool, error) {
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM nodes WHERE id = ?`, id).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("checking node: %w", err)
+	}
+	return count > 0, nil
+}
+
 // GetNodesByKind retrieves all nodes of a specific kind.
 func (db *DB) GetNodesByKind(kind NodeKind) ([]*Node, error) {
 	rows, err := db.conn.Query(`
