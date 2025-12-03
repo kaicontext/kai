@@ -424,6 +424,14 @@ func main() {
 	}
 }
 
+// shortID safely truncates an ID string to 12 characters.
+func shortID(s string) string {
+	if len(s) >= 12 {
+		return s[:12]
+	}
+	return s
+}
+
 func runInit(cmd *cobra.Command, args []string) error {
 	// Create .kai directory
 	if err := os.MkdirAll(kaiDir, 0755); err != nil {
@@ -442,8 +450,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating rules directory: %w", err)
 	}
 
-	// Copy default modules.yaml
-	modulesContent := `modules:
+	// Write default modules.yaml only if it doesn't exist
+	modulesPath := filepath.Join(rulesPath, "modules.yaml")
+	if _, err := os.Stat(modulesPath); os.IsNotExist(err) {
+		modulesContent := `modules:
   - name: Auth
     include: ["auth/**"]
   - name: Billing
@@ -451,12 +461,15 @@ func runInit(cmd *cobra.Command, args []string) error {
   - name: Profile
     include: ["profile/**"]
 `
-	if err := os.WriteFile(filepath.Join(rulesPath, "modules.yaml"), []byte(modulesContent), 0644); err != nil {
-		return fmt.Errorf("writing modules.yaml: %w", err)
+		if err := os.WriteFile(modulesPath, []byte(modulesContent), 0644); err != nil {
+			return fmt.Errorf("writing modules.yaml: %w", err)
+		}
 	}
 
-	// Copy default changetypes.yaml
-	changetypesContent := `rules:
+	// Write default changetypes.yaml only if it doesn't exist
+	changetypesPath := filepath.Join(rulesPath, "changetypes.yaml")
+	if _, err := os.Stat(changetypesPath); os.IsNotExist(err) {
+		changetypesContent := `rules:
   - id: CONDITION_CHANGED
     match:
       node_types: ["binary_expression","logical_expression","relational_expression"]
@@ -470,8 +483,9 @@ func runInit(cmd *cobra.Command, args []string) error {
       node_types: ["function_declaration","method_definition","export_statement"]
       detector: "params_or_exports_changed"
 `
-	if err := os.WriteFile(filepath.Join(rulesPath, "changetypes.yaml"), []byte(changetypesContent), 0644); err != nil {
-		return fmt.Errorf("writing changetypes.yaml: %w", err)
+		if err := os.WriteFile(changetypesPath, []byte(changetypesContent), 0644); err != nil {
+			return fmt.Errorf("writing changetypes.yaml: %w", err)
+		}
 	}
 
 	// Open database and apply schema
@@ -482,10 +496,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
+	// Set WAL mode outside transaction (SQLite requirement)
+	db.Exec("PRAGMA journal_mode=WAL")
+
 	// Apply schema inline (since we may not have the schema file available)
 	schema := `
-PRAGMA journal_mode=WAL;
-
 CREATE TABLE IF NOT EXISTS nodes (
   id BLOB PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -532,10 +547,7 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
 `
-	if _, err := db.BeginTx(); err != nil {
-		return err
-	}
-	// Apply schema directly via a transaction
+	// Apply schema in a transaction
 	tx, err := db.BeginTx()
 	if err != nil {
 		return err
@@ -905,7 +917,7 @@ func runListSnapshots(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%-64s  %-10s  %-20s  %s\n", "ID", "TYPE", "SOURCE REF", "FILES")
-	fmt.Println(string(make([]byte, 110)))
+	fmt.Println(strings.Repeat("-", 110))
 	for _, node := range nodes {
 		// Support both old (gitRef) and new (sourceRef/sourceType) formats
 		sourceType, _ := node.Payload["sourceType"].(string)
@@ -953,7 +965,7 @@ func runListChangesets(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%-64s  %s\n", "ID", "INTENT")
-	fmt.Println(string(make([]byte, 80)))
+	fmt.Println(strings.Repeat("-", 80))
 	for _, node := range nodes {
 		intent, _ := node.Payload["intent"].(string)
 		if intent == "" {
@@ -1080,16 +1092,16 @@ func runLog(cmd *cobra.Command, args []string) error {
 			kindMarker = "changeset"
 		}
 
-		fmt.Printf("[%s] %s\n", kindMarker, entry.ID[:12])
+		fmt.Printf("[%s] %s\n", kindMarker, shortID(entry.ID))
 		fmt.Printf("Date:    %s\n", timestamp)
 		fmt.Printf("Summary: %s\n", entry.Summary)
 
 		if entry.Kind == "changeset" {
 			if base, ok := entry.Details["base"]; ok && base != "" {
-				fmt.Printf("Base:    %s\n", base[:12])
+				fmt.Printf("Base:    %s\n", shortID(base))
 			}
 			if head, ok := entry.Details["head"]; ok && head != "" {
-				fmt.Printf("Head:    %s\n", head[:12])
+				fmt.Printf("Head:    %s\n", shortID(head))
 			}
 		} else {
 			if files, ok := entry.Details["files"]; ok && files != "" {
@@ -1149,7 +1161,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		Dir:      statusDir,
 		Against:  statusAgainst,
 		UseCache: true,
-		CacheDir: statusDir,
+		CacheDir: ".", // Cache in repo root's .kai/cache, not in scanned dir
 	})
 	if err != nil {
 		return err
@@ -1243,7 +1255,7 @@ func runWsList(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%-20s  %-10s  %-12s  %-12s  %s\n", "NAME", "STATUS", "BASE", "HEAD", "CHANGESETS")
-	fmt.Println(string(make([]byte, 80)))
+	fmt.Println(strings.Repeat("-", 80))
 	for _, ws := range workspaces {
 		baseStr := ""
 		headStr := ""
@@ -1726,7 +1738,6 @@ func completeChangeSetID(cmd *cobra.Command, args []string, toComplete string) (
 func completeNodeID(kind ref.Kind, toComplete string) ([]string, cobra.ShellCompDirective) {
 	// Always include selectors
 	selectors := []string{}
-	prefix := strings.ToLower(string(kind)[:4])
 	switch kind {
 	case ref.KindSnapshot:
 		selectors = []string{"@snap:last", "@snap:prev"}
@@ -1775,7 +1786,7 @@ func completeNodeID(kind ref.Kind, toComplete string) ([]string, cobra.ShellComp
 	}
 
 	// Add recent nodes if no specific prefix
-	if toComplete == "" || strings.HasPrefix("@"+prefix, toComplete) {
+	if toComplete == "" {
 		nodes, err := db.GetNodesByKind(graph.NodeKind(kind))
 		if err == nil {
 			sort.Slice(nodes, func(i, j int) bool {
