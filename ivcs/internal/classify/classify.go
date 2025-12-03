@@ -122,6 +122,9 @@ func (d *Detector) detectFunctionChanges(path string, before, after *parse.Parse
 	for name, afterFunc := range afterFuncs {
 		if _, exists := beforeFuncs[name]; !exists {
 			afterRange := parse.GetNodeRange(afterFunc.node)
+			// Get symbol IDs and always include the function name for intent generation
+			symbolIDs := d.findOverlappingSymbols(fileID, afterRange)
+			symbols := append([]string{"name:" + name}, symbolIDs...)
 			change := &ChangeType{
 				Category: FunctionAdded,
 				Evidence: Evidence{
@@ -130,12 +133,8 @@ func (d *Detector) detectFunctionChanges(path string, before, after *parse.Parse
 						Start: afterRange.Start,
 						End:   afterRange.End,
 					}},
-					Symbols: d.findOverlappingSymbols(fileID, afterRange),
+					Symbols: symbols,
 				},
-			}
-			// Store the function name for intent generation
-			if len(change.Evidence.Symbols) == 0 {
-				change.Evidence.Symbols = []string{"name:" + name}
 			}
 			changes = append(changes, change)
 		}
