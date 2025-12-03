@@ -11,53 +11,36 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"kai/internal/util"
+	"kai-core/cas"
+	coregraph "kai-core/graph"
 )
 
-// NodeKind represents the type of a node.
-type NodeKind string
+// Re-export types from kai-core/graph for backward compatibility
+type NodeKind = coregraph.NodeKind
+type EdgeType = coregraph.EdgeType
+type Node = coregraph.Node
+type Edge = coregraph.Edge
 
+// Re-export constants from kai-core/graph
 const (
-	KindFile       NodeKind = "File"
-	KindModule     NodeKind = "Module"
-	KindSymbol     NodeKind = "Symbol"
-	KindSnapshot   NodeKind = "Snapshot"
-	KindChangeSet  NodeKind = "ChangeSet"
-	KindChangeType NodeKind = "ChangeType"
-	KindWorkspace  NodeKind = "Workspace"
+	KindFile       = coregraph.KindFile
+	KindModule     = coregraph.KindModule
+	KindSymbol     = coregraph.KindSymbol
+	KindSnapshot   = coregraph.KindSnapshot
+	KindChangeSet  = coregraph.KindChangeSet
+	KindChangeType = coregraph.KindChangeType
+	KindWorkspace  = coregraph.KindWorkspace
+
+	EdgeContains     = coregraph.EdgeContains
+	EdgeDefinesIn    = coregraph.EdgeDefinesIn
+	EdgeHasFile      = coregraph.EdgeHasFile
+	EdgeModifies     = coregraph.EdgeModifies
+	EdgeHas          = coregraph.EdgeHas
+	EdgeAffects      = coregraph.EdgeAffects
+	EdgeBasedOn      = coregraph.EdgeBasedOn
+	EdgeHeadAt       = coregraph.EdgeHeadAt
+	EdgeHasChangeSet = coregraph.EdgeHasChangeSet
 )
-
-// EdgeType represents the type of relationship between nodes.
-type EdgeType string
-
-const (
-	EdgeContains     EdgeType = "CONTAINS"
-	EdgeDefinesIn    EdgeType = "DEFINES_IN"
-	EdgeHasFile      EdgeType = "HAS_FILE"
-	EdgeModifies     EdgeType = "MODIFIES"
-	EdgeHas          EdgeType = "HAS"
-	EdgeAffects      EdgeType = "AFFECTS"
-	EdgeBasedOn      EdgeType = "BASED_ON"      // Workspace -> base Snapshot
-	EdgeHeadAt       EdgeType = "HEAD_AT"       // Workspace -> head Snapshot
-	EdgeHasChangeSet EdgeType = "HAS_CHANGESET" // Workspace -> ChangeSet (ordered)
-)
-
-// Node represents a node in the graph.
-type Node struct {
-	ID        []byte
-	Kind      NodeKind
-	Payload   map[string]interface{}
-	CreatedAt int64
-}
-
-// Edge represents an edge in the graph.
-type Edge struct {
-	Src       []byte
-	Type      EdgeType
-	Dst       []byte
-	At        []byte // context (snapshot or changeset ID), can be nil
-	CreatedAt int64
-}
 
 // DB wraps the SQLite database connection.
 type DB struct {
@@ -125,12 +108,12 @@ func (db *DB) BeginTxCtx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, err
 
 // InsertNode inserts a node if it doesn't already exist (idempotent).
 func (db *DB) InsertNode(tx *sql.Tx, kind NodeKind, payload map[string]interface{}) ([]byte, error) {
-	id, err := util.NodeID(string(kind), payload)
+	id, err := cas.NodeID(string(kind), payload)
 	if err != nil {
 		return nil, fmt.Errorf("computing node ID: %w", err)
 	}
 
-	payloadJSON, err := util.CanonicalJSON(payload)
+	payloadJSON, err := cas.CanonicalJSON(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
@@ -138,7 +121,7 @@ func (db *DB) InsertNode(tx *sql.Tx, kind NodeKind, payload map[string]interface
 	_, err = tx.Exec(`
 		INSERT OR IGNORE INTO nodes (id, kind, payload, created_at)
 		VALUES (?, ?, ?, ?)
-	`, id, string(kind), string(payloadJSON), util.NowMs())
+	`, id, string(kind), string(payloadJSON), cas.NowMs())
 	if err != nil {
 		return nil, fmt.Errorf("inserting node: %w", err)
 	}
@@ -167,7 +150,7 @@ func (db *DB) InsertEdge(tx *sql.Tx, src []byte, edgeType EdgeType, dst []byte, 
 	_, err := tx.Exec(`
 		INSERT OR IGNORE INTO edges (src, type, dst, at, created_at)
 		VALUES (?, ?, ?, ?, ?)
-	`, src, string(edgeType), dst, at, util.NowMs())
+	`, src, string(edgeType), dst, at, cas.NowMs())
 	if err != nil {
 		return fmt.Errorf("inserting edge: %w", err)
 	}
@@ -376,7 +359,7 @@ func (db *DB) GetEdgesByContextAndDst(at []byte, edgeType EdgeType, dst []byte) 
 
 // UpdateNodePayload updates the payload of an existing node.
 func (db *DB) UpdateNodePayload(id []byte, payload map[string]interface{}) error {
-	payloadJSON, err := util.CanonicalJSON(payload)
+	payloadJSON, err := cas.CanonicalJSON(payload)
 	if err != nil {
 		return fmt.Errorf("marshaling payload: %w", err)
 	}
@@ -402,7 +385,7 @@ func (db *DB) UpdateNodePayload(id []byte, payload map[string]interface{}) error
 // WriteObject writes raw file bytes to the objects directory.
 // Uses atomic write (tmp + rename) to avoid partial writes on crash.
 func (db *DB) WriteObject(content []byte) (string, error) {
-	digest := util.Blake3HashHex(content)
+	digest := cas.Blake3HashHex(content)
 	finalPath := filepath.Join(db.objectsDir, digest)
 
 	// Check if already exists
@@ -444,7 +427,7 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 	}
 
 	result["changeset"] = map[string]interface{}{
-		"id":      util.BytesToHex(csNode.ID),
+		"id":      cas.BytesToHex(csNode.ID),
 		"kind":    string(csNode.Kind),
 		"payload": csNode.Payload,
 	}
@@ -462,9 +445,9 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 
 		for _, edge := range edges {
 			relatedEdges = append(relatedEdges, map[string]interface{}{
-				"src":  util.BytesToHex(edge.Src),
+				"src":  cas.BytesToHex(edge.Src),
 				"type": string(edge.Type),
-				"dst":  util.BytesToHex(edge.Dst),
+				"dst":  cas.BytesToHex(edge.Dst),
 			})
 
 			// Get the destination node
@@ -474,7 +457,7 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 			}
 			if node != nil {
 				relatedNodes = append(relatedNodes, map[string]interface{}{
-					"id":      util.BytesToHex(node.ID),
+					"id":      cas.BytesToHex(node.ID),
 					"kind":    string(node.Kind),
 					"payload": node.Payload,
 				})
@@ -490,7 +473,7 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 
 // InsertWorkspace inserts a workspace with a provided ID (UUID-based, not content-addressed).
 func (db *DB) InsertWorkspace(tx *sql.Tx, id []byte, payload map[string]interface{}) error {
-	payloadJSON, err := util.CanonicalJSON(payload)
+	payloadJSON, err := cas.CanonicalJSON(payload)
 	if err != nil {
 		return fmt.Errorf("marshaling payload: %w", err)
 	}
@@ -498,7 +481,7 @@ func (db *DB) InsertWorkspace(tx *sql.Tx, id []byte, payload map[string]interfac
 	_, err = tx.Exec(`
 		INSERT INTO nodes (id, kind, payload, created_at)
 		VALUES (?, ?, ?, ?)
-	`, id, string(KindWorkspace), string(payloadJSON), util.NowMs())
+	`, id, string(KindWorkspace), string(payloadJSON), cas.NowMs())
 	if err != nil {
 		return fmt.Errorf("inserting workspace: %w", err)
 	}

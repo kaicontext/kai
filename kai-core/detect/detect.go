@@ -1,14 +1,14 @@
-// Package classify provides change type detection for code changes.
-package classify
+// Package detect provides change type detection for code changes.
+package detect
 
 import (
 	"fmt"
 
 	sitter "github.com/smacker/go-tree-sitter"
 
-	"kai/internal/graph"
-	"kai/internal/parse"
-	"kai/internal/util"
+	"kai-core/cas"
+	"kai-core/graph"
+	"kai-core/parse"
 )
 
 // ChangeCategory represents a type of change.
@@ -41,9 +41,9 @@ const (
 
 // FileRange represents a range in a file.
 type FileRange struct {
-	Path  string  `json:"path"`
-	Start [2]int  `json:"start"`
-	End   [2]int  `json:"end"`
+	Path  string `json:"path"`
+	Start [2]int `json:"start"`
+	End   [2]int `json:"end"`
 }
 
 // Evidence contains the evidence for a change type detection.
@@ -60,8 +60,8 @@ type ChangeType struct {
 
 // Detector detects change types between two versions of a file.
 type Detector struct {
-	parser   *parse.Parser
-	symbols  map[string][]*graph.Node // fileID -> symbols
+	parser  *parse.Parser
+	symbols map[string][]*graph.Node // fileID -> symbols
 }
 
 // NewDetector creates a new change detector.
@@ -511,7 +511,7 @@ func (d *Detector) findOverlappingSymbols(fileID string, r parse.Range) []string
 		}
 
 		if parse.RangesOverlap(r, symRange) {
-			result = append(result, util.BytesToHex(sym.ID))
+			result = append(result, cas.BytesToHex(sym.ID))
 		}
 	}
 

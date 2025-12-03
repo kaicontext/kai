@@ -1,5 +1,5 @@
-// Package module provides module mapping via path glob rules.
-package module
+// Package modulematch provides module mapping via path glob rules.
+package modulematch
 
 import (
 	"fmt"

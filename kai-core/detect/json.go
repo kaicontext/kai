@@ -1,5 +1,5 @@
-// Package classify provides JSON-specific change detection.
-package classify
+// Package detect provides JSON-specific change detection.
+package detect
 
 import (
 	"encoding/json"

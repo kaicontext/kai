@@ -1,5 +1,6 @@
-// Package util provides utility functions for canonical JSON and BLAKE3 hashing.
-package util
+// Package cas provides content-addressable storage utilities including
+// BLAKE3 hashing and canonical JSON serialization.
+package cas
 
 import (
 	"bytes"
