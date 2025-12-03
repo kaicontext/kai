@@ -6,7 +6,7 @@ test:
   stage: test
   image: golang:1.24
   script:
-    - cd ivcs
+    - cd kai-cli
     - go mod download
     - go test ./...
 
