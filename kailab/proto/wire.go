@@ -126,3 +126,28 @@ type HealthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
 }
+
+// ----- Admin API -----
+
+// CreateRepoRequest is sent to create a new repo.
+type CreateRepoRequest struct {
+	Tenant string `json:"tenant"`
+	Repo   string `json:"repo"`
+}
+
+// CreateRepoResponse is returned after creating a repo.
+type CreateRepoResponse struct {
+	Tenant string `json:"tenant"`
+	Repo   string `json:"repo"`
+}
+
+// RepoInfo describes a single repo.
+type RepoInfo struct {
+	Tenant string `json:"tenant"`
+	Repo   string `json:"repo"`
+}
+
+// ListReposResponse contains a list of repos.
+type ListReposResponse struct {
+	Repos []RepoInfo `json:"repos"`
+}

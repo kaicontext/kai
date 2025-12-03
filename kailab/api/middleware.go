@@ -3,11 +3,14 @@ package api
 
 import (
 	"compress/gzip"
+	"context"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	"kailab/repo"
 )
 
 // WithDefaults wraps a handler with standard middleware.
@@ -78,4 +81,74 @@ type gzipResponseWriter struct {
 
 func (grw *gzipResponseWriter) Write(p []byte) (int, error) {
 	return grw.Writer.Write(p)
+}
+
+// Context keys for request-scoped values.
+type ctxKey int
+
+const (
+	repoKey ctxKey = iota
+	tenantKey
+	repoNameKey
+)
+
+// WithRepo is middleware that extracts tenant/repo from URL and injects RepoHandle.
+func WithRepo(reg *repo.Registry) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tenant := r.PathValue("tenant")
+			repoName := r.PathValue("repo")
+
+			if tenant == "" || repoName == "" {
+				http.Error(w, "tenant and repo required", http.StatusBadRequest)
+				return
+			}
+
+			rh, err := reg.Get(r.Context(), tenant, repoName)
+			if err != nil {
+				if err == repo.ErrRepoNotFound {
+					http.Error(w, "repo not found", http.StatusNotFound)
+					return
+				}
+				log.Printf("error getting repo %s/%s: %v", tenant, repoName, err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+
+			// Mark as in-use
+			reg.Acquire(rh)
+			defer reg.Release(rh)
+
+			// Inject into context
+			ctx := context.WithValue(r.Context(), repoKey, rh)
+			ctx = context.WithValue(ctx, tenantKey, tenant)
+			ctx = context.WithValue(ctx, repoNameKey, repoName)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RepoFrom returns the RepoHandle from request context.
+func RepoFrom(ctx context.Context) *repo.Handle {
+	if v := ctx.Value(repoKey); v != nil {
+		return v.(*repo.Handle)
+	}
+	return nil
+}
+
+// TenantFrom returns the tenant from request context.
+func TenantFrom(ctx context.Context) string {
+	if v := ctx.Value(tenantKey); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// RepoNameFrom returns the repo name from request context.
+func RepoNameFrom(ctx context.Context) string {
+	if v := ctx.Value(repoNameKey); v != nil {
+		return v.(string)
+	}
+	return ""
 }

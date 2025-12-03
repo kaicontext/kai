@@ -679,3 +679,399 @@ func bytesEqual(a, b []byte) bool {
 func NowMs() int64 {
 	return time.Now().UnixMilli()
 }
+
+// ============================================================================
+// Standalone functions for multi-repo support
+// These functions take *sql.DB as a parameter instead of being methods on DB.
+// ============================================================================
+
+// BeginTx starts a new transaction on the given database.
+func BeginTx(db *sql.DB) (*sql.Tx, error) {
+	return db.Begin()
+}
+
+// HasObjects checks which digests exist (standalone function).
+func HasObjects(db *sql.DB, digests [][]byte) (map[string]bool, error) {
+	if len(digests) == 0 {
+		return make(map[string]bool), nil
+	}
+
+	result := make(map[string]bool)
+
+	// Process in batches to avoid query size limits
+	batchSize := 500
+	for i := 0; i < len(digests); i += batchSize {
+		end := i + batchSize
+		if end > len(digests) {
+			end = len(digests)
+		}
+		batch := digests[i:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, d := range batch {
+			placeholders[j] = "?"
+			args[j] = d
+		}
+
+		query := fmt.Sprintf(
+			`SELECT digest FROM objects WHERE digest IN (%s)`,
+			strings.Join(placeholders, ","),
+		)
+
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("querying objects: %w", err)
+		}
+
+		for rows.Next() {
+			var digest []byte
+			if err := rows.Scan(&digest); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scanning object: %w", err)
+			}
+			result[hex.EncodeToString(digest)] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterating objects: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// InsertSegmentTx stores a new segment blob (standalone function).
+func InsertSegmentTx(tx *sql.Tx, checksum []byte, blob []byte) (int64, error) {
+	ts := cas.NowMs()
+	result, err := tx.Exec(
+		`INSERT INTO segments (ts, checksum, size, blob) VALUES (?, ?, ?, ?)`,
+		ts, checksum, len(blob), blob,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inserting segment: %w", err)
+	}
+	return result.LastInsertId()
+}
+
+// InsertObjectTx records an object's location within a segment (standalone function).
+func InsertObjectTx(tx *sql.Tx, digest []byte, segmentID, off, length int64, kind string) error {
+	ts := cas.NowMs()
+	_, err := tx.Exec(
+		`INSERT OR IGNORE INTO objects (digest, segment_id, off, len, kind, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		digest, segmentID, off, length, kind, ts,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting object: %w", err)
+	}
+	return nil
+}
+
+// GetObjectInfo retrieves object metadata by digest (standalone function).
+func GetObjectInfo(db *sql.DB, digest []byte) (*ObjectInfo, error) {
+	var info ObjectInfo
+	err := db.QueryRow(
+		`SELECT digest, segment_id, off, len, kind, created_at FROM objects WHERE digest = ?`,
+		digest,
+	).Scan(&info.Digest, &info.SegmentID, &info.Off, &info.Len, &info.Kind, &info.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying object: %w", err)
+	}
+	return &info, nil
+}
+
+// GetSegmentBlobByID retrieves a segment's blob by ID (standalone function).
+func GetSegmentBlobByID(db *sql.DB, segmentID int64) ([]byte, error) {
+	var blob []byte
+	err := db.QueryRow(
+		`SELECT blob FROM segments WHERE id = ?`, segmentID,
+	).Scan(&blob)
+	if err == sql.ErrNoRows {
+		return nil, ErrSegmentNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying segment: %w", err)
+	}
+	return blob, nil
+}
+
+// ReadObjectContentDB reads the actual content of an object (standalone function).
+func ReadObjectContentDB(db *sql.DB, digest []byte) ([]byte, error) {
+	info, err := GetObjectInfo(db, digest)
+	if err != nil {
+		return nil, err
+	}
+
+	blob, err := GetSegmentBlobByID(db, info.SegmentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.Off+info.Len > int64(len(blob)) {
+		return nil, fmt.Errorf("object extends beyond segment bounds")
+	}
+
+	return blob[info.Off : info.Off+info.Len], nil
+}
+
+// ListRefs returns all refs, optionally filtered by prefix (standalone function).
+func ListRefs(db *sql.DB, prefix string) ([]*Ref, error) {
+	var rows *sql.Rows
+	var err error
+	if prefix == "" {
+		rows, err = db.Query(
+			`SELECT name, target, updated_at, actor, push_id FROM refs ORDER BY name`,
+		)
+	} else {
+		rows, err = db.Query(
+			`SELECT name, target, updated_at, actor, push_id FROM refs WHERE name LIKE ? ORDER BY name`,
+			prefix+"%",
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying refs: %w", err)
+	}
+	defer rows.Close()
+
+	var refs []*Ref
+	for rows.Next() {
+		var ref Ref
+		if err := rows.Scan(&ref.Name, &ref.Target, &ref.UpdatedAt, &ref.Actor, &ref.PushID); err != nil {
+			return nil, fmt.Errorf("scanning ref: %w", err)
+		}
+		refs = append(refs, &ref)
+	}
+	return refs, rows.Err()
+}
+
+// GetRef retrieves a ref by name (standalone function).
+func GetRef(db *sql.DB, name string) (*Ref, error) {
+	var ref Ref
+	err := db.QueryRow(
+		`SELECT name, target, updated_at, actor, push_id FROM refs WHERE name = ?`,
+		name,
+	).Scan(&ref.Name, &ref.Target, &ref.UpdatedAt, &ref.Actor, &ref.PushID)
+	if err == sql.ErrNoRows {
+		return nil, ErrRefNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying ref: %w", err)
+	}
+	return &ref, nil
+}
+
+// SetRefFF updates a ref with fast-forward check (standalone function).
+func SetRefFF(db *sql.DB, tx *sql.Tx, name string, old, new []byte, actor, pushID string) error {
+	ts := cas.NowMs()
+
+	// Get current value
+	var currentTarget []byte
+	err := tx.QueryRow(`SELECT target FROM refs WHERE name = ?`, name).Scan(&currentTarget)
+	if err == sql.ErrNoRows {
+		currentTarget = nil
+	} else if err != nil {
+		return fmt.Errorf("checking current ref: %w", err)
+	}
+
+	// Verify fast-forward
+	if old == nil && currentTarget != nil {
+		return ErrRefMismatch
+	}
+	if old != nil {
+		if currentTarget == nil {
+			return ErrRefMismatch
+		}
+		if !bytesEqual(old, currentTarget) {
+			return ErrRefMismatch
+		}
+	}
+
+	// Get the last ref_history entry for this ref to chain
+	var parentID []byte
+	err = tx.QueryRow(
+		`SELECT id FROM ref_history WHERE ref = ? ORDER BY seq DESC LIMIT 1`,
+		name,
+	).Scan(&parentID)
+	if err == sql.ErrNoRows {
+		parentID = nil
+	} else if err != nil {
+		return fmt.Errorf("getting parent history: %w", err)
+	}
+
+	// Upsert ref
+	_, err = tx.Exec(
+		`INSERT INTO refs (name, target, updated_at, actor, push_id)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET target=excluded.target, updated_at=excluded.updated_at, actor=excluded.actor, push_id=excluded.push_id`,
+		name, new, ts, actor, pushID,
+	)
+	if err != nil {
+		return fmt.Errorf("upserting ref: %w", err)
+	}
+
+	// Append to ref_history
+	historyEntry := map[string]interface{}{
+		"time":   ts,
+		"actor":  actor,
+		"ref":    name,
+		"old":    hex.EncodeToString(old),
+		"new":    hex.EncodeToString(new),
+		"pushId": pushID,
+	}
+	if parentID != nil {
+		historyEntry["parent"] = hex.EncodeToString(parentID)
+	}
+
+	entryJSON, err := json.Marshal(historyEntry)
+	if err != nil {
+		return fmt.Errorf("marshaling history entry: %w", err)
+	}
+	entryID := cas.Blake3Hash(entryJSON)
+
+	_, err = tx.Exec(
+		`INSERT INTO ref_history (id, parent, time, actor, ref, old, new, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entryID, parentID, ts, actor, name, old, new, string(entryJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting ref history: %w", err)
+	}
+
+	return nil
+}
+
+// ForceSetRef updates a ref without fast-forward check (standalone function).
+func ForceSetRef(db *sql.DB, tx *sql.Tx, name string, new []byte, actor, pushID string) error {
+	ts := cas.NowMs()
+
+	// Get current target for history
+	var currentTarget []byte
+	err := tx.QueryRow(`SELECT target FROM refs WHERE name = ?`, name).Scan(&currentTarget)
+	if err == sql.ErrNoRows {
+		currentTarget = nil
+	} else if err != nil {
+		return fmt.Errorf("checking current ref: %w", err)
+	}
+
+	// Get the last ref_history entry to chain
+	var parentID []byte
+	err = tx.QueryRow(
+		`SELECT id FROM ref_history WHERE ref = ? ORDER BY seq DESC LIMIT 1`,
+		name,
+	).Scan(&parentID)
+	if err == sql.ErrNoRows {
+		parentID = nil
+	} else if err != nil {
+		return fmt.Errorf("getting parent history: %w", err)
+	}
+
+	// Upsert ref
+	_, err = tx.Exec(
+		`INSERT INTO refs (name, target, updated_at, actor, push_id)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET target=excluded.target, updated_at=excluded.updated_at, actor=excluded.actor, push_id=excluded.push_id`,
+		name, new, ts, actor, pushID,
+	)
+	if err != nil {
+		return fmt.Errorf("upserting ref: %w", err)
+	}
+
+	// Append to ref_history (marked as force)
+	historyEntry := map[string]interface{}{
+		"time":   ts,
+		"actor":  actor,
+		"ref":    name,
+		"old":    hex.EncodeToString(currentTarget),
+		"new":    hex.EncodeToString(new),
+		"pushId": pushID,
+		"force":  true,
+	}
+	if parentID != nil {
+		historyEntry["parent"] = hex.EncodeToString(parentID)
+	}
+
+	entryJSON, err := json.Marshal(historyEntry)
+	if err != nil {
+		return fmt.Errorf("marshaling history entry: %w", err)
+	}
+	entryID := cas.Blake3Hash(entryJSON)
+
+	_, err = tx.Exec(
+		`INSERT INTO ref_history (id, parent, time, actor, ref, old, new, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entryID, parentID, ts, actor, name, currentTarget, new, string(entryJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting ref history: %w", err)
+	}
+
+	return nil
+}
+
+// GetRefHistory retrieves ref history entries (standalone function).
+func GetRefHistory(db *sql.DB, refFilter string, afterSeq int64, limit int) ([]*RefHistoryEntry, error) {
+	var rows *sql.Rows
+	var err error
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	if refFilter == "" {
+		rows, err = db.Query(
+			`SELECT seq, id, parent, time, actor, ref, old, new, meta
+			 FROM ref_history WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
+			afterSeq, limit,
+		)
+	} else {
+		rows, err = db.Query(
+			`SELECT seq, id, parent, time, actor, ref, old, new, meta
+			 FROM ref_history WHERE ref = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+			refFilter, afterSeq, limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying ref history: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []*RefHistoryEntry
+	for rows.Next() {
+		var e RefHistoryEntry
+		if err := rows.Scan(&e.Seq, &e.ID, &e.Parent, &e.Time, &e.Actor, &e.Ref, &e.Old, &e.New, &e.Meta); err != nil {
+			return nil, fmt.Errorf("scanning ref history: %w", err)
+		}
+		entries = append(entries, &e)
+	}
+	return entries, rows.Err()
+}
+
+// GetLogHead returns the ID of the most recent ref_history entry (standalone function).
+func GetLogHead(db *sql.DB) ([]byte, error) {
+	var id []byte
+	err := db.QueryRow(
+		`SELECT id FROM ref_history ORDER BY seq DESC LIMIT 1`,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying log head: %w", err)
+	}
+	return id, nil
+}
+
+// EnqueueForEnrichmentTx adds a node to the enrichment queue (standalone function).
+func EnqueueForEnrichmentTx(tx *sql.Tx, nodeID []byte, kind string) error {
+	ts := cas.NowMs()
+	_, err := tx.Exec(
+		`INSERT INTO enrich_queue (node_id, kind, status, created_at) VALUES (?, ?, 'pending', ?)`,
+		nodeID, kind, ts,
+	)
+	if err != nil {
+		return fmt.Errorf("enqueueing for enrichment: %w", err)
+	}
+	return nil
+}

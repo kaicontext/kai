@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config holds server configuration.
@@ -12,9 +13,9 @@ type Config struct {
 	Listen string
 	// DataDir is the root directory for database files.
 	DataDir string
-	// Tenant is the tenant/org identifier.
+	// Tenant is the tenant/org identifier (legacy, for single-repo mode).
 	Tenant string
-	// Repo is the repository name.
+	// Repo is the repository name (legacy, for single-repo mode).
 	Repo string
 	// MaxPackSize is the maximum allowed pack size in bytes.
 	MaxPackSize int64
@@ -22,18 +23,24 @@ type Config struct {
 	Version string
 	// Debug enables debug logging.
 	Debug bool
+	// MaxOpenRepos is the maximum number of repos to keep open (LRU cache size).
+	MaxOpenRepos int
+	// IdleTTL is how long to keep idle repos open before closing.
+	IdleTTL time.Duration
 }
 
 // FromEnv creates a Config from environment variables.
 func FromEnv() *Config {
 	cfg := &Config{
-		Listen:      getEnv("KAILAB_LISTEN", ":7447"),
-		DataDir:     getEnv("KAILAB_DATA", ".kailab"),
-		Tenant:      getEnv("KAILAB_TENANT", "default"),
-		Repo:        getEnv("KAILAB_REPO", "main"),
-		MaxPackSize: getEnvInt64("KAILAB_MAX_PACK_SIZE", 100*1024*1024), // 100MB default
-		Version:     getEnv("KAILAB_VERSION", "0.1.0"),
-		Debug:       getEnvBool("KAILAB_DEBUG", false),
+		Listen:       getEnv("KAILAB_LISTEN", ":7447"),
+		DataDir:      getEnv("KAILAB_DATA", "./data"),
+		Tenant:       getEnv("KAILAB_TENANT", "default"),
+		Repo:         getEnv("KAILAB_REPO", "main"),
+		MaxPackSize:  getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
+		Version:      getEnv("KAILAB_VERSION", "0.1.0"),
+		Debug:        getEnvBool("KAILAB_DEBUG", false),
+		MaxOpenRepos: getEnvInt("KAILAB_MAX_OPEN", 256),
+		IdleTTL:      getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
 	}
 	return cfg
 }
@@ -76,6 +83,24 @@ func getEnvBool(key string, defaultVal bool) bool {
 	if val := os.Getenv(key); val != "" {
 		if b, err := strconv.ParseBool(val); err == nil {
 			return b
+		}
+	}
+	return defaultVal
+}
+
+func getEnvInt(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
+
+func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	if val := os.Getenv(key); val != "" {
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
 		}
 	}
 	return defaultVal

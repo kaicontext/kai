@@ -12,46 +12,48 @@ import (
 	"time"
 
 	"kailab/api"
-	"kailab/background"
 	"kailab/config"
-	"kailab/store"
+	"kailab/repo"
 )
 
 func main() {
 	// Parse flags
 	listen := flag.String("listen", "", "Address to listen on (default: :7447)")
-	dataDir := flag.String("data", "", "Data directory (default: .kailab)")
-	tenant := flag.String("tenant", "", "Tenant/org name (default: default)")
-	repo := flag.String("repo", "", "Repository name (default: main)")
+	dataDir := flag.String("data", "", "Data directory (default: ./data)")
 	flag.Parse()
 
 	// Load config (flags override env)
-	cfg := config.FromArgs(*listen, *dataDir, *tenant, *repo)
+	cfg := config.FromEnv()
+	if *listen != "" {
+		cfg.Listen = *listen
+	}
+	if *dataDir != "" {
+		cfg.DataDir = *dataDir
+	}
 
 	log.Printf("kailabd starting...")
-	log.Printf("  listen:  %s", cfg.Listen)
-	log.Printf("  data:    %s", cfg.DataDir)
-	log.Printf("  tenant:  %s", cfg.Tenant)
-	log.Printf("  repo:    %s", cfg.Repo)
-	log.Printf("  version: %s", cfg.Version)
+	log.Printf("  listen:       %s", cfg.Listen)
+	log.Printf("  data:         %s", cfg.DataDir)
+	log.Printf("  max_open:     %d", cfg.MaxOpenRepos)
+	log.Printf("  idle_ttl:     %s", cfg.IdleTTL)
+	log.Printf("  max_pack:     %d MB", cfg.MaxPackSize/(1024*1024))
+	log.Printf("  version:      %s", cfg.Version)
 
-	// Open database
-	db, err := store.OpenRepoDB(cfg.DataDir, cfg.Tenant, cfg.Repo)
-	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+	// Create data directory if needed
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		log.Fatalf("failed to create data directory: %v", err)
 	}
-	defer db.Close()
 
-	// Start background enricher
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	enricher := background.NewEnricher(db)
-	enricher.Start(ctx)
-	defer enricher.Stop()
+	// Create repo registry
+	registry := repo.NewRegistry(repo.RegistryConfig{
+		DataDir: cfg.DataDir,
+		MaxOpen: cfg.MaxOpenRepos,
+		IdleTTL: cfg.IdleTTL,
+	})
+	defer registry.Close()
 
 	// Create HTTP server
-	mux := api.NewRouter(db, cfg)
+	mux := api.NewRouter(registry, cfg)
 	handler := api.WithDefaults(mux)
 
 	srv := &http.Server{
@@ -84,6 +86,8 @@ func main() {
 
 	// Start server
 	log.Printf("kailabd listening on %s", cfg.Listen)
+	log.Printf("Multi-repo mode: routes are /{tenant}/{repo}/v1/...")
+	log.Printf("Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/{tenant}/{repo}")
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}

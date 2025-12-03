@@ -20,19 +20,30 @@ import (
 // Client communicates with a Kailab server.
 type Client struct {
 	BaseURL    string
+	Tenant     string
+	Repo       string
 	HTTPClient *http.Client
 	Actor      string
 }
 
 // NewClient creates a new Kailab client.
-func NewClient(baseURL string) *Client {
+// baseURL should be the server base (e.g., http://localhost:7447)
+// tenant and repo specify the repository to operate on.
+func NewClient(baseURL, tenant, repo string) *Client {
 	return &Client{
 		BaseURL: baseURL,
+		Tenant:  tenant,
+		Repo:    repo,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
 		Actor: os.Getenv("USER"),
 	}
+}
+
+// repoPath returns the path prefix for repo-scoped endpoints.
+func (c *Client) repoPath() string {
+	return "/" + c.Tenant + "/" + c.Repo
 }
 
 // --- Wire types (matching kailab/proto/wire.go) ---
@@ -121,7 +132,7 @@ func (c *Client) Negotiate(digests [][]byte) ([][]byte, error) {
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	resp, err := c.post("/v1/push/negotiate", body)
+	resp, err := c.post(c.repoPath()+"/v1/push/negotiate", body)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +157,7 @@ func (c *Client) PushPack(objects []PackObject) (*PackIngestResponse, error) {
 		return nil, fmt.Errorf("building pack: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.BaseURL+"/v1/objects/pack", bytes.NewReader(pack))
+	req, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/objects/pack", bytes.NewReader(pack))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -179,7 +190,7 @@ func (c *Client) UpdateRef(name string, old, new []byte, force bool) (*RefUpdate
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("PUT", c.BaseURL+"/v1/refs/"+name, bytes.NewReader(body))
+	httpReq, err := http.NewRequest("PUT", c.BaseURL+c.repoPath()+"/v1/refs/"+name, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -209,7 +220,7 @@ func (c *Client) UpdateRef(name string, old, new []byte, force bool) (*RefUpdate
 
 // GetRef retrieves a single ref.
 func (c *Client) GetRef(name string) (*RefEntry, error) {
-	resp, err := c.get("/v1/refs/" + name)
+	resp, err := c.get(c.repoPath() + "/v1/refs/" + name)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +243,7 @@ func (c *Client) GetRef(name string) (*RefEntry, error) {
 
 // ListRefs lists refs, optionally filtered by prefix.
 func (c *Client) ListRefs(prefix string) ([]*RefEntry, error) {
-	url := "/v1/refs"
+	url := c.repoPath() + "/v1/refs"
 	if prefix != "" {
 		url += "?prefix=" + prefix
 	}
@@ -258,7 +269,7 @@ func (c *Client) ListRefs(prefix string) ([]*RefEntry, error) {
 // GetObject retrieves a single object by digest.
 func (c *Client) GetObject(digest []byte) ([]byte, string, error) {
 	digestHex := hex.EncodeToString(digest)
-	resp, err := c.get("/v1/objects/" + digestHex)
+	resp, err := c.get(c.repoPath() + "/v1/objects/" + digestHex)
 	if err != nil {
 		return nil, "", err
 	}
@@ -282,7 +293,7 @@ func (c *Client) GetObject(digest []byte) ([]byte, string, error) {
 
 // GetLogHead returns the current log head.
 func (c *Client) GetLogHead() ([]byte, error) {
-	resp, err := c.get("/v1/log/head")
+	resp, err := c.get(c.repoPath() + "/v1/log/head")
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +313,7 @@ func (c *Client) GetLogHead() ([]byte, error) {
 
 // GetLogEntries retrieves log entries.
 func (c *Client) GetLogEntries(refFilter string, afterSeq, limit int) ([]*LogEntry, error) {
-	url := fmt.Sprintf("/v1/log/entries?after=%d&limit=%d", afterSeq, limit)
+	url := fmt.Sprintf(c.repoPath()+"/v1/log/entries?after=%d&limit=%d", afterSeq, limit)
 	if refFilter != "" {
 		url += "&ref=" + refFilter
 	}
@@ -431,9 +442,16 @@ func BuildPack(objects []PackObject) ([]byte, error) {
 
 // --- Config ---
 
+// RemoteEntry holds configuration for a single remote.
+type RemoteEntry struct {
+	URL    string `json:"url"`
+	Tenant string `json:"tenant"`
+	Repo   string `json:"repo"`
+}
+
 // Config holds remote configuration.
 type Config struct {
-	Remotes map[string]string `json:"remotes"` // name -> URL
+	Remotes map[string]*RemoteEntry `json:"remotes"` // name -> entry
 }
 
 // ConfigPath returns the path to the remote config file.
@@ -447,7 +465,7 @@ func LoadConfig() (*Config, error) {
 	path := ConfigPath()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return &Config{Remotes: make(map[string]string)}, nil
+		return &Config{Remotes: make(map[string]*RemoteEntry)}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
@@ -458,7 +476,7 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if cfg.Remotes == nil {
-		cfg.Remotes = make(map[string]string)
+		cfg.Remotes = make(map[string]*RemoteEntry)
 	}
 	return &cfg, nil
 }
@@ -482,29 +500,80 @@ func SaveConfig(cfg *Config) error {
 	return nil
 }
 
-// GetRemoteURL gets the URL for a named remote.
-func GetRemoteURL(name string) (string, error) {
+// GetRemote gets the entry for a named remote.
+func GetRemote(name string) (*RemoteEntry, error) {
 	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	entry, ok := cfg.Remotes[name]
+	if !ok {
+		return nil, fmt.Errorf("remote %q not configured", name)
+	}
+	return entry, nil
+}
+
+// GetRemoteURL gets the URL for a named remote (backwards compatible).
+func GetRemoteURL(name string) (string, error) {
+	entry, err := GetRemote(name)
 	if err != nil {
 		return "", err
 	}
-
-	url, ok := cfg.Remotes[name]
-	if !ok {
-		return "", fmt.Errorf("remote %q not configured", name)
-	}
-	return url, nil
+	return entry.URL, nil
 }
 
-// SetRemoteURL sets the URL for a named remote.
-func SetRemoteURL(name, url string) error {
+// SetRemote sets the entry for a named remote.
+func SetRemote(name string, entry *RemoteEntry) error {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return err
 	}
 
-	cfg.Remotes[name] = url
+	cfg.Remotes[name] = entry
 	return SaveConfig(cfg)
+}
+
+// SetRemoteURL sets the URL for a named remote with default tenant/repo.
+func SetRemoteURL(name, url string) error {
+	return SetRemote(name, &RemoteEntry{
+		URL:    url,
+		Tenant: "default",
+		Repo:   "main",
+	})
+}
+
+// NewClientForRemote creates a new client for a named remote.
+func NewClientForRemote(name string) (*Client, error) {
+	entry, err := GetRemote(name)
+	if err != nil {
+		return nil, err
+	}
+	return NewClient(entry.URL, entry.Tenant, entry.Repo), nil
+}
+
+// DeleteRemote deletes a named remote.
+func DeleteRemote(name string) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+
+	if _, ok := cfg.Remotes[name]; !ok {
+		return fmt.Errorf("remote %q not found", name)
+	}
+
+	delete(cfg.Remotes, name)
+	return SaveConfig(cfg)
+}
+
+// ListRemotes returns all configured remotes.
+func ListRemotes() (map[string]*RemoteEntry, error) {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Remotes, nil
 }
 
 // CollectObjects collects all objects reachable from a set of node IDs.

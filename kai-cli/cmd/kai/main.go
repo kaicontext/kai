@@ -323,6 +323,11 @@ Examples:
 var remoteSetCmd = &cobra.Command{
 	Use:   "set <name> <url>",
 	Short: "Set a remote URL",
+	Long: `Set a remote Kailab server URL with optional tenant and repo.
+
+Examples:
+  kai remote set origin http://localhost:7447
+  kai remote set origin http://localhost:7447 --tenant myorg --repo main`,
 	Args:  cobra.ExactArgs(2),
 	RunE:  runRemoteSet,
 }
@@ -431,6 +436,10 @@ var (
 	pushAll       bool
 	remoteLogRef  string
 	remoteLogLimit int
+
+	// Remote set flags
+	remoteTenant  string
+	remoteRepo    string
 )
 
 func init() {
@@ -499,6 +508,10 @@ func init() {
 	pushCmd.Flags().BoolVar(&pushAll, "all", false, "Push all refs")
 	remoteLogCmd.Flags().StringVar(&remoteLogRef, "ref", "", "Filter by ref name")
 	remoteLogCmd.Flags().IntVarP(&remoteLogLimit, "limit", "n", 20, "Number of entries to show")
+
+	// Remote set flags
+	remoteSetCmd.Flags().StringVar(&remoteTenant, "tenant", "default", "Tenant/org name for the remote")
+	remoteSetCmd.Flags().StringVar(&remoteRepo, "repo", "main", "Repository name for the remote")
 
 	// Add remote subcommands
 	remoteCmd.AddCommand(remoteSetCmd)
@@ -2148,42 +2161,50 @@ func runRemoteSet(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	url := args[1]
 
-	if err := remote.SetRemoteURL(name, url); err != nil {
+	entry := &remote.RemoteEntry{
+		URL:    url,
+		Tenant: remoteTenant,
+		Repo:   remoteRepo,
+	}
+
+	if err := remote.SetRemote(name, entry); err != nil {
 		return fmt.Errorf("setting remote: %w", err)
 	}
 
-	fmt.Printf("Remote '%s' set to: %s\n", name, url)
+	fmt.Printf("Remote '%s' set to: %s (tenant=%s, repo=%s)\n", name, url, remoteTenant, remoteRepo)
 	return nil
 }
 
 func runRemoteGet(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	url, err := remote.GetRemoteURL(name)
+	entry, err := remote.GetRemote(name)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(url)
+	fmt.Printf("URL:    %s\n", entry.URL)
+	fmt.Printf("Tenant: %s\n", entry.Tenant)
+	fmt.Printf("Repo:   %s\n", entry.Repo)
 	return nil
 }
 
 func runRemoteList(cmd *cobra.Command, args []string) error {
-	cfg, err := remote.LoadConfig()
+	remotes, err := remote.ListRemotes()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return fmt.Errorf("loading remotes: %w", err)
 	}
 
-	if len(cfg.Remotes) == 0 {
+	if len(remotes) == 0 {
 		fmt.Println("No remotes configured.")
 		fmt.Println("Use 'kai remote set <name> <url>' to add a remote.")
 		return nil
 	}
 
-	fmt.Printf("%-20s  %s\n", "NAME", "URL")
-	fmt.Println(strings.Repeat("-", 60))
-	for name, url := range cfg.Remotes {
-		fmt.Printf("%-20s  %s\n", name, url)
+	fmt.Printf("%-15s  %-12s  %-12s  %s\n", "NAME", "TENANT", "REPO", "URL")
+	fmt.Println(strings.Repeat("-", 80))
+	for name, entry := range remotes {
+		fmt.Printf("%-15s  %-12s  %-12s  %s\n", name, entry.Tenant, entry.Repo, entry.URL)
 	}
 
 	return nil
@@ -2192,18 +2213,8 @@ func runRemoteList(cmd *cobra.Command, args []string) error {
 func runRemoteDel(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	cfg, err := remote.LoadConfig()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	if _, ok := cfg.Remotes[name]; !ok {
-		return fmt.Errorf("remote '%s' not found", name)
-	}
-
-	delete(cfg.Remotes, name)
-	if err := remote.SaveConfig(cfg); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	if err := remote.DeleteRemote(name); err != nil {
+		return fmt.Errorf("deleting remote: %w", err)
 	}
 
 	fmt.Printf("Deleted remote '%s'\n", name)
@@ -2223,7 +2234,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	if len(args) > 0 {
 		// Check if first arg is a remote name
-		if _, err := remote.GetRemoteURL(args[0]); err == nil {
+		if _, err := remote.GetRemote(args[0]); err == nil {
 			remoteName = args[0]
 			refsToPush = args[1:]
 		} else {
@@ -2232,17 +2243,15 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Get remote URL
-	remoteURL, err := remote.GetRemoteURL(remoteName)
+	// Create client for remote
+	client, err := remote.NewClientForRemote(remoteName)
 	if err != nil {
 		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
 	}
 
-	client := remote.NewClient(remoteURL)
-
 	// Check server health
 	if err := client.Health(); err != nil {
-		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
 	}
 
 	// Get refs to push
@@ -2293,7 +2302,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Pushing to %s (%s)...\n", remoteName, remoteURL)
+	fmt.Printf("Pushing to %s (%s)...\n", remoteName, client.BaseURL)
 
 	// Negotiate
 	missing, err := client.Negotiate(allDigests)
@@ -2380,7 +2389,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	if len(args) > 0 {
 		// Check if first arg is a remote name
-		if _, err := remote.GetRemoteURL(args[0]); err == nil {
+		if _, err := remote.GetRemote(args[0]); err == nil {
 			remoteName = args[0]
 			refsToFetch = args[1:]
 		} else {
@@ -2389,20 +2398,18 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Get remote URL
-	remoteURL, err := remote.GetRemoteURL(remoteName)
+	// Create client for remote
+	client, err := remote.NewClientForRemote(remoteName)
 	if err != nil {
 		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
 	}
 
-	client := remote.NewClient(remoteURL)
-
 	// Check server health
 	if err := client.Health(); err != nil {
-		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
 	}
 
-	fmt.Printf("Fetching from %s (%s)...\n", remoteName, remoteURL)
+	fmt.Printf("Fetching from %s (%s)...\n", remoteName, client.BaseURL)
 
 	// Get refs from remote
 	var remoteRefs []*remote.RefEntry
@@ -2504,17 +2511,15 @@ func runRemoteLog(cmd *cobra.Command, args []string) error {
 		remoteName = args[0]
 	}
 
-	// Get remote URL
-	remoteURL, err := remote.GetRemoteURL(remoteName)
+	// Create client for remote
+	client, err := remote.NewClientForRemote(remoteName)
 	if err != nil {
 		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
 	}
 
-	client := remote.NewClient(remoteURL)
-
 	// Check server health
 	if err := client.Health(); err != nil {
-		return fmt.Errorf("cannot connect to %s: %w", remoteURL, err)
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
 	}
 
 	// Get log entries
@@ -2531,7 +2536,7 @@ func runRemoteLog(cmd *cobra.Command, args []string) error {
 	// Get current head
 	head, _ := client.GetLogHead()
 
-	fmt.Printf("Remote log from %s (%s)\n", remoteName, remoteURL)
+	fmt.Printf("Remote log from %s (%s)\n", remoteName, client.BaseURL)
 	if head != nil {
 		fmt.Printf("Head: %s\n", hex.EncodeToString(head)[:16])
 	}
