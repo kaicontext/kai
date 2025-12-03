@@ -185,11 +185,62 @@ func (ds *DirectorySource) computeIdentifier() {
 func detectLang(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
+	// JavaScript/TypeScript
 	case ".ts", ".tsx":
 		return "ts"
-	case ".js", ".jsx":
+	case ".js", ".jsx", ".mjs", ".cjs":
 		return "js"
+	// Structured data
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".xml":
+		return "xml"
+	// Documentation
+	case ".md", ".markdown":
+		return "markdown"
+	case ".txt", ".text":
+		return "text"
+	// Config
+	case ".ini", ".cfg", ".conf":
+		return "ini"
+	case ".env":
+		return "env"
+	// Other code (tracked but no semantic analysis yet)
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".rb":
+		return "ruby"
+	case ".rs":
+		return "rust"
+	case ".java":
+		return "java"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".hpp", ".cc", ".cxx":
+		return "cpp"
+	case ".cs":
+		return "csharp"
+	case ".php":
+		return "php"
+	case ".swift":
+		return "swift"
+	case ".kt", ".kts":
+		return "kotlin"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".sql":
+		return "sql"
+	case ".html", ".htm":
+		return "html"
+	case ".css", ".scss", ".sass", ".less":
+		return "css"
 	default:
-		return ""
+		return "blob"
 	}
 }

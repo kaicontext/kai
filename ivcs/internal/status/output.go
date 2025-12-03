@@ -25,6 +25,7 @@ const (
 type JSONOutput struct {
 	Baseline    string          `json:"baseline"`
 	BaselineRef string          `json:"baselineRef,omitempty"`
+	NoBaseline  bool            `json:"noBaseline,omitempty"`
 	Added       []string        `json:"added"`
 	Modified    []string        `json:"modified"`
 	Deleted     []string        `json:"deleted"`
@@ -83,6 +84,7 @@ func writeJSONWithSemantic(w io.Writer, result *Result, semantic *SemanticResult
 	output := JSONOutput{
 		Baseline:    util.BytesToHex(result.BaselineID),
 		BaselineRef: result.BaselineRef,
+		NoBaseline:  result.NoBaseline,
 		Added:       result.Added,
 		Modified:    result.Modified,
 		Deleted:     result.Deleted,
@@ -125,6 +127,19 @@ func writeJSONWithSemantic(w io.Writer, result *Result, semantic *SemanticResult
 
 // writeDefaultWithSemantic outputs grouped status with counts and optional semantic info.
 func writeDefaultWithSemantic(w io.Writer, result *Result, semantic *SemanticResult) error {
+	// Handle no-baseline case (like git status before first commit)
+	if result.NoBaseline {
+		if len(result.Added) == 0 {
+			fmt.Fprintln(w, "No files to capture")
+			return nil
+		}
+		fmt.Fprintf(w, "Files to be captured (%d):\n", len(result.Added))
+		for _, path := range result.Added {
+			fmt.Fprintf(w, "  + %s\n", path)
+		}
+		return nil
+	}
+
 	if !result.HasChanges() {
 		fmt.Fprintln(w, "No changes since baseline")
 		return nil

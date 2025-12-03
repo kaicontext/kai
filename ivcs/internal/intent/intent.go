@@ -39,10 +39,13 @@ func (g *Generator) GenerateIntent(changeSetID []byte, changeTypes []*classify.C
 
 // determineVerb determines the verb based on change types.
 func determineVerb(changeTypes []*classify.ChangeType) string {
-	// Priority order: API_SURFACE_CHANGED, CONDITION_CHANGED, CONSTANT_UPDATED
+	// Priority order for semantic changes
 	hasAPI := false
 	hasCondition := false
 	hasConstant := false
+	hasJSONField := false
+	hasJSONValue := false
+	hasFileContent := false
 
 	for _, ct := range changeTypes {
 		switch ct.Category {
@@ -52,9 +55,20 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 			hasCondition = true
 		case classify.ConstantUpdated:
 			hasConstant = true
+		case classify.JSONFieldAdded, classify.JSONFieldRemoved:
+			hasJSONField = true
+		case classify.JSONValueChanged, classify.JSONArrayChanged:
+			hasJSONValue = true
+		case classify.FileContentChanged:
+			hasFileContent = true
+		case classify.FileAdded:
+			return "Add"
+		case classify.FileDeleted:
+			return "Remove"
 		}
 	}
 
+	// Semantic code changes take priority
 	if hasAPI {
 		return "Update"
 	}
@@ -62,6 +76,17 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 		return "Modify"
 	}
 	if hasConstant {
+		return "Update"
+	}
+	// JSON changes
+	if hasJSONField {
+		return "Update"
+	}
+	if hasJSONValue {
+		return "Modify"
+	}
+	// File-level fallback
+	if hasFileContent {
 		return "Update"
 	}
 
@@ -300,13 +325,29 @@ func (g *Generator) UpdateChangeSetIntent(changeSetID []byte, intent string) err
 }
 
 // RenderIntent renders the intent for a changeset.
-func (g *Generator) RenderIntent(changeSetID []byte, editText string) (string, error) {
+// If editText is provided, it saves that text.
+// If regenerate is true, it regenerates even if intent exists.
+// Otherwise, returns existing intent or generates if none exists.
+func (g *Generator) RenderIntent(changeSetID []byte, editText string, regenerate bool) (string, error) {
 	if editText != "" {
-		// Use provided text
+		// Use provided text and persist it
 		if err := g.UpdateChangeSetIntent(changeSetID, editText); err != nil {
 			return "", err
 		}
 		return editText, nil
+	}
+
+	// Check if there's already a saved intent (unless regenerating)
+	if !regenerate {
+		node, err := g.db.GetNode(changeSetID)
+		if err != nil {
+			return "", err
+		}
+		if node != nil {
+			if existingIntent, ok := node.Payload["intent"].(string); ok && existingIntent != "" {
+				return existingIntent, nil
+			}
+		}
 	}
 
 	// Generate from data

@@ -21,6 +21,9 @@ type Result struct {
 	Added       []string
 	Modified    []string
 	Deleted     []string
+	// NoBaseline is true when there's no snapshot to compare against.
+	// In this case, Added contains all files that would be captured.
+	NoBaseline bool
 }
 
 // Options configures status computation.
@@ -40,14 +43,33 @@ func Compute(db *graph.DB, opts Options) (*Result, error) {
 		opts.CacheDir = opts.Dir
 	}
 
+	// Get current directory files first
+	currentSource, err := dirio.OpenDirectory(opts.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("opening directory: %w", err)
+	}
+
+	currentFiles, err := currentSource.GetFiles()
+	if err != nil {
+		return nil, fmt.Errorf("getting current files: %w", err)
+	}
+
 	// Resolve baseline
 	baselineID, baselineRef, err := resolveBaseline(db, opts.Against)
 	if err != nil {
 		return nil, err
 	}
 
+	// No baseline - show all files that would be captured
 	if baselineID == nil {
-		return nil, fmt.Errorf("no baseline snapshot found; create one with 'kai snapshot --dir %s'", opts.Dir)
+		result := &Result{
+			NoBaseline: true,
+		}
+		for _, f := range currentFiles {
+			result.Added = append(result.Added, f.Path)
+		}
+		sort.Strings(result.Added)
+		return result, nil
 	}
 
 	result := &Result{
@@ -65,17 +87,6 @@ func Compute(db *graph.DB, opts Options) (*Result, error) {
 		} else {
 			defer fileCache.Close()
 		}
-	}
-
-	// Get current directory files
-	currentSource, err := dirio.OpenDirectory(opts.Dir)
-	if err != nil {
-		return nil, fmt.Errorf("opening directory: %w", err)
-	}
-
-	currentFiles, err := currentSource.GetFiles()
-	if err != nil {
-		return nil, fmt.Errorf("getting current files: %w", err)
 	}
 
 	// Build map of current files by path -> digest

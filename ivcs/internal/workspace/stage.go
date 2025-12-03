@@ -31,7 +31,7 @@ type Conflict struct {
 }
 
 // Stage stages changes from a file source into a workspace.
-func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *module.Matcher) (*StageResult, error) {
+func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *module.Matcher, message string) (*StageResult, error) {
 	ws, err := m.Get(nameOrID)
 	if err != nil {
 		return nil, err
@@ -48,6 +48,18 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 	newSnapID, err := creator.CreateSnapshot(source)
 	if err != nil {
 		return nil, fmt.Errorf("creating snapshot from source: %w", err)
+	}
+
+	// Auto-analyze symbols for better intent generation
+	creator.AnalyzeSymbols(newSnapID) // Non-fatal if fails
+
+	// Add description to snapshot if message provided
+	if message != "" {
+		node, err := m.db.GetNode(newSnapID)
+		if err == nil && node != nil {
+			node.Payload["description"] = message
+			m.db.UpdateNodePayload(newSnapID, node.Payload)
+		}
 	}
 
 	// Get files from head snapshot and new snapshot
@@ -126,7 +138,7 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 		"base":        util.BytesToHex(ws.HeadSnapshot),
 		"head":        util.BytesToHex(newSnapID),
 		"title":       "",
-		"description": "",
+		"description": message,
 		"intent":      "",
 		"workspaceId": util.BytesToHex(ws.ID),
 		"createdAt":   util.NowMs(),
@@ -162,11 +174,34 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 			}
 		}
 
+		// Get the file's language
+		var lang string
+		if newFile != nil {
+			lang, _ = newFile.Payload["lang"].(string)
+		}
+
 		if len(beforeContent) > 0 && len(afterContent) > 0 && i < len(changedFileIDs) {
-			changes, err := detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
-			if err == nil {
+			var changes []*classify.ChangeType
+			var err error
+
+			switch lang {
+			case "json":
+				// Use JSON-specific detection
+				changes, err = classify.DetectJSONChanges(path, beforeContent, afterContent)
+			case "ts", "js":
+				// Use tree-sitter based detection
+				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
+			default:
+				// Non-parseable files get FILE_CONTENT_CHANGED
+				changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
+			}
+
+			if err == nil && len(changes) > 0 {
 				allChangeTypes = append(allChangeTypes, changes...)
 			}
+		} else if headFile == nil && len(afterContent) > 0 {
+			// New file added
+			allChangeTypes = append(allChangeTypes, classify.NewFileChange(classify.FileAdded, path))
 		}
 
 		// Create MODIFIES edge to file

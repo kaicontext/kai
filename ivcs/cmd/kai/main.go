@@ -129,6 +129,20 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+var diffCmd = &cobra.Command{
+	Use:   "diff <base-ref> [head-ref]",
+	Short: "Show differences between two snapshots",
+	Long: `Show file-level differences between two snapshots.
+
+If head-ref is omitted, compares base-ref against the working directory.
+
+Examples:
+  kai diff @snap:prev @snap:last   # Compare two snapshots
+  kai diff @snap:last              # Compare snapshot vs working directory`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: runDiff,
+}
+
 // Workspace commands
 var wsCmd = &cobra.Command{
 	Use:   "ws",
@@ -307,7 +321,8 @@ var (
 	logLimit       int
 	repoPath      string
 	dirPath       string
-	editText      string
+	editText       string
+	regenerateIntent bool
 	jsonFlag      bool
 	checkoutDir   string
 	checkoutClean bool
@@ -316,12 +331,25 @@ var (
 	refKindFilter string
 	pickFilter    string
 	pickNoUI      bool
+
+	// Changeset flags
+	changesetMessage string
+	wsStageMessage   string
+
+	// Diff flags
+	diffDir      string
+	diffNameOnly bool
+
+	// Snapshot flags
+	snapshotMessage string
 )
 
 func init() {
 	snapshotCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
 	snapshotCmd.Flags().StringVar(&dirPath, "dir", "", "Path to directory (creates snapshot without Git)")
+	snapshotCmd.Flags().StringVarP(&snapshotMessage, "message", "m", "", "Description for this snapshot")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
+	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 10, "Number of entries to show")
 	statusCmd.Flags().StringVar(&statusDir, "dir", ".", "Directory to check for changes")
@@ -329,6 +357,13 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
 	statusCmd.Flags().BoolVar(&statusSemantic, "semantic", false, "Include semantic change type analysis for modified files")
+
+	// Changeset command flags
+	changesetCreateCmd.Flags().StringVarP(&changesetMessage, "message", "m", "", "Changeset message describing the intent")
+
+	// Diff command flags
+	diffCmd.Flags().StringVar(&diffDir, "dir", ".", "Directory to compare against (when comparing snapshot vs working dir)")
+	diffCmd.Flags().BoolVar(&diffNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
 
 	// Workspace command flags
 	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (required)")
@@ -339,6 +374,7 @@ func init() {
 
 	wsStageCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	wsStageCmd.Flags().StringVar(&wsDir, "dir", ".", "Directory to stage from")
+	wsStageCmd.Flags().StringVarP(&wsStageMessage, "message", "m", "", "Message describing the staged changes")
 	wsStageCmd.MarkFlagRequired("ws")
 
 	wsLogCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
@@ -409,6 +445,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(logCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
 	rootCmd.AddCommand(checkoutCmd)
@@ -604,6 +641,23 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
 
+	// Auto-analyze symbols for better intent generation
+	if err := creator.AnalyzeSymbols(snapshotID); err != nil {
+		// Non-fatal - continue without symbols
+		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed: %v\n", err)
+	}
+
+	// Add description if provided
+	if snapshotMessage != "" {
+		node, err := db.GetNode(snapshotID)
+		if err == nil && node != nil {
+			node.Payload["description"] = snapshotMessage
+			if err := db.UpdateNodePayload(snapshotID, node.Payload); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to save description: %v\n", err)
+			}
+		}
+	}
+
 	// Update auto-refs
 	autoRefMgr := ref.NewAutoRefManager(db)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
@@ -724,8 +778,9 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 		"base":        util.BytesToHex(baseSnapID),
 		"head":        util.BytesToHex(headSnapID),
 		"title":       "",
-		"description": "",
+		"description": changesetMessage,
 		"intent":      "",
+		"createdAt":   util.NowMs(),
 	}
 	changeSetID, err := db.InsertNode(tx, graph.KindChangeSet, changeSetPayload)
 	if err != nil {
@@ -766,11 +821,31 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// Get the file's language
+		lang, _ := headFile.Payload["lang"].(string)
+
 		if len(beforeContent) > 0 && len(afterContent) > 0 {
-			changes, err := detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
-			if err == nil {
+			var changes []*classify.ChangeType
+			var err error
+
+			switch lang {
+			case "json":
+				// Use JSON-specific detection
+				changes, err = classify.DetectJSONChanges(path, beforeContent, afterContent)
+			case "ts", "js":
+				// Use tree-sitter based detection
+				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
+			default:
+				// Non-parseable files get FILE_CONTENT_CHANGED
+				changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
+			}
+
+			if err == nil && len(changes) > 0 {
 				allChangeTypes = append(allChangeTypes, changes...)
 			}
+		} else if baseFile == nil && len(afterContent) > 0 {
+			// New file added
+			allChangeTypes = append(allChangeTypes, classify.NewFileChange(classify.FileAdded, path))
 		}
 
 		// Create MODIFIES edge to file
@@ -855,7 +930,7 @@ func runIntentRender(cmd *cobra.Command, args []string) error {
 	}
 
 	gen := intent.NewGenerator(db)
-	intentText, err := gen.RenderIntent(changeSetID, editText)
+	intentText, err := gen.RenderIntent(changeSetID, editText, regenerateIntent)
 	if err != nil {
 		return fmt.Errorf("rendering intent: %w", err)
 	}
@@ -1005,6 +1080,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	for _, node := range snapshots {
 		createdAt, _ := node.Payload["createdAt"].(float64)
+		description, _ := node.Payload["description"].(string)
 
 		// Get source info (support both old and new formats)
 		sourceType, _ := node.Payload["sourceType"].(string)
@@ -1021,11 +1097,17 @@ func runLog(cmd *cobra.Command, args []string) error {
 			fileCount = fmt.Sprintf("%.0f files", fc)
 		}
 
+		// Use description as summary if provided, otherwise show source info
+		summary := description
+		if summary == "" {
+			summary = fmt.Sprintf("%s (%s)", sourceRef, sourceType)
+		}
+
 		entries = append(entries, logEntry{
 			ID:        util.BytesToHex(node.ID),
 			Kind:      "snapshot",
 			CreatedAt: int64(createdAt),
-			Summary:   fmt.Sprintf("%s (%s)", sourceRef, sourceType),
+			Summary:   summary,
 			Details: map[string]string{
 				"files": fileCount,
 			},
@@ -1040,9 +1122,16 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	for _, node := range changesets {
 		createdAt, _ := node.Payload["createdAt"].(float64)
+		description, _ := node.Payload["description"].(string)
 		intentText, _ := node.Payload["intent"].(string)
-		if intentText == "" {
-			intentText = "(no intent)"
+
+		// Use description (user message) as summary, fall back to intent
+		summary := description
+		if summary == "" {
+			summary = intentText
+		}
+		if summary == "" {
+			summary = "(no message)"
 		}
 
 		base, _ := node.Payload["base"].(string)
@@ -1052,7 +1141,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 			ID:        util.BytesToHex(node.ID),
 			Kind:      "changeset",
 			CreatedAt: int64(createdAt),
-			Summary:   intentText,
+			Summary:   summary,
 			Details: map[string]string{
 				"base": base,
 				"head": head,
@@ -1147,15 +1236,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Changesets: %d\n", len(changesets))
 		fmt.Println()
 
-		if len(snapshots) == 0 {
-			fmt.Println("No snapshots yet. Create one with:")
-			fmt.Println("  kai snapshot --dir ./src")
-			fmt.Println("  kai snapshot <git-ref> --repo .")
-			return nil
+		if len(snapshots) > 0 {
+			fmt.Printf("Checking for changes in: %s\n", statusDir)
+			fmt.Println()
 		}
-
-		fmt.Printf("Checking for changes in: %s\n", statusDir)
-		fmt.Println()
 	}
 
 	// Compute status using the new status package
@@ -1199,8 +1283,147 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// For default format, add helpful suggestion if there are changes
 	if format == status.FormatDefault && result.HasChanges() {
 		fmt.Println()
-		fmt.Println("Create a new snapshot to capture these changes:")
+		if result.NoBaseline {
+			fmt.Println("Create your first snapshot with:")
+		} else {
+			fmt.Println("Create a new snapshot to capture these changes:")
+		}
 		fmt.Printf("  kai snapshot --dir %s\n", statusDir)
+	}
+
+	return nil
+}
+
+func runDiff(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Resolve base snapshot
+	baseSnapID, err := resolveSnapshotID(db, args[0])
+	if err != nil {
+		return fmt.Errorf("resolving base snapshot: %w", err)
+	}
+
+	creator := snapshot.NewCreator(db, nil)
+
+	// Get base snapshot files
+	baseFiles, err := creator.GetSnapshotFiles(baseSnapID)
+	if err != nil {
+		return fmt.Errorf("getting base files: %w", err)
+	}
+
+	baseFileMap := make(map[string]string) // path -> digest
+	for _, f := range baseFiles {
+		path, _ := f.Payload["path"].(string)
+		digest, _ := f.Payload["digest"].(string)
+		baseFileMap[path] = digest
+	}
+
+	var headFileMap map[string]string
+
+	if len(args) == 2 {
+		// Compare two snapshots
+		headSnapID, err := resolveSnapshotID(db, args[1])
+		if err != nil {
+			return fmt.Errorf("resolving head snapshot: %w", err)
+		}
+
+		headFiles, err := creator.GetSnapshotFiles(headSnapID)
+		if err != nil {
+			return fmt.Errorf("getting head files: %w", err)
+		}
+
+		headFileMap = make(map[string]string)
+		for _, f := range headFiles {
+			path, _ := f.Payload["path"].(string)
+			digest, _ := f.Payload["digest"].(string)
+			headFileMap[path] = digest
+		}
+
+		fmt.Printf("Diff: %s → %s\n\n", util.BytesToHex(baseSnapID)[:12], util.BytesToHex(headSnapID)[:12])
+	} else {
+		// Compare snapshot vs working directory
+		source, err := dirio.OpenDirectory(diffDir)
+		if err != nil {
+			return fmt.Errorf("opening directory: %w", err)
+		}
+
+		currentFiles, err := source.GetFiles()
+		if err != nil {
+			return fmt.Errorf("getting current files: %w", err)
+		}
+
+		headFileMap = make(map[string]string)
+		for _, f := range currentFiles {
+			headFileMap[f.Path] = util.Blake3HashHex(f.Content)
+		}
+
+		fmt.Printf("Diff: %s → working directory (%s)\n\n", util.BytesToHex(baseSnapID)[:12], diffDir)
+	}
+
+	// Compute differences
+	var added, modified, deleted []string
+
+	for path, headDigest := range headFileMap {
+		if baseDigest, exists := baseFileMap[path]; !exists {
+			added = append(added, path)
+		} else if headDigest != baseDigest {
+			modified = append(modified, path)
+		}
+	}
+
+	for path := range baseFileMap {
+		if _, exists := headFileMap[path]; !exists {
+			deleted = append(deleted, path)
+		}
+	}
+
+	sort.Strings(added)
+	sort.Strings(modified)
+	sort.Strings(deleted)
+
+	// Output
+	if len(added) == 0 && len(modified) == 0 && len(deleted) == 0 {
+		fmt.Println("No differences.")
+		return nil
+	}
+
+	if diffNameOnly {
+		for _, path := range added {
+			fmt.Printf("A %s\n", path)
+		}
+		for _, path := range modified {
+			fmt.Printf("M %s\n", path)
+		}
+		for _, path := range deleted {
+			fmt.Printf("D %s\n", path)
+		}
+	} else {
+		if len(added) > 0 {
+			fmt.Printf("Added (%d):\n", len(added))
+			for _, path := range added {
+				fmt.Printf("  + %s\n", path)
+			}
+			fmt.Println()
+		}
+
+		if len(modified) > 0 {
+			fmt.Printf("Modified (%d):\n", len(modified))
+			for _, path := range modified {
+				fmt.Printf("  ~ %s\n", path)
+			}
+			fmt.Println()
+		}
+
+		if len(deleted) > 0 {
+			fmt.Printf("Deleted (%d):\n", len(deleted))
+			for _, path := range deleted {
+				fmt.Printf("  - %s\n", path)
+			}
+		}
 	}
 
 	return nil
@@ -1293,7 +1516,7 @@ func runWsStage(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := workspace.NewManager(db)
-	result, err := mgr.Stage(wsName, source, matcher)
+	result, err := mgr.Stage(wsName, source, matcher, wsStageMessage)
 	if err != nil {
 		return fmt.Errorf("staging changes: %w", err)
 	}
@@ -1364,16 +1587,19 @@ func runWsLog(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Changesets (%d):\n", len(changesets))
 	for i, cs := range changesets {
+		description, _ := cs.Payload["description"].(string)
 		intent, _ := cs.Payload["intent"].(string)
-		if intent == "" {
-			intent = "(no intent)"
-		}
 		createdAt, _ := cs.Payload["createdAt"].(float64)
 		t := time.UnixMilli(int64(createdAt))
 
 		fmt.Printf("\n  [%d] %s\n", i+1, util.BytesToHex(cs.ID)[:12])
 		fmt.Printf("      Date:   %s\n", t.Format("2006-01-02 15:04:05"))
-		fmt.Printf("      Intent: %s\n", intent)
+		if description != "" {
+			fmt.Printf("      Message: %s\n", description)
+		}
+		if intent != "" {
+			fmt.Printf("      Intent: %s\n", intent)
+		}
 	}
 
 	return nil
@@ -1481,9 +1707,9 @@ func runCheckout(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolving target directory: %w", err)
 	}
 
-	// Verify target directory exists
-	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
-		return fmt.Errorf("target directory does not exist: %s", targetDir)
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
 	}
 
 	creator := snapshot.NewCreator(db, nil)

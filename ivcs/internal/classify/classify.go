@@ -15,9 +15,26 @@ import (
 type ChangeCategory string
 
 const (
-	ConditionChanged   ChangeCategory = "CONDITION_CHANGED"
-	ConstantUpdated    ChangeCategory = "CONSTANT_UPDATED"
-	APISurfaceChanged  ChangeCategory = "API_SURFACE_CHANGED"
+	// Code-level semantic changes (JS/TS)
+	ConditionChanged  ChangeCategory = "CONDITION_CHANGED"
+	ConstantUpdated   ChangeCategory = "CONSTANT_UPDATED"
+	APISurfaceChanged ChangeCategory = "API_SURFACE_CHANGED"
+
+	// File-level changes (fallback for non-parsed files)
+	FileContentChanged ChangeCategory = "FILE_CONTENT_CHANGED"
+	FileAdded          ChangeCategory = "FILE_ADDED"
+	FileDeleted        ChangeCategory = "FILE_DELETED"
+
+	// JSON-specific changes
+	JSONFieldAdded   ChangeCategory = "JSON_FIELD_ADDED"
+	JSONFieldRemoved ChangeCategory = "JSON_FIELD_REMOVED"
+	JSONValueChanged ChangeCategory = "JSON_VALUE_CHANGED"
+	JSONArrayChanged ChangeCategory = "JSON_ARRAY_CHANGED"
+
+	// YAML-specific changes (future)
+	YAMLKeyAdded   ChangeCategory = "YAML_KEY_ADDED"
+	YAMLKeyRemoved ChangeCategory = "YAML_KEY_REMOVED"
+	YAMLValueChanged ChangeCategory = "YAML_VALUE_CHANGED"
 )
 
 // FileRange represents a range in a file.
@@ -475,4 +492,29 @@ func GetCategoryPayload(ct *ChangeType) map[string]interface{} {
 			"symbols":    symbols,
 		},
 	}
+}
+
+// NewFileChange creates a file-level change type (for non-parsed files).
+func NewFileChange(category ChangeCategory, path string) *ChangeType {
+	return &ChangeType{
+		Category: category,
+		Evidence: Evidence{
+			FileRanges: []FileRange{{Path: path}},
+		},
+	}
+}
+
+// IsParseable returns true if the language supports semantic parsing.
+func IsParseable(lang string) bool {
+	switch lang {
+	case "ts", "js", "json":
+		return true
+	default:
+		return false
+	}
+}
+
+// DetectFileChange creates a FILE_CONTENT_CHANGED for non-parseable files.
+func (d *Detector) DetectFileChange(path string, lang string) *ChangeType {
+	return NewFileChange(FileContentChanged, path)
 }
