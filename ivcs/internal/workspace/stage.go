@@ -154,6 +154,15 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 	var affectedModules []string
 	affectedModulesSet := make(map[string]bool)
 
+	// Load symbols for each file to enable symbol mapping in change detection
+	for _, f := range newFiles {
+		fileIDHex := util.BytesToHex(f.ID)
+		symbols, err := creator.GetSymbolsInFile(f.ID, newSnapID)
+		if err == nil && len(symbols) > 0 {
+			detector.SetSymbols(fileIDHex, symbols)
+		}
+	}
+
 	for i, path := range changedPaths {
 		newFile := newFileMap[path]
 		headFile := headFileMap[path]

@@ -173,21 +173,62 @@ func getCommonArea(paths []string) string {
 }
 
 // GetSymbolsForChangeSet retrieves all symbols associated with a changeset.
+// Symbols are found by looking up symbols defined in the modified files.
 func (g *Generator) GetSymbolsForChangeSet(changeSetID []byte) ([]*graph.Node, error) {
-	// Get MODIFIES edges from changeset to symbols
+	// Get the changeset node to find the head snapshot
+	csNode, err := g.db.GetNode(changeSetID)
+	if err != nil {
+		return nil, err
+	}
+	if csNode == nil {
+		return nil, nil
+	}
+
+	// Get the head snapshot ID from the changeset
+	headHex, ok := csNode.Payload["head"].(string)
+	if !ok || headHex == "" {
+		return nil, nil
+	}
+	headSnapID, _ := util.HexToBytes(headHex)
+
+	// Get MODIFIES edges from changeset to files
 	edges, err := g.db.GetEdges(changeSetID, graph.EdgeModifies)
 	if err != nil {
 		return nil, err
 	}
 
 	var symbols []*graph.Node
+	seen := make(map[string]bool)
+
 	for _, edge := range edges {
-		node, err := g.db.GetNode(edge.Dst)
+		fileNode, err := g.db.GetNode(edge.Dst)
 		if err != nil {
 			return nil, err
 		}
-		if node != nil && node.Kind == graph.KindSymbol {
-			symbols = append(symbols, node)
+		if fileNode == nil || fileNode.Kind != graph.KindFile {
+			continue
+		}
+
+		// Get symbols defined in this file for this snapshot context
+		symEdges, err := g.db.GetEdgesByContextAndDst(headSnapID, graph.EdgeDefinesIn, edge.Dst)
+		if err != nil {
+			continue
+		}
+
+		for _, symEdge := range symEdges {
+			symIDHex := util.BytesToHex(symEdge.Src)
+			if seen[symIDHex] {
+				continue
+			}
+			seen[symIDHex] = true
+
+			symNode, err := g.db.GetNode(symEdge.Src)
+			if err != nil {
+				continue
+			}
+			if symNode != nil && symNode.Kind == graph.KindSymbol {
+				symbols = append(symbols, symNode)
+			}
 		}
 	}
 
