@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kai - Intent-Based Version Control</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --fg: #e5e5e5;
+      --accent: #3b82f6;
+      --muted: #737373;
+      --code-bg: #1a1a1a;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 4rem 2rem;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 4rem;
+    }
+    h1 {
+      font-size: 3rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      letter-spacing: -0.02em;
+    }
+    .tagline {
+      font-size: 1.25rem;
+      color: var(--muted);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    .cta {
+      margin-top: 2rem;
+    }
+    .btn {
+      display: inline-block;
+      padding: 0.75rem 1.5rem;
+      background: var(--accent);
+      color: white;
+      text-decoration: none;
+      border-radius: 6px;
+      font-weight: 500;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid var(--muted);
+      color: var(--fg);
+      margin-left: 1rem;
+    }
+    section {
+      margin-bottom: 4rem;
+    }
+    h2 {
+      font-size: 1.5rem;
+      margin-bottom: 1.5rem;
+      color: var(--fg);
+    }
+    .features {
+      display: grid;
+      gap: 1.5rem;
+    }
+    .feature {
+      background: var(--code-bg);
+      padding: 1.5rem;
+      border-radius: 8px;
+      border: 1px solid #262626;
+    }
+    .feature h3 {
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+      color: var(--accent);
+    }
+    .feature p {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    pre {
+      background: var(--code-bg);
+      padding: 1.5rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      border: 1px solid #262626;
+    }
+    code {
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 0.9rem;
+    }
+    .highlight { color: var(--accent); }
+    .dim { color: var(--muted); }
+    .comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .comparison > div {
+      background: var(--code-bg);
+      padding: 1rem;
+      border-radius: 8px;
+      border: 1px solid #262626;
+    }
+    .comparison h4 {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .comparison code {
+      display: block;
+      font-size: 0.85rem;
+    }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+      padding-top: 2rem;
+      border-top: 1px solid #262626;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    @media (max-width: 600px) {
+      h1 { font-size: 2rem; }
+      .comparison { grid-template-columns: 1fr; }
+      .btn-secondary { margin-left: 0; margin-top: 0.5rem; display: block; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Kai</h1>
+      <p class="tagline">Intent-based version control. Track what you meant to do, not just what changed.</p>
+      <div class="cta">
+        <a href="https://gitlab.com/rite-day/ivcs" class="btn">View on GitLab</a>
+        <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>Why Kai?</h2>
+      <div class="comparison">
+        <div>
+          <h4>Git commit</h4>
+          <code class="dim">fix: update validation</code>
+        </div>
+        <div>
+          <h4>Kai intent</h4>
+          <code class="highlight">Add formatDate and formatTime in Utils</code>
+        </div>
+      </div>
+      <p style="margin-top: 1rem; color: var(--muted);">
+        Kai automatically analyzes your code changes and generates meaningful descriptions.
+        No more guessing what a commit did from a vague message.
+      </p>
+    </section>
+
+    <section>
+      <h2>Features</h2>
+      <div class="features">
+        <div class="feature">
+          <h3>Semantic Change Detection</h3>
+          <p>Detects function additions, API changes, condition modifications, and more using AST analysis.</p>
+        </div>
+        <div class="feature">
+          <h3>Auto-Generated Intents</h3>
+          <p>Creates human-readable descriptions like "Add formatDate and formatTime in Utils" automatically.</p>
+        </div>
+        <div class="feature">
+          <h3>Module Mapping</h3>
+          <p>Map file paths to logical modules (Auth, API, Frontend) for better organization.</p>
+        </div>
+        <div class="feature">
+          <h3>Content-Addressed Storage</h3>
+          <p>Files stored by BLAKE3 hash. Efficient, deduplicated, and verifiable.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <h2>Quick Start</h2>
+      <pre><code><span class="dim"># Initialize a kai repository</span>
+kai init
+
+<span class="dim"># Create a snapshot of your code</span>
+kai snapshot -m "Initial version"
+
+<span class="dim"># Create and start a workspace</span>
+kai ws create main
+kai ws start main
+
+<span class="dim"># Make changes to your code, then stage</span>
+kai ws stage main -m "Add new features"
+
+<span class="dim"># View the auto-generated intent</span>
+kai intent render &lt;changeset-id&gt;
+<span class="highlight">Intent: Add formatDate and formatTime in Utils</span></code></pre>
+    </section>
+
+    <section>
+      <h2>Commands</h2>
+      <pre><code>kai init                 <span class="dim"># Initialize repository</span>
+kai snapshot             <span class="dim"># Create a snapshot</span>
+kai status               <span class="dim"># Show changed files</span>
+kai diff                 <span class="dim"># Show file differences</span>
+kai ws create &lt;name&gt;     <span class="dim"># Create workspace</span>
+kai ws stage &lt;name&gt;      <span class="dim"># Stage changes</span>
+kai changeset list       <span class="dim"># List changesets</span>
+kai intent render &lt;id&gt;   <span class="dim"># Show intent for changeset</span>
+kai log                  <span class="dim"># View history</span>
+kai checkout &lt;ref&gt;       <span class="dim"># Restore a snapshot</span></code></pre>
+    </section>
+
+    <footer>
+      <p>MIT License &middot; <a href="https://gitlab.com/rite-day/ivcs">GitLab</a></p>
+    </footer>
+  </div>
+</body>
+</html>
