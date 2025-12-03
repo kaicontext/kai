@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="kai.webp" alt="Kai Logo" width="400">
+</p>
+
 # Kai - Intent Version Control System
 
 Kai is a semantic, intent-based version control system that understands *what* your code changes mean, not just *what* changed. It creates semantic snapshots from Git refs, computes changesets with classified change types, maps changes to logical modules, and generates human-readable intent sentences describing the purpose of changes.
