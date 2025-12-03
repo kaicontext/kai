@@ -194,21 +194,18 @@
 
     <section id="quickstart">
       <h2>Quick Start</h2>
-      <pre><code><span class="dim"># Initialize a kai repository</span>
+      <pre><code><span class="dim"># Initialize kai in your existing Git repo</span>
 kai init
 
-<span class="dim"># Create a snapshot of your code</span>
-kai snapshot -m "Initial version"
+<span class="dim"># Create snapshots from Git refs</span>
+kai snapshot main --repo .
+kai snapshot feature-branch --repo .
 
-<span class="dim"># Create and start a workspace</span>
-kai ws create main
-kai ws start main
-
-<span class="dim"># Make changes to your code, then stage</span>
-kai ws stage main -m "Add new features"
+<span class="dim"># Create a changeset between them</span>
+kai changeset create @snap:prev @snap:last
 
 <span class="dim"># View the auto-generated intent</span>
-kai intent render &lt;changeset-id&gt;
+kai intent render @cs:last
 <span class="highlight">Intent: Add formatDate and formatTime in Utils</span></code></pre>
     </section>
 
