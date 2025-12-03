@@ -6,9 +6,9 @@ import (
 
 func TestMatcher_MatchPath(t *testing.T) {
 	modules := []ModuleRule{
-		{Name: "Auth", Include: []string{"auth/**"}},
-		{Name: "Billing", Include: []string{"billing/**"}},
-		{Name: "Core", Include: []string{"src/core/**", "lib/**"}},
+		{Name: "Auth", Paths: []string{"auth/**"}},
+		{Name: "Billing", Paths: []string{"billing/**"}},
+		{Name: "Core", Paths: []string{"src/core/**", "lib/**"}},
 	}
 
 	matcher := NewMatcher(modules)
@@ -47,8 +47,8 @@ func TestMatcher_MatchPath(t *testing.T) {
 
 func TestMatcher_MatchPaths(t *testing.T) {
 	modules := []ModuleRule{
-		{Name: "Auth", Include: []string{"auth/**"}},
-		{Name: "Billing", Include: []string{"billing/**"}},
+		{Name: "Auth", Paths: []string{"auth/**"}},
+		{Name: "Billing", Paths: []string{"billing/**"}},
 	}
 
 	matcher := NewMatcher(modules)
@@ -77,7 +77,7 @@ func TestMatcher_MatchPaths(t *testing.T) {
 
 func TestMatcher_GetModulePayload(t *testing.T) {
 	modules := []ModuleRule{
-		{Name: "Auth", Include: []string{"auth/**", "authentication/**"}},
+		{Name: "Auth", Paths: []string{"auth/**", "authentication/**"}},
 	}
 
 	matcher := NewMatcher(modules)
@@ -109,8 +109,8 @@ func TestMatcher_GetModulePayload(t *testing.T) {
 
 func TestMatcher_GetAllModules(t *testing.T) {
 	modules := []ModuleRule{
-		{Name: "Auth", Include: []string{"auth/**"}},
-		{Name: "Billing", Include: []string{"billing/**"}},
+		{Name: "Auth", Paths: []string{"auth/**"}},
+		{Name: "Billing", Paths: []string{"billing/**"}},
 	}
 
 	matcher := NewMatcher(modules)

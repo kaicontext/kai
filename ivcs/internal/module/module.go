@@ -11,8 +11,8 @@ import (
 
 // ModuleRule defines a module with its path patterns.
 type ModuleRule struct {
-	Name    string   `yaml:"name"`
-	Include []string `yaml:"include"`
+	Name  string   `yaml:"name"`
+	Paths []string `yaml:"paths"`
 }
 
 // ModulesConfig holds the modules configuration.
@@ -50,7 +50,7 @@ func (m *Matcher) MatchPath(path string) []string {
 	var matched []string
 
 	for _, mod := range m.modules {
-		for _, pattern := range mod.Include {
+		for _, pattern := range mod.Paths {
 			match, err := doublestar.Match(pattern, path)
 			if err != nil {
 				continue
@@ -88,8 +88,8 @@ func (m *Matcher) GetAllModules() []ModuleRule {
 func (m *Matcher) GetModulePayload(name string) map[string]interface{} {
 	for _, mod := range m.modules {
 		if mod.Name == name {
-			patterns := make([]interface{}, len(mod.Include))
-			for i, p := range mod.Include {
+			patterns := make([]interface{}, len(mod.Paths))
+			for i, p := range mod.Paths {
 				patterns[i] = p
 			}
 			return map[string]interface{}{

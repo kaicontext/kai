@@ -27,11 +27,11 @@ import (
 )
 
 const (
-	kaiDir     = ".kai"
-	dbFile     = "db.sqlite"
-	objectsDir = "objects"
-	rulesDir   = "rules"
-	schemaDir  = "schema"
+	kaiDir      = ".kai"
+	dbFile      = "db.sqlite"
+	objectsDir  = "objects"
+	schemaDir   = "schema"
+	modulesFile = "kai.modules.yaml"
 )
 
 var rootCmd = &cobra.Command{
@@ -481,47 +481,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating objects directory: %w", err)
 	}
 
-	// Create rules directory and copy default rules
-	rulesPath := filepath.Join(kaiDir, rulesDir)
-	if err := os.MkdirAll(rulesPath, 0755); err != nil {
-		return fmt.Errorf("creating rules directory: %w", err)
-	}
+	// Write default kai.modules.yaml in project root (not in .kai) only if it doesn't exist
+	// This file is meant to be committed to version control and shared with the team
+	if _, err := os.Stat(modulesFile); os.IsNotExist(err) {
+		modulesContent := `# Kai module definitions
+# This file maps file paths to logical modules for better intent generation.
+# Commit this file to version control to share with your team.
+#
+# Example:
+#   modules:
+#     - name: Auth
+#       paths:
+#         - src/auth/**
+#         - lib/session.js
+#     - name: API
+#       paths:
+#         - src/routes/**
+#         - src/controllers/**
 
-	// Write default modules.yaml only if it doesn't exist
-	modulesPath := filepath.Join(rulesPath, "modules.yaml")
-	if _, err := os.Stat(modulesPath); os.IsNotExist(err) {
-		modulesContent := `modules:
-  - name: Auth
-    include: ["auth/**"]
-  - name: Billing
-    include: ["billing/**"]
-  - name: Profile
-    include: ["profile/**"]
+modules: []
 `
-		if err := os.WriteFile(modulesPath, []byte(modulesContent), 0644); err != nil {
-			return fmt.Errorf("writing modules.yaml: %w", err)
-		}
-	}
-
-	// Write default changetypes.yaml only if it doesn't exist
-	changetypesPath := filepath.Join(rulesPath, "changetypes.yaml")
-	if _, err := os.Stat(changetypesPath); os.IsNotExist(err) {
-		changetypesContent := `rules:
-  - id: CONDITION_CHANGED
-    match:
-      node_types: ["binary_expression","logical_expression","relational_expression"]
-      detector: "operator_or_boundary_changed"
-  - id: CONSTANT_UPDATED
-    match:
-      node_types: ["number","string"]
-      detector: "literal_value_changed"
-  - id: API_SURFACE_CHANGED
-    match:
-      node_types: ["function_declaration","method_definition","export_statement"]
-      detector: "params_or_exports_changed"
-`
-		if err := os.WriteFile(changetypesPath, []byte(changetypesContent), 0644); err != nil {
-			return fmt.Errorf("writing changetypes.yaml: %w", err)
+		if err := os.WriteFile(modulesFile, []byte(modulesContent), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", modulesFile, err)
 		}
 	}
 
@@ -972,8 +953,7 @@ func openDB() (*graph.DB, error) {
 }
 
 func loadMatcher() (*module.Matcher, error) {
-	rulesPath := filepath.Join(kaiDir, rulesDir, "modules.yaml")
-	return module.LoadRules(rulesPath)
+	return module.LoadRules(modulesFile)
 }
 
 func runListSnapshots(cmd *cobra.Command, args []string) error {
