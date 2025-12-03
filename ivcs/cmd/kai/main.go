@@ -507,6 +507,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   payload TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS nodes_kind ON nodes(kind);
 
 CREATE TABLE IF NOT EXISTS edges (
   src BLOB NOT NULL,
@@ -520,6 +521,7 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 CREATE INDEX IF NOT EXISTS edges_type ON edges(type);
+CREATE INDEX IF NOT EXISTS edges_at ON edges(at);
 
 -- Named references (aliases)
 CREATE TABLE IF NOT EXISTS refs (

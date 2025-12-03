@@ -201,21 +201,20 @@ func (c *Creator) GetSnapshotFiles(snapshotID []byte) ([]*graph.Node, error) {
 // GetSymbolsInFile returns all symbols defined in a file for a given snapshot context.
 func (c *Creator) GetSymbolsInFile(fileID, snapshotID []byte) ([]*graph.Node, error) {
 	// Query edges where Symbol DEFINES_IN File with the given snapshot context
-	edges, err := c.db.GetEdgesByContext(snapshotID, graph.EdgeDefinesIn)
+	// Uses targeted query instead of scanning all edges for the context
+	edges, err := c.db.GetEdgesByContextAndDst(snapshotID, graph.EdgeDefinesIn, fileID)
 	if err != nil {
 		return nil, err
 	}
 
-	var symbols []*graph.Node
+	symbols := make([]*graph.Node, 0, len(edges))
 	for _, edge := range edges {
-		if string(edge.Dst) == string(fileID) {
-			node, err := c.db.GetNode(edge.Src)
-			if err != nil {
-				return nil, err
-			}
-			if node != nil {
-				symbols = append(symbols, node)
-			}
+		node, err := c.db.GetNode(edge.Src)
+		if err != nil {
+			return nil, err
+		}
+		if node != nil {
+			symbols = append(symbols, node)
 		}
 	}
 
@@ -314,14 +313,22 @@ func (c *Creator) Checkout(snapshotID []byte, targetDir string, clean bool) (*Ch
 			continue
 		}
 
+		// Build full path
+		fullPath := filepath.Join(targetDir, path)
+
+		// Skip if file already exists with same content
+		if existing, err := os.ReadFile(fullPath); err == nil {
+			if util.Blake3HashHex(existing) == digest {
+				result.FilesSkipped++
+				continue
+			}
+		}
+
 		// Read content from object store
 		content, err := c.db.ReadObject(digest)
 		if err != nil {
 			return nil, fmt.Errorf("reading object %s: %w", digest[:12], err)
 		}
-
-		// Build full path
-		fullPath := filepath.Join(targetDir, path)
 
 		// Create parent directories
 		parentDir := filepath.Dir(fullPath)
@@ -329,9 +336,14 @@ func (c *Creator) Checkout(snapshotID []byte, targetDir string, clean bool) (*Ch
 			return nil, fmt.Errorf("creating directory %s: %w", parentDir, err)
 		}
 
-		// Write the file
-		if err := os.WriteFile(fullPath, content, 0644); err != nil {
-			return nil, fmt.Errorf("writing file %s: %w", path, err)
+		// Atomic write: write to temp file then rename
+		tmpPath := fullPath + ".tmp"
+		if err := os.WriteFile(tmpPath, content, 0644); err != nil {
+			return nil, fmt.Errorf("writing temp file %s: %w", path, err)
+		}
+		if err := os.Rename(tmpPath, fullPath); err != nil {
+			os.Remove(tmpPath) // Clean up on failure
+			return nil, fmt.Errorf("atomic rename %s: %w", path, err)
 		}
 
 		result.FilesWritten++
@@ -358,9 +370,11 @@ func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error
 			return err
 		}
 
-		// Skip directories and hidden files/directories
+		// Skip directories
 		if info.IsDir() {
-			if strings.HasPrefix(info.Name(), ".") {
+			name := info.Name()
+			// Skip hidden directories and common large/generated directories
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "dist" || name == "build" {
 				return filepath.SkipDir
 			}
 			return nil

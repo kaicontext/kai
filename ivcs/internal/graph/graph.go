@@ -343,6 +343,37 @@ func (db *DB) GetEdgesByContext(at []byte, edgeType EdgeType) ([]*Edge, error) {
 	return edges, rows.Err()
 }
 
+// GetEdgesByContextAndDst retrieves edges with a specific context and destination.
+// More efficient than GetEdgesByContext when you know the destination node.
+func (db *DB) GetEdgesByContextAndDst(at []byte, edgeType EdgeType, dst []byte) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT src, created_at FROM edges WHERE at = ? AND type = ? AND dst = ?
+	`, at, string(edgeType), dst)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var src []byte
+		var createdAt int64
+		if err := rows.Scan(&src, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+
+		edges = append(edges, &Edge{
+			Src:       src,
+			Type:      edgeType,
+			Dst:       dst,
+			At:        at,
+			CreatedAt: createdAt,
+		})
+	}
+
+	return edges, rows.Err()
+}
+
 // UpdateNodePayload updates the payload of an existing node.
 func (db *DB) UpdateNodePayload(id []byte, payload map[string]interface{}) error {
 	payloadJSON, err := util.CanonicalJSON(payload)
