@@ -31,15 +31,62 @@ func (g *Generator) GenerateIntent(changeSetID []byte, changeTypes []*classify.C
 		module = modules[0]
 	}
 
-	// Determine area (symbol name or common path prefix)
+	// Try to get function names from change types first (most specific)
+	funcNames := extractFunctionNames(changeTypes)
+	if len(funcNames) > 0 {
+		area := formatFunctionNames(funcNames)
+		return verb + " " + area + " in " + module
+	}
+
+	// Fall back to symbol names or file paths
 	area := determineArea(symbols, changedFiles)
 
 	return verb + " " + module + " " + area
 }
 
+// extractFunctionNames extracts function names from FUNCTION_ADDED/REMOVED change types.
+func extractFunctionNames(changeTypes []*classify.ChangeType) []string {
+	var names []string
+	seen := make(map[string]bool)
+
+	for _, ct := range changeTypes {
+		if ct.Category == classify.FunctionAdded || ct.Category == classify.FunctionRemoved {
+			for _, sym := range ct.Evidence.Symbols {
+				// Function names are stored as "name:functionName"
+				if strings.HasPrefix(sym, "name:") {
+					name := strings.TrimPrefix(sym, "name:")
+					if !seen[name] {
+						seen[name] = true
+						names = append(names, name)
+					}
+				}
+			}
+		}
+	}
+
+	return names
+}
+
+// formatFunctionNames formats a list of function names for display.
+func formatFunctionNames(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	if len(names) == 2 {
+		return names[0] + " and " + names[1]
+	}
+	// More than 2 functions
+	return strings.Join(names[:2], ", ") + " and others"
+}
+
 // determineVerb determines the verb based on change types.
 func determineVerb(changeTypes []*classify.ChangeType) string {
 	// Priority order for semantic changes
+	hasFuncAdded := false
+	hasFuncRemoved := false
 	hasAPI := false
 	hasCondition := false
 	hasConstant := false
@@ -49,6 +96,10 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 
 	for _, ct := range changeTypes {
 		switch ct.Category {
+		case classify.FunctionAdded:
+			hasFuncAdded = true
+		case classify.FunctionRemoved:
+			hasFuncRemoved = true
 		case classify.APISurfaceChanged:
 			hasAPI = true
 		case classify.ConditionChanged:
@@ -68,7 +119,17 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 		}
 	}
 
-	// Semantic code changes take priority
+	// Function changes take highest priority
+	if hasFuncAdded && hasFuncRemoved {
+		return "Refactor"
+	}
+	if hasFuncAdded {
+		return "Add"
+	}
+	if hasFuncRemoved {
+		return "Remove"
+	}
+	// Semantic code changes
 	if hasAPI {
 		return "Update"
 	}

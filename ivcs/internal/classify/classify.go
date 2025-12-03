@@ -19,6 +19,8 @@ const (
 	ConditionChanged  ChangeCategory = "CONDITION_CHANGED"
 	ConstantUpdated   ChangeCategory = "CONSTANT_UPDATED"
 	APISurfaceChanged ChangeCategory = "API_SURFACE_CHANGED"
+	FunctionAdded     ChangeCategory = "FUNCTION_ADDED"
+	FunctionRemoved   ChangeCategory = "FUNCTION_REMOVED"
 
 	// File-level changes (fallback for non-parsed files)
 	FileContentChanged ChangeCategory = "FILE_CONTENT_CHANGED"
@@ -32,8 +34,8 @@ const (
 	JSONArrayChanged ChangeCategory = "JSON_ARRAY_CHANGED"
 
 	// YAML-specific changes (future)
-	YAMLKeyAdded   ChangeCategory = "YAML_KEY_ADDED"
-	YAMLKeyRemoved ChangeCategory = "YAML_KEY_REMOVED"
+	YAMLKeyAdded     ChangeCategory = "YAML_KEY_ADDED"
+	YAMLKeyRemoved   ChangeCategory = "YAML_KEY_REMOVED"
 	YAMLValueChanged ChangeCategory = "YAML_VALUE_CHANGED"
 )
 
@@ -89,6 +91,10 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 
 	var changes []*ChangeType
 
+	// Detect function additions/removals (most important for intent)
+	funcChanges := d.detectFunctionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID)
+	changes = append(changes, funcChanges...)
+
 	// Detect condition changes
 	condChanges := d.detectConditionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID)
 	changes = append(changes, condChanges...)
@@ -102,6 +108,154 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	changes = append(changes, apiChanges...)
 
 	return changes, nil
+}
+
+// detectFunctionChanges detects added or removed functions.
+func (d *Detector) detectFunctionChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
+	var changes []*ChangeType
+
+	// Get all function declarations from both versions
+	beforeFuncs := getAllFunctions(before, beforeContent)
+	afterFuncs := getAllFunctions(after, afterContent)
+
+	// Check for added functions
+	for name, afterFunc := range afterFuncs {
+		if _, exists := beforeFuncs[name]; !exists {
+			afterRange := parse.GetNodeRange(afterFunc.node)
+			change := &ChangeType{
+				Category: FunctionAdded,
+				Evidence: Evidence{
+					FileRanges: []FileRange{{
+						Path:  path,
+						Start: afterRange.Start,
+						End:   afterRange.End,
+					}},
+					Symbols: d.findOverlappingSymbols(fileID, afterRange),
+				},
+			}
+			// Store the function name for intent generation
+			if len(change.Evidence.Symbols) == 0 {
+				change.Evidence.Symbols = []string{"name:" + name}
+			}
+			changes = append(changes, change)
+		}
+	}
+
+	// Check for removed functions
+	for name, beforeFunc := range beforeFuncs {
+		if _, exists := afterFuncs[name]; !exists {
+			beforeRange := parse.GetNodeRange(beforeFunc.node)
+			change := &ChangeType{
+				Category: FunctionRemoved,
+				Evidence: Evidence{
+					FileRanges: []FileRange{{
+						Path:  path,
+						Start: beforeRange.Start,
+						End:   beforeRange.End,
+					}},
+					Symbols: []string{"name:" + name},
+				},
+			}
+			changes = append(changes, change)
+		}
+	}
+
+	return changes
+}
+
+// funcInfo holds information about a function declaration.
+type funcInfo struct {
+	name string
+	node *sitter.Node
+}
+
+// getAllFunctions extracts all function declarations from a parsed file.
+func getAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*funcInfo {
+	funcs := make(map[string]*funcInfo)
+
+	// Function declarations: function foo() {}
+	for _, node := range parsed.FindNodesOfType("function_declaration") {
+		name := getFunctionName(node, content)
+		if name != "" {
+			funcs[name] = &funcInfo{name: name, node: node}
+		}
+	}
+
+	// Arrow functions assigned to variables: const foo = () => {}
+	for _, node := range parsed.FindNodesOfType("lexical_declaration") {
+		name, arrowNode := getArrowFunctionName(node, content)
+		if name != "" && arrowNode != nil {
+			funcs[name] = &funcInfo{name: name, node: node}
+		}
+	}
+
+	// Variable declarations: var foo = function() {}
+	for _, node := range parsed.FindNodesOfType("variable_declaration") {
+		name, funcNode := getVariableFunctionName(node, content)
+		if name != "" && funcNode != nil {
+			funcs[name] = &funcInfo{name: name, node: node}
+		}
+	}
+
+	// Method definitions in classes/objects
+	for _, node := range parsed.FindNodesOfType("method_definition") {
+		name := getFunctionName(node, content)
+		if name != "" {
+			funcs[name] = &funcInfo{name: name, node: node}
+		}
+	}
+
+	return funcs
+}
+
+// getArrowFunctionName extracts the name from an arrow function assignment.
+func getArrowFunctionName(node *sitter.Node, content []byte) (string, *sitter.Node) {
+	// Look for: const/let NAME = () => {}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "variable_declarator" {
+			var name string
+			var arrowNode *sitter.Node
+			for j := 0; j < int(child.ChildCount()); j++ {
+				c := child.Child(j)
+				if c.Type() == "identifier" {
+					name = parse.GetNodeContent(c, content)
+				}
+				if c.Type() == "arrow_function" {
+					arrowNode = c
+				}
+			}
+			if name != "" && arrowNode != nil {
+				return name, arrowNode
+			}
+		}
+	}
+	return "", nil
+}
+
+// getVariableFunctionName extracts the name from a function expression assignment.
+func getVariableFunctionName(node *sitter.Node, content []byte) (string, *sitter.Node) {
+	// Look for: var NAME = function() {}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "variable_declarator" {
+			var name string
+			var funcNode *sitter.Node
+			for j := 0; j < int(child.ChildCount()); j++ {
+				c := child.Child(j)
+				if c.Type() == "identifier" {
+					name = parse.GetNodeContent(c, content)
+				}
+				if c.Type() == "function" || c.Type() == "function_expression" {
+					funcNode = c
+				}
+			}
+			if name != "" && funcNode != nil {
+				return name, funcNode
+			}
+		}
+	}
+	return "", nil
 }
 
 // detectConditionChanges detects changes in binary/logical/relational expressions.
