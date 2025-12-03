@@ -2,6 +2,7 @@
 package graph
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -71,11 +72,23 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
+	// Fail early if connection is bad
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ping db: %w", err)
+	}
+
 	// Enable WAL mode
 	if _, err := conn.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
+
+	// Wait up to 5s on lock instead of failing immediately
+	conn.Exec("PRAGMA busy_timeout=5000")
+
+	// Future-proof: enforce foreign key constraints if we add them
+	conn.Exec("PRAGMA foreign_keys=ON")
 
 	return &DB{conn: conn, objectsDir: objectsDir}, nil
 }
@@ -103,6 +116,11 @@ func (db *DB) ApplySchema(schemaPath string) error {
 // BeginTx starts a new transaction.
 func (db *DB) BeginTx() (*sql.Tx, error) {
 	return db.conn.Begin()
+}
+
+// BeginTxCtx starts a new transaction with context for cancellation support.
+func (db *DB) BeginTxCtx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return db.conn.BeginTx(ctx, opts)
 }
 
 // InsertNode inserts a node if it doesn't already exist (idempotent).
@@ -351,17 +369,25 @@ func (db *DB) UpdateNodePayload(id []byte, payload map[string]interface{}) error
 }
 
 // WriteObject writes raw file bytes to the objects directory.
+// Uses atomic write (tmp + rename) to avoid partial writes on crash.
 func (db *DB) WriteObject(content []byte) (string, error) {
 	digest := util.Blake3HashHex(content)
-	objPath := filepath.Join(db.objectsDir, digest)
+	finalPath := filepath.Join(db.objectsDir, digest)
 
 	// Check if already exists
-	if _, err := os.Stat(objPath); err == nil {
+	if _, err := os.Stat(finalPath); err == nil {
 		return digest, nil
 	}
 
-	if err := os.WriteFile(objPath, content, 0644); err != nil {
-		return "", fmt.Errorf("writing object: %w", err)
+	// Write to temp file first, then atomic rename
+	tmpPath := finalPath + ".tmp"
+	if err := os.WriteFile(tmpPath, content, 0644); err != nil {
+		return "", fmt.Errorf("writing tmp object: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath) // Clean up on failure
+		return "", fmt.Errorf("atomic rename: %w", err)
 	}
 
 	return digest, nil
@@ -485,11 +511,20 @@ func (db *DB) GetWorkspaceByName(name string) (*Node, error) {
 	return nil, nil
 }
 
-// DeleteEdge deletes an edge.
+// DeleteEdge deletes all edges matching (src, type, dst) across all contexts.
 func (db *DB) DeleteEdge(tx *sql.Tx, src []byte, edgeType EdgeType, dst []byte) error {
 	_, err := tx.Exec(`
 		DELETE FROM edges WHERE src = ? AND type = ? AND dst = ?
 	`, src, string(edgeType), dst)
+	return err
+}
+
+// DeleteEdgeAt deletes a specific edge including its context (at).
+// Use this when you need to delete a single edge in a specific context.
+func (db *DB) DeleteEdgeAt(tx *sql.Tx, src []byte, edgeType EdgeType, dst []byte, at []byte) error {
+	_, err := tx.Exec(`
+		DELETE FROM edges WHERE src = ? AND type = ? AND dst = ? AND at = ?
+	`, src, string(edgeType), dst, at)
 	return err
 }
 
