@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ivcs/internal/graph"
-	"ivcs/internal/util"
+	"kai/internal/graph"
+	"kai/internal/util"
 )
 
 // Kind represents the type of a resolvable entity.

@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ivcs/internal/filesource"
-	"ivcs/internal/graph"
-	"ivcs/internal/module"
-	"ivcs/internal/parse"
-	"ivcs/internal/util"
+	"kai/internal/filesource"
+	"kai/internal/graph"
+	"kai/internal/module"
+	"kai/internal/parse"
+	"kai/internal/util"
 )
 
 // Creator handles snapshot creation.

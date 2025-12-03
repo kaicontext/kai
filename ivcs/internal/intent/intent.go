@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ivcs/internal/classify"
-	"ivcs/internal/graph"
-	"ivcs/internal/util"
+	"kai/internal/classify"
+	"kai/internal/graph"
+	"kai/internal/util"
 )
 
 // Generator generates intent sentences.

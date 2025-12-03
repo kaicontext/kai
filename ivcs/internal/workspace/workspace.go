@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"ivcs/internal/graph"
-	"ivcs/internal/util"
+	"kai/internal/graph"
+	"kai/internal/util"
 )
 
 // Status represents the state of a workspace.

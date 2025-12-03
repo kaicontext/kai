@@ -6,9 +6,9 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 
-	"ivcs/internal/graph"
-	"ivcs/internal/parse"
-	"ivcs/internal/util"
+	"kai/internal/graph"
+	"kai/internal/parse"
+	"kai/internal/util"
 )
 
 // ChangeCategory represents a type of change.

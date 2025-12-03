@@ -5,15 +5,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ivcs/internal/graph"
-	"ivcs/internal/util"
+	"kai/internal/graph"
+	"kai/internal/util"
 )
 
 func setupTestDB(t *testing.T) (*graph.DB, func()) {
 	t.Helper()
 
 	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "ivcs-test-*")
+	tmpDir, err := os.MkdirTemp("", "kai-test-*")
 	if err != nil {
 		t.Fatalf("creating temp dir: %v", err)
 	}

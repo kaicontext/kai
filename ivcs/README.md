@@ -1,8 +1,8 @@
-# IVCS - Intent Version Control System
+# Kai - Intent Version Control System
 
-IVCS is a semantic, intent-based version control system that understands *what* your code changes mean, not just *what* changed. It creates semantic snapshots from Git refs, computes changesets with classified change types, maps changes to logical modules, and generates human-readable intent sentences describing the purpose of changes.
+Kai is a semantic, intent-based version control system that understands *what* your code changes mean, not just *what* changed. It creates semantic snapshots from Git refs, computes changesets with classified change types, maps changes to logical modules, and generates human-readable intent sentences describing the purpose of changes.
 
-Unlike traditional diff tools that show line-by-line text changes, IVCS understands your code at a semantic level—identifying functions, classes, variables, and how they relate to your project's architecture.
+Unlike traditional diff tools that show line-by-line text changes, Kai understands your code at a semantic level—identifying functions, classes, variables, and how they relate to your project's architecture.
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ A **changeset** represents the semantic difference between two snapshots:
 - Which modules are impacted
 
 ### Change Types
-IVCS classifies changes into semantic categories:
+Kai classifies changes into semantic categories:
 
 | Change Type | Description | Example |
 |-------------|-------------|---------|
@@ -81,85 +81,85 @@ Workspaces have three states: `active` (can stage changes), `shelved` (frozen), 
 ### Building from Source
 
 ```bash
-# Clone or navigate to the ivcs directory
-cd ivcs
+# Clone or navigate to the kai directory
+cd kai
 
 # Build the CLI binary
 make build
 
 # Or build directly with Go
-go build -o ivcs ./cmd/ivcs
+go build -o kai ./cmd/kai
 
 # Verify installation
-./ivcs --help
+./kai --help
 ```
 
 ### Optional: Add to PATH
 
 ```bash
 # Add to your shell profile for global access
-export PATH="$PATH:/path/to/ivcs"
+export PATH="$PATH:/path/to/kai"
 
 # Or move/symlink to a directory in your PATH
-sudo ln -s /path/to/ivcs/ivcs /usr/local/bin/ivcs
+sudo ln -s /path/to/kai/kai /usr/local/bin/kai
 ```
 
 ---
 
 ## Quick Start
 
-Here's the fastest way to get started with IVCS:
+Here's the fastest way to get started with Kai:
 
 ```bash
 # 1. Navigate to your Git repository
 cd your-typescript-project
 
-# 2. Initialize IVCS
-ivcs init
+# 2. Initialize Kai
+kai init
 
 # 3. Create a snapshot of your main branch
-ivcs snapshot main --repo .
+kai snapshot main --repo .
 # Output: Created snapshot: abc123...
 
 # 4. Create a snapshot of your feature branch
-ivcs snapshot feature-branch --repo .
+kai snapshot feature-branch --repo .
 # Output: Created snapshot: def456...
 
 # 5. Analyze symbols in both snapshots
-ivcs analyze symbols abc123...
-ivcs analyze symbols def456...
+kai analyze symbols abc123...
+kai analyze symbols def456...
 
 # 6. Create a changeset between them
-ivcs changeset create abc123... def456...
+kai changeset create abc123... def456...
 # Output: Created changeset: ghi789...
 
 # 7. Generate an intent sentence
-ivcs intent render ghi789...
+kai intent render ghi789...
 # Output: Intent: Update Auth login
 
 # 8. View the full changeset as JSON
-ivcs dump ghi789... --json
+kai dump ghi789... --json
 ```
 
 ---
 
 ## Human-Friendly References
 
-You don't need to juggle 64-character BLAKE3 hashes! IVCS provides multiple ways to reference snapshots and changesets using human-readable handles.
+You don't need to juggle 64-character BLAKE3 hashes! Kai provides multiple ways to reference snapshots and changesets using human-readable handles.
 
 ### Short IDs
 
-Use the first 8-12 hex characters of any ID. IVCS will resolve it if unambiguous:
+Use the first 8-12 hex characters of any ID. Kai will resolve it if unambiguous:
 
 ```bash
 # Instead of the full 64-char ID:
-ivcs analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
 
 # Use a short prefix:
-ivcs analyze symbols d9ec9902
+kai analyze symbols d9ec9902
 ```
 
-If the prefix is ambiguous, IVCS shows matching candidates:
+If the prefix is ambiguous, Kai shows matching candidates:
 
 ```
 ambiguous prefix '4a2556c0' matches:
@@ -174,26 +174,26 @@ Create and use named pointers like Git does:
 
 ```bash
 # Create refs
-ivcs ref set snap.main d9ec9902
-ivcs ref set snap.feature 4a2556c0
-ivcs ref set cs.login_fix 90cd7264
+kai ref set snap.main d9ec9902
+kai ref set snap.feature 4a2556c0
+kai ref set cs.login_fix 90cd7264
 
 # List all refs
-ivcs ref list
+kai ref list
 
 # Use refs in any command
-ivcs analyze symbols snap.main
-ivcs changeset create snap.main snap.feature
-ivcs intent render cs.login_fix
-ivcs dump cs.login_fix --json
+kai analyze symbols snap.main
+kai changeset create snap.main snap.feature
+kai intent render cs.login_fix
+kai dump cs.login_fix --json
 
 # Delete refs
-ivcs ref del cs.login_fix
+kai ref del cs.login_fix
 ```
 
 ### Auto-Updated Refs
 
-IVCS automatically maintains helpful refs:
+Kai automatically maintains helpful refs:
 
 | Ref | Updated When | Points To |
 |-----|--------------|-----------|
@@ -204,9 +204,9 @@ IVCS automatically maintains helpful refs:
 
 ```bash
 # Use auto-refs in commands
-ivcs analyze symbols snap.latest
-ivcs changeset create @snap:prev @snap:last
-ivcs intent render cs.latest
+kai analyze symbols snap.latest
+kai changeset create @snap:prev @snap:last
+kai intent render cs.latest
 ```
 
 ### Selectors
@@ -225,12 +225,12 @@ Use selector syntax for dynamic references:
 
 ```bash
 # Common workflow using selectors
-ivcs snapshot main --repo .
-ivcs snapshot feature --repo .
-ivcs analyze symbols @snap:last
-ivcs changeset create @snap:prev @snap:last
-ivcs intent render @cs:last
-ivcs dump @cs:last --json
+kai snapshot main --repo .
+kai snapshot feature --repo .
+kai analyze symbols @snap:last
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+kai dump @cs:last --json
 ```
 
 ### Pick Command
@@ -239,13 +239,13 @@ Search and select nodes interactively:
 
 ```bash
 # List recent snapshots
-ivcs pick Snapshot
+kai pick Snapshot
 
 # Filter by substring
-ivcs pick Snapshot --filter auth
+kai pick Snapshot --filter auth
 
 # List changesets without interactive selection
-ivcs pick ChangeSet --no-ui
+kai pick ChangeSet --no-ui
 
 # Output format shows ID, kind-specific info
 #   %-4s  %-16s  %s
@@ -259,19 +259,19 @@ Enable tab completion for refs, selectors, and short IDs:
 
 ```bash
 # Bash
-source <(ivcs completion bash)
+source <(kai completion bash)
 # Add to ~/.bashrc for persistence
 
 # Zsh
-source <(ivcs completion zsh)
+source <(kai completion zsh)
 # Add to ~/.zshrc for persistence
 
 # Fish
-ivcs completion fish | source
-# Or save to ~/.config/fish/completions/ivcs.fish
+kai completion fish | source
+# Or save to ~/.config/fish/completions/kai.fish
 
 # PowerShell
-ivcs completion powershell | Out-String | Invoke-Expression
+kai completion powershell | Out-String | Invoke-Expression
 ```
 
 With completion enabled, pressing Tab will suggest:
@@ -283,27 +283,27 @@ With completion enabled, pressing Tab will suggest:
 
 ```bash
 # Initialize and create snapshots
-ivcs init
-ivcs snapshot main --repo .
-ivcs snapshot feature --repo .
+kai init
+kai snapshot main --repo .
+kai snapshot feature --repo .
 
 # Analyze using selectors
-ivcs analyze symbols @snap:last
-ivcs analyze symbols @snap:prev
+kai analyze symbols @snap:last
+kai analyze symbols @snap:prev
 
 # Create and inspect changeset
-ivcs changeset create @snap:prev @snap:last
-ivcs intent render @cs:last
-ivcs dump @cs:last --json
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+kai dump @cs:last --json
 
 # Name important refs
-ivcs ref set snap.main @snap:prev
-ivcs ref set snap.feature @snap:last
-ivcs ref set cs.feature_changes @cs:last
+kai ref set snap.main @snap:prev
+kai ref set snap.feature @snap:last
+kai ref set cs.feature_changes @cs:last
 
 # Use your named refs
-ivcs changeset create snap.main snap.feature
-ivcs checkout snap.main --dir ./restore
+kai changeset create snap.main snap.feature
+kai checkout snap.main --dir ./restore
 ```
 
 ---
@@ -350,27 +350,27 @@ export function login(user: User, device: string, ip: string): boolean {
 }
 ```
 
-### Step 2: Initialize IVCS
+### Step 2: Initialize Kai
 
 ```bash
 cd testdata/repo
-../../ivcs init
+../../kai init
 ```
 
 **What happens:**
-- Creates `.ivcs/` directory
+- Creates `.kai/` directory
 - Initializes SQLite database with schema
 - Creates `objects/` directory for content storage
 - Copies default rule files to `rules/`
 
 **Output:**
 ```
-Initialized IVCS in .ivcs/
+Initialized Kai in .kai/
 ```
 
 **Directory structure created:**
 ```
-.ivcs/
+.kai/
 ├── db.sqlite          # SQLite database
 ├── objects/           # Content-addressed file storage
 └── rules/
@@ -383,7 +383,7 @@ Initialized IVCS in .ivcs/
 Create a snapshot of the main branch:
 
 ```bash
-../../ivcs snapshot main --repo .
+../../kai snapshot main --repo .
 ```
 
 **Output:**
@@ -394,7 +394,7 @@ Created snapshot: d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00
 Create a snapshot of the feature branch:
 
 ```bash
-../../ivcs snapshot feature --repo .
+../../kai snapshot feature --repo .
 ```
 
 **Output:**
@@ -417,10 +417,10 @@ Extract symbols from each snapshot:
 
 ```bash
 # Analyze main branch snapshot
-../../ivcs analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+../../kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
 
 # Analyze feature branch snapshot
-../../ivcs analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
+../../kai analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
 ```
 
 **Output:**
@@ -444,7 +444,7 @@ Symbol analysis complete
 Compare the two snapshots:
 
 ```bash
-../../ivcs changeset create \
+../../kai changeset create \
   d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc \
   4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
 ```
@@ -475,7 +475,7 @@ Affected modules: [Auth]
 Generate a human-readable intent sentence:
 
 ```bash
-../../ivcs intent render 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
+../../kai intent render 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
 ```
 
 **Output:**
@@ -494,7 +494,7 @@ Intent: Update Auth TIMEOUT
 
 **Override with custom intent:**
 ```bash
-../../ivcs intent render 90cd72... --edit "Reduce session timeout to 30 minutes"
+../../kai intent render 90cd72... --edit "Reduce session timeout to 30 minutes"
 ```
 
 ### Step 7: Dump ChangeSet as JSON
@@ -502,7 +502,7 @@ Intent: Update Auth TIMEOUT
 View the complete changeset data:
 
 ```bash
-../../ivcs dump 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203 --json
+../../kai dump 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203 --json
 ```
 
 This outputs a structured JSON document containing:
@@ -514,19 +514,19 @@ This outputs a structured JSON document containing:
 
 ## Command Reference
 
-### `ivcs init`
+### `kai init`
 
-Initialize IVCS in the current directory.
+Initialize Kai in the current directory.
 
 ```bash
-ivcs init
+kai init
 ```
 
 **Creates:**
-- `.ivcs/db.sqlite` - SQLite database with WAL mode
-- `.ivcs/objects/` - Content-addressed storage directory
-- `.ivcs/rules/modules.yaml` - Module definitions
-- `.ivcs/rules/changetypes.yaml` - Change type rules
+- `.kai/db.sqlite` - SQLite database with WAL mode
+- `.kai/objects/` - Content-addressed storage directory
+- `.kai/rules/modules.yaml` - Module definitions
+- `.kai/rules/changetypes.yaml` - Change type rules
 
 **Notes:**
 - Run this once per project
@@ -535,12 +535,12 @@ ivcs init
 
 ---
 
-### `ivcs snapshot`
+### `kai snapshot`
 
 Create a semantic snapshot from a Git ref or directory.
 
 ```bash
-ivcs snapshot [git-ref] [flags]
+kai snapshot [git-ref] [flags]
 ```
 
 **Arguments:**
@@ -553,16 +553,16 @@ ivcs snapshot [git-ref] [flags]
 **Examples:**
 ```bash
 # Snapshot from Git ref
-ivcs snapshot main --repo .
+kai snapshot main --repo .
 
 # Snapshot from directory (no Git required)
-ivcs snapshot --dir ./src
+kai snapshot --dir ./src
 
 # Snapshot a specific commit
-ivcs snapshot abc123def456
+kai snapshot abc123def456
 
 # Snapshot a tag
-ivcs snapshot v1.2.3 --repo /path/to/repo
+kai snapshot v1.2.3 --repo /path/to/repo
 ```
 
 **Output:**
@@ -578,12 +578,12 @@ Created snapshot: <64-character-hex-id>
 
 ---
 
-### `ivcs analyze symbols`
+### `kai analyze symbols`
 
 Extract symbols from all files in a snapshot.
 
 ```bash
-ivcs analyze symbols <snapshot-id>
+kai analyze symbols <snapshot-id>
 ```
 
 **Arguments:**
@@ -591,7 +591,7 @@ ivcs analyze symbols <snapshot-id>
 
 **Examples:**
 ```bash
-ivcs analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
 ```
 
 **Output:**
@@ -615,12 +615,12 @@ Symbol analysis complete
 
 ---
 
-### `ivcs changeset create`
+### `kai changeset create`
 
 Create a changeset between two snapshots.
 
 ```bash
-ivcs changeset create <base-snapshot-id> <head-snapshot-id>
+kai changeset create <base-snapshot-id> <head-snapshot-id>
 ```
 
 **Arguments:**
@@ -629,7 +629,7 @@ ivcs changeset create <base-snapshot-id> <head-snapshot-id>
 
 **Examples:**
 ```bash
-ivcs changeset create abc123... def456...
+kai changeset create abc123... def456...
 ```
 
 **Output:**
@@ -648,12 +648,12 @@ Affected modules: [Auth, Billing]
 
 ---
 
-### `ivcs intent render`
+### `kai intent render`
 
 Generate or set an intent sentence for a changeset.
 
 ```bash
-ivcs intent render <changeset-id> [flags]
+kai intent render <changeset-id> [flags]
 ```
 
 **Arguments:**
@@ -665,11 +665,11 @@ ivcs intent render <changeset-id> [flags]
 **Examples:**
 ```bash
 # Auto-generate intent
-ivcs intent render abc123...
+kai intent render abc123...
 # Output: Intent: Update Auth login
 
 # Manually set intent
-ivcs intent render abc123... --edit "Fix session expiration bug"
+kai intent render abc123... --edit "Fix session expiration bug"
 # Output: Intent: Fix session expiration bug
 ```
 
@@ -682,12 +682,12 @@ ivcs intent render abc123... --edit "Fix session expiration bug"
 
 ---
 
-### `ivcs dump`
+### `kai dump`
 
 Output changeset data as structured JSON.
 
 ```bash
-ivcs dump <changeset-id> [flags]
+kai dump <changeset-id> [flags]
 ```
 
 **Arguments:**
@@ -699,13 +699,13 @@ ivcs dump <changeset-id> [flags]
 **Examples:**
 ```bash
 # Output to terminal
-ivcs dump abc123... --json
+kai dump abc123... --json
 
 # Save to file
-ivcs dump abc123... --json > changeset.json
+kai dump abc123... --json > changeset.json
 
 # Pretty print with jq
-ivcs dump abc123... --json | jq .
+kai dump abc123... --json | jq .
 ```
 
 **Output structure:**
@@ -738,12 +738,12 @@ ivcs dump abc123... --json | jq .
 
 ---
 
-### `ivcs status`
+### `kai status`
 
-Show IVCS status and pending changes since last snapshot.
+Show Kai status and pending changes since last snapshot.
 
 ```bash
-ivcs status [flags]
+kai status [flags]
 ```
 
 **Flags:**
@@ -751,12 +751,12 @@ ivcs status [flags]
 
 **Example:**
 ```bash
-ivcs status --dir ./src
+kai status --dir ./src
 ```
 
 **Output:**
 ```
-IVCS initialized
+Kai initialized
 
 Snapshots:  3
 Changesets: 1
@@ -777,12 +777,12 @@ Changes since last snapshot:
 
 ---
 
-### `ivcs log`
+### `kai log`
 
 Show chronological log of snapshots and changesets.
 
 ```bash
-ivcs log [flags]
+kai log [flags]
 ```
 
 **Flags:**
@@ -790,17 +790,17 @@ ivcs log [flags]
 
 **Example:**
 ```bash
-ivcs log -n 5
+kai log -n 5
 ```
 
 ---
 
-### `ivcs ws create`
+### `kai ws create`
 
 Create a new workspace (branch) based on a snapshot.
 
 ```bash
-ivcs ws create --name <name> --base <snapshot-id> [flags]
+kai ws create --name <name> --base <snapshot-id> [flags]
 ```
 
 **Flags:**
@@ -810,17 +810,17 @@ ivcs ws create --name <name> --base <snapshot-id> [flags]
 
 **Example:**
 ```bash
-ivcs ws create --name feature/auth --base abc123...
+kai ws create --name feature/auth --base abc123...
 ```
 
 ---
 
-### `ivcs ws list`
+### `kai ws list`
 
 List all workspaces.
 
 ```bash
-ivcs ws list
+kai ws list
 ```
 
 **Output:**
@@ -832,12 +832,12 @@ bugfix/login          shelved     a1b2c3d4e5f6  a1b2c3d4e5f6  0
 
 ---
 
-### `ivcs ws stage`
+### `kai ws stage`
 
 Stage changes from a directory into a workspace.
 
 ```bash
-ivcs ws stage --ws <name> [flags]
+kai ws stage --ws <name> [flags]
 ```
 
 **Flags:**
@@ -846,7 +846,7 @@ ivcs ws stage --ws <name> [flags]
 
 **Example:**
 ```bash
-ivcs ws stage --ws feature/auth --dir ./src
+kai ws stage --ws feature/auth --dir ./src
 ```
 
 **Output:**
@@ -860,57 +860,57 @@ Staged changes:
 
 ---
 
-### `ivcs ws log`
+### `kai ws log`
 
 Show the changelog for a workspace.
 
 ```bash
-ivcs ws log --ws <name>
+kai ws log --ws <name>
 ```
 
 **Example:**
 ```bash
-ivcs ws log --ws feature/auth
+kai ws log --ws feature/auth
 ```
 
 ---
 
-### `ivcs ws shelve`
+### `kai ws shelve`
 
 Shelve a workspace (freeze staging).
 
 ```bash
-ivcs ws shelve --ws <name>
+kai ws shelve --ws <name>
 ```
 
 ---
 
-### `ivcs ws unshelve`
+### `kai ws unshelve`
 
 Unshelve a workspace (resume staging).
 
 ```bash
-ivcs ws unshelve --ws <name>
+kai ws unshelve --ws <name>
 ```
 
 ---
 
-### `ivcs ws close`
+### `kai ws close`
 
 Permanently close a workspace.
 
 ```bash
-ivcs ws close --ws <name>
+kai ws close --ws <name>
 ```
 
 ---
 
-### `ivcs integrate`
+### `kai integrate`
 
 Integrate workspace changes into a target snapshot.
 
 ```bash
-ivcs integrate --ws <name> --into <snapshot-id>
+kai integrate --ws <name> --into <snapshot-id>
 ```
 
 **Flags:**
@@ -919,7 +919,7 @@ ivcs integrate --ws <name> --into <snapshot-id>
 
 **Example:**
 ```bash
-ivcs integrate --ws feature/auth --into abc123...
+kai integrate --ws feature/auth --into abc123...
 ```
 
 **Output:**
@@ -938,12 +938,12 @@ Integration conflicts (1):
 
 ---
 
-### `ivcs ref list`
+### `kai ref list`
 
 List all named references.
 
 ```bash
-ivcs ref list [flags]
+kai ref list [flags]
 ```
 
 **Flags:**
@@ -951,8 +951,8 @@ ivcs ref list [flags]
 
 **Example:**
 ```bash
-ivcs ref list
-ivcs ref list --kind Snapshot
+kai ref list
+kai ref list --kind Snapshot
 ```
 
 **Output:**
@@ -966,12 +966,12 @@ ws.feature/auth.head            Snapshot      4a2556c086b1f664...
 
 ---
 
-### `ivcs ref set`
+### `kai ref set`
 
 Create or update a named reference.
 
 ```bash
-ivcs ref set <name> <target>
+kai ref set <name> <target>
 ```
 
 **Arguments:**
@@ -981,24 +981,24 @@ ivcs ref set <name> <target>
 **Examples:**
 ```bash
 # Set using short ID
-ivcs ref set snap.main d9ec9902
+kai ref set snap.main d9ec9902
 
 # Set using another ref
-ivcs ref set snap.backup snap.main
+kai ref set snap.backup snap.main
 
 # Set using selector
-ivcs ref set snap.before_feature @snap:prev
-ivcs ref set cs.last_change @cs:last
+kai ref set snap.before_feature @snap:prev
+kai ref set cs.last_change @cs:last
 ```
 
 ---
 
-### `ivcs ref del`
+### `kai ref del`
 
 Delete a named reference.
 
 ```bash
-ivcs ref del <name>
+kai ref del <name>
 ```
 
 **Arguments:**
@@ -1006,17 +1006,17 @@ ivcs ref del <name>
 
 **Example:**
 ```bash
-ivcs ref del snap.old_backup
+kai ref del snap.old_backup
 ```
 
 ---
 
-### `ivcs pick`
+### `kai pick`
 
 Search and select nodes interactively.
 
 ```bash
-ivcs pick <kind> [flags]
+kai pick <kind> [flags]
 ```
 
 **Arguments:**
@@ -1029,23 +1029,23 @@ ivcs pick <kind> [flags]
 **Examples:**
 ```bash
 # List all snapshots
-ivcs pick Snapshot
+kai pick Snapshot
 
 # Search snapshots containing "auth"
-ivcs pick snap --filter auth
+kai pick snap --filter auth
 
 # List changesets non-interactively
-ivcs pick cs --no-ui
+kai pick cs --no-ui
 ```
 
 ---
 
-### `ivcs completion`
+### `kai completion`
 
 Generate shell completion scripts.
 
 ```bash
-ivcs completion [bash|zsh|fish|powershell]
+kai completion [bash|zsh|fish|powershell]
 ```
 
 **Arguments:**
@@ -1057,16 +1057,16 @@ ivcs completion [bash|zsh|fish|powershell]
 **Examples:**
 ```bash
 # Bash - add to ~/.bashrc
-source <(ivcs completion bash)
+source <(kai completion bash)
 
 # Zsh - add to ~/.zshrc
-source <(ivcs completion zsh)
+source <(kai completion zsh)
 
 # Fish - save to completions directory
-ivcs completion fish > ~/.config/fish/completions/ivcs.fish
+kai completion fish > ~/.config/fish/completions/kai.fish
 
 # PowerShell
-ivcs completion powershell | Out-String | Invoke-Expression
+kai completion powershell | Out-String | Invoke-Expression
 ```
 
 ---
@@ -1075,7 +1075,7 @@ ivcs completion powershell | Out-String | Invoke-Expression
 
 ### Module Definitions
 
-Edit `.ivcs/rules/modules.yaml` to define your project's modules:
+Edit `.kai/rules/modules.yaml` to define your project's modules:
 
 ```yaml
 modules:
@@ -1130,7 +1130,7 @@ modules:
 
 ### Change Type Rules
 
-The `.ivcs/rules/changetypes.yaml` file defines how changes are detected:
+The `.kai/rules/changetypes.yaml` file defines how changes are detected:
 
 ```yaml
 rules:
@@ -1207,7 +1207,7 @@ Each ChangeType node includes evidence of where the change occurred:
 
 ### Content-Addressed Storage
 
-IVCS uses content-addressed storage for both nodes and file content:
+Kai uses content-addressed storage for both nodes and file content:
 
 **Node IDs:**
 ```
@@ -1221,7 +1221,7 @@ This ensures:
 
 **File Objects:**
 ```
-.ivcs/objects/<blake3-hash-of-content>
+.kai/objects/<blake3-hash-of-content>
 ```
 
 Files are stored by their content hash, enabling:
@@ -1258,7 +1258,7 @@ CREATE INDEX edges_type ON edges(type);
 
 ### Tree-sitter Integration
 
-IVCS uses Tree-sitter for parsing TypeScript/JavaScript:
+Kai uses Tree-sitter for parsing TypeScript/JavaScript:
 
 - **Language**: JavaScript grammar (handles most TS syntax)
 - **Node types parsed**:
@@ -1295,21 +1295,21 @@ IVCS uses Tree-sitter for parsing TypeScript/JavaScript:
 
 ### Code Review Enhancement
 
-Use IVCS to understand pull requests at a semantic level:
+Use Kai to understand pull requests at a semantic level:
 
 ```bash
 # Create snapshots of base and PR branches
-ivcs snapshot main --repo .
-ivcs snapshot pr-123 --repo .
+kai snapshot main --repo .
+kai snapshot pr-123 --repo .
 
 # Analyze and compare
-ivcs analyze symbols <main-snap>
-ivcs analyze symbols <pr-snap>
-ivcs changeset create <main-snap> <pr-snap>
+kai analyze symbols <main-snap>
+kai analyze symbols <pr-snap>
+kai changeset create <main-snap> <pr-snap>
 
 # Get summary
-ivcs intent render <changeset>
-ivcs dump <changeset> --json > review.json
+kai intent render <changeset>
+kai dump <changeset> --json > review.json
 ```
 
 ### Change Impact Analysis
@@ -1318,11 +1318,11 @@ Understand what modules and symbols are affected:
 
 ```bash
 # View affected modules in changeset output
-ivcs changeset create <before> <after>
+kai changeset create <before> <after>
 # Output includes: Affected modules: [Auth, Billing]
 
 # Get detailed impact from JSON
-ivcs dump <changeset> --json | jq '.nodes[] | select(.kind == "Symbol")'
+kai dump <changeset> --json | jq '.nodes[] | select(.kind == "Symbol")'
 ```
 
 ### Changelog Generation
@@ -1332,15 +1332,15 @@ Generate semantic changelogs:
 ```bash
 # For each release tag pair
 for version in v1.0 v1.1 v1.2; do
-  ivcs snapshot $version --repo .
+  kai snapshot $version --repo .
 done
 
 # Generate changesets between versions
-ivcs changeset create <v1.0-snap> <v1.1-snap>
-ivcs intent render <cs-1>
+kai changeset create <v1.0-snap> <v1.1-snap>
+kai intent render <cs-1>
 
-ivcs changeset create <v1.1-snap> <v1.2-snap>
-ivcs intent render <cs-2>
+kai changeset create <v1.1-snap> <v1.2-snap>
+kai intent render <cs-2>
 ```
 
 ### Auditing and Compliance
@@ -1349,10 +1349,10 @@ Track what types of changes were made:
 
 ```bash
 # Export all change types
-ivcs dump <changeset> --json | jq '.nodes[] | select(.kind == "ChangeType")'
+kai dump <changeset> --json | jq '.nodes[] | select(.kind == "ChangeType")'
 
 # Find all API surface changes
-ivcs dump <changeset> --json | jq '.nodes[] | select(.payload.category == "API_SURFACE_CHANGED")'
+kai dump <changeset> --json | jq '.nodes[] | select(.payload.category == "API_SURFACE_CHANGED")'
 ```
 
 ---
@@ -1383,38 +1383,38 @@ Solution: Use the full 64-character hex ID from snapshot output.
 ```
 Error: getting changeset data: changeset not found
 ```
-Solution: Verify the changeset ID. Run `sqlite3 .ivcs/db.sqlite "SELECT hex(id) FROM nodes WHERE kind='ChangeSet'"`.
+Solution: Verify the changeset ID. Run `sqlite3 .kai/db.sqlite "SELECT hex(id) FROM nodes WHERE kind='ChangeSet'"`.
 
 ### Debugging
 
 **View database contents:**
 ```bash
 # List all nodes
-sqlite3 .ivcs/db.sqlite "SELECT kind, COUNT(*) FROM nodes GROUP BY kind"
+sqlite3 .kai/db.sqlite "SELECT kind, COUNT(*) FROM nodes GROUP BY kind"
 
 # List all snapshots
-sqlite3 .ivcs/db.sqlite "SELECT hex(id), payload FROM nodes WHERE kind='Snapshot'"
+sqlite3 .kai/db.sqlite "SELECT hex(id), payload FROM nodes WHERE kind='Snapshot'"
 
 # List all changesets
-sqlite3 .ivcs/db.sqlite "SELECT hex(id), json_extract(payload, '$.intent') FROM nodes WHERE kind='ChangeSet'"
+sqlite3 .kai/db.sqlite "SELECT hex(id), json_extract(payload, '$.intent') FROM nodes WHERE kind='ChangeSet'"
 ```
 
 **Check object storage:**
 ```bash
 # List stored objects
-ls -la .ivcs/objects/
+ls -la .kai/objects/
 
 # View a file's content
-cat .ivcs/objects/<hash>
+cat .kai/objects/<hash>
 ```
 
-**Reset IVCS:**
+**Reset Kai:**
 ```bash
-# Remove all IVCS data
-rm -rf .ivcs/
+# Remove all Kai data
+rm -rf .kai/
 
 # Reinitialize
-ivcs init
+kai init
 ```
 
 ---
@@ -1456,8 +1456,8 @@ go test -cover ./...
 ### Project Structure
 
 ```
-ivcs/
-├── cmd/ivcs/
+kai/
+├── cmd/kai/
 │   └── main.go              # CLI entry point with Cobra commands
 ├── internal/
 │   ├── util/                # Canonical JSON, BLAKE3 hashing

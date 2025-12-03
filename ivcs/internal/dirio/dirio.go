@@ -10,7 +10,7 @@ import (
 
 	"lukechampine.com/blake3"
 
-	"ivcs/internal/filesource"
+	"kai/internal/filesource"
 )
 
 // DirectorySource reads files from a filesystem directory.

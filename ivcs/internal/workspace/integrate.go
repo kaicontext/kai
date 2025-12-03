@@ -4,8 +4,8 @@ package workspace
 import (
 	"fmt"
 
-	"ivcs/internal/graph"
-	"ivcs/internal/util"
+	"kai/internal/graph"
+	"kai/internal/util"
 )
 
 // IntegrateResult contains the result of integrating a workspace.

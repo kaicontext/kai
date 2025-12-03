@@ -4,12 +4,12 @@ package workspace
 import (
 	"fmt"
 
-	"ivcs/internal/classify"
-	"ivcs/internal/filesource"
-	"ivcs/internal/graph"
-	"ivcs/internal/module"
-	"ivcs/internal/snapshot"
-	"ivcs/internal/util"
+	"kai/internal/classify"
+	"kai/internal/filesource"
+	"kai/internal/graph"
+	"kai/internal/module"
+	"kai/internal/snapshot"
+	"kai/internal/util"
 )
 
 // StageResult contains the result of staging changes.

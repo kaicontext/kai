@@ -1,4 +1,4 @@
-// Package main provides the ivcs CLI.
+// Package main provides the kai CLI.
 package main
 
 import (
@@ -12,21 +12,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"ivcs/internal/classify"
-	"ivcs/internal/dirio"
-	"ivcs/internal/filesource"
-	"ivcs/internal/gitio"
-	"ivcs/internal/graph"
-	"ivcs/internal/intent"
-	"ivcs/internal/module"
-	"ivcs/internal/ref"
-	"ivcs/internal/snapshot"
-	"ivcs/internal/util"
-	"ivcs/internal/workspace"
+	"kai/internal/classify"
+	"kai/internal/dirio"
+	"kai/internal/filesource"
+	"kai/internal/gitio"
+	"kai/internal/graph"
+	"kai/internal/intent"
+	"kai/internal/module"
+	"kai/internal/ref"
+	"kai/internal/snapshot"
+	"kai/internal/util"
+	"kai/internal/workspace"
 )
 
 const (
-	ivcsDir    = ".ivcs"
+	kaiDir     = ".kai"
 	dbFile     = "db.sqlite"
 	objectsDir = "objects"
 	rulesDir   = "rules"
@@ -34,14 +34,14 @@ const (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ivcs",
-	Short: "Intent Version Control System - semantic, intent-based version control",
-	Long:  `IVCS is a local CLI that creates semantic snapshots from Git refs, computes changesets, classifies change types, and generates intent sentences.`,
+	Use:   "kai",
+	Short: "Kai - semantic, intent-based version control",
+	Long:  `Kai is a local CLI that creates semantic snapshots from Git refs, computes changesets, classifies change types, and generates intent sentences.`,
 }
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize IVCS in the current directory",
+	Short: "Initialize Kai in the current directory",
 	RunE:  runInit,
 }
 
@@ -51,8 +51,8 @@ var snapshotCmd = &cobra.Command{
 	Long: `Create a snapshot from a Git ref or directory.
 
 Examples:
-  ivcs snapshot main --repo .     # Snapshot from Git ref
-  ivcs snapshot --dir ./src       # Snapshot from directory (no Git required)`,
+  kai snapshot main --repo .     # Snapshot from Git ref
+  kai snapshot --dir ./src       # Snapshot from directory (no Git required)`,
 	RunE: runSnapshot,
 }
 
@@ -124,7 +124,7 @@ var logCmd = &cobra.Command{
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show IVCS status and pending changes",
+	Short: "Show Kai status and pending changes",
 	RunE:  runStatus,
 }
 
@@ -192,8 +192,8 @@ This writes all files from the snapshot to the target directory.
 Use --clean to also delete files not in the snapshot.
 
 Examples:
-  ivcs checkout abc123... --dir ./src
-  ivcs checkout abc123... --dir ./src --clean`,
+  kai checkout abc123... --dir ./src
+  kai checkout abc123... --dir ./src --clean`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCheckout,
 }
@@ -207,10 +207,10 @@ var refCmd = &cobra.Command{
 References allow you to use human-readable names instead of 64-character hex IDs.
 
 Examples:
-  ivcs ref set snap.main @snap:last
-  ivcs ref set cs.login_fix 90cd7264
-  ivcs ref list
-  ivcs ref del cs.login_fix`,
+  kai ref set snap.main @snap:last
+  kai ref set cs.login_fix 90cd7264
+  kai ref list
+  kai ref del cs.login_fix`,
 }
 
 var refListCmd = &cobra.Command{
@@ -231,9 +231,9 @@ The target can be:
   - A selector (@snap:last, @cs:prev, etc.)
 
 Examples:
-  ivcs ref set snap.main d9ec9902
-  ivcs ref set cs.bugfix @cs:last
-  ivcs ref set snap.release @snap:prev`,
+  kai ref set snap.main d9ec9902
+  kai ref set cs.bugfix @cs:last
+  kai ref set snap.release @snap:prev`,
 	Args: cobra.ExactArgs(2),
 	RunE: runRefSet,
 }
@@ -254,8 +254,8 @@ Use --filter to search by substring in ID, slug, or payload.
 Use --no-ui to output matches without interactive selection.
 
 Examples:
-  ivcs pick Snapshot --filter auth
-  ivcs pick ChangeSet --no-ui`,
+  kai pick Snapshot --filter auth
+  kai pick ChangeSet --no-ui`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPick,
 }
@@ -263,27 +263,27 @@ Examples:
 var completionCmd = &cobra.Command{
 	Use:   "completion [bash|zsh|fish|powershell]",
 	Short: "Generate shell completion scripts",
-	Long: `Generate shell completion scripts for ivcs.
+	Long: `Generate shell completion scripts for kai.
 
 To load completions:
 
 Bash:
-  $ source <(ivcs completion bash)
+  $ source <(kai completion bash)
   # To load completions for each session, add to your ~/.bashrc:
-  # source <(ivcs completion bash)
+  # source <(kai completion bash)
 
 Zsh:
-  $ source <(ivcs completion zsh)
+  $ source <(kai completion zsh)
   # To load completions for each session, add to your ~/.zshrc:
-  # source <(ivcs completion zsh)
+  # source <(kai completion zsh)
 
 Fish:
-  $ ivcs completion fish | source
+  $ kai completion fish | source
   # To load completions for each session:
-  # ivcs completion fish > ~/.config/fish/completions/ivcs.fish
+  # kai completion fish > ~/.config/fish/completions/kai.fish
 
 PowerShell:
-  PS> ivcs completion powershell | Out-String | Invoke-Expression
+  PS> kai completion powershell | Out-String | Invoke-Expression
 `,
 	DisableFlagsInUseLine: true,
 	ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
@@ -416,19 +416,19 @@ func main() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	// Create .ivcs directory
-	if err := os.MkdirAll(ivcsDir, 0755); err != nil {
-		return fmt.Errorf("creating .ivcs directory: %w", err)
+	// Create .kai directory
+	if err := os.MkdirAll(kaiDir, 0755); err != nil {
+		return fmt.Errorf("creating .kai directory: %w", err)
 	}
 
 	// Create objects directory
-	objPath := filepath.Join(ivcsDir, objectsDir)
+	objPath := filepath.Join(kaiDir, objectsDir)
 	if err := os.MkdirAll(objPath, 0755); err != nil {
 		return fmt.Errorf("creating objects directory: %w", err)
 	}
 
 	// Create rules directory and copy default rules
-	rulesPath := filepath.Join(ivcsDir, rulesDir)
+	rulesPath := filepath.Join(kaiDir, rulesDir)
 	if err := os.MkdirAll(rulesPath, 0755); err != nil {
 		return fmt.Errorf("creating rules directory: %w", err)
 	}
@@ -466,7 +466,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Open database and apply schema
-	dbPath := filepath.Join(ivcsDir, dbFile)
+	dbPath := filepath.Join(kaiDir, dbFile)
 	db, err := graph.Open(dbPath, objPath)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -539,7 +539,7 @@ CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
 		return fmt.Errorf("committing schema: %w", err)
 	}
 
-	fmt.Println("Initialized IVCS in .ivcs/")
+	fmt.Println("Initialized Kai in .kai/")
 	return nil
 }
 
@@ -868,13 +868,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 }
 
 func openDB() (*graph.DB, error) {
-	dbPath := filepath.Join(ivcsDir, dbFile)
-	objPath := filepath.Join(ivcsDir, objectsDir)
+	dbPath := filepath.Join(kaiDir, dbFile)
+	objPath := filepath.Join(kaiDir, objectsDir)
 	return graph.Open(dbPath, objPath)
 }
 
 func loadMatcher() (*module.Matcher, error) {
-	rulesPath := filepath.Join(ivcsDir, rulesDir, "modules.yaml")
+	rulesPath := filepath.Join(kaiDir, rulesDir, "modules.yaml")
 	return module.LoadRules(rulesPath)
 }
 
@@ -1093,13 +1093,13 @@ func runLog(cmd *cobra.Command, args []string) error {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	// Check if IVCS is initialized
-	if _, err := os.Stat(ivcsDir); os.IsNotExist(err) {
-		fmt.Println("Not an IVCS repository (run 'ivcs init' to initialize)")
+	// Check if Kai is initialized
+	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
+		fmt.Println("Not a Kai repository (run 'kai init' to initialize)")
 		return nil
 	}
 
-	fmt.Println("IVCS initialized")
+	fmt.Println("Kai initialized")
 	fmt.Println()
 
 	db, err := openDB()
@@ -1124,8 +1124,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	if len(snapshots) == 0 {
 		fmt.Println("No snapshots yet. Create one with:")
-		fmt.Println("  ivcs snapshot --dir ./src")
-		fmt.Println("  ivcs snapshot <git-ref> --repo .")
+		fmt.Println("  kai snapshot --dir ./src")
+		fmt.Println("  kai snapshot <git-ref> --repo .")
 		return nil
 	}
 
@@ -1242,7 +1242,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	fmt.Println("Create a new snapshot to capture these changes:")
-	fmt.Printf("  ivcs snapshot --dir %s\n", statusDir)
+	fmt.Printf("  kai snapshot --dir %s\n", statusDir)
 
 	return nil
 }

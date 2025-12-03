@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"ivcs/internal/util"
+	"kai/internal/util"
 )
 
 // NodeKind represents the type of a node.
