@@ -1529,7 +1529,7 @@ kai/
 
 ## License
 
-MIT License - See LICENSE file for details.
+GPLv3 License - See LICENSE file for details.
 
 ---
 
