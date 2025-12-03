@@ -11,6 +11,7 @@ import (
 	"lukechampine.com/blake3"
 
 	"kai/internal/filesource"
+	"kai/internal/ignore"
 )
 
 // DirectorySource reads files from a filesystem directory.
@@ -18,10 +19,22 @@ type DirectorySource struct {
 	rootPath   string
 	files      []*filesource.FileInfo
 	identifier string
+	ignore     *ignore.Matcher
+}
+
+// Option configures a DirectorySource.
+type Option func(*DirectorySource)
+
+// WithIgnore sets a custom ignore matcher.
+func WithIgnore(m *ignore.Matcher) Option {
+	return func(ds *DirectorySource) {
+		ds.ignore = m
+	}
 }
 
 // OpenDirectory opens a directory as a file source.
-func OpenDirectory(dirPath string) (*DirectorySource, error) {
+// Options can be passed to configure behavior (e.g., WithIgnore).
+func OpenDirectory(dirPath string, opts ...Option) (*DirectorySource, error) {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
 		return nil, fmt.Errorf("getting absolute path: %w", err)
@@ -36,6 +49,19 @@ func OpenDirectory(dirPath string) (*DirectorySource, error) {
 	}
 
 	ds := &DirectorySource{rootPath: absPath}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(ds)
+	}
+
+	// If no ignore matcher provided, load from directory
+	if ds.ignore == nil {
+		ds.ignore, err = ignore.LoadFromDir(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading ignore patterns: %w", err)
+		}
+	}
 
 	// Walk directory and collect files
 	if err := ds.collectFiles(); err != nil {
@@ -82,13 +108,25 @@ func (ds *DirectorySource) collectFiles() error {
 			return err
 		}
 
-		// Skip directories
-		if info.IsDir() {
-			// Skip common non-source directories
-			name := info.Name()
-			if name == "node_modules" || name == ".git" || name == ".ivcs" || name == "dist" || name == "build" {
+		// Make path relative to root
+		relPath, err := filepath.Rel(ds.rootPath, path)
+		if err != nil {
+			return fmt.Errorf("getting relative path: %w", err)
+		}
+
+		// Normalize path separators to forward slashes
+		relPath = filepath.ToSlash(relPath)
+
+		// Skip ignored paths
+		if ds.ignore != nil && ds.ignore.Match(relPath, info.IsDir()) {
+			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// Skip directories (but continue walking into them)
+		if info.IsDir() {
 			return nil
 		}
 
@@ -103,15 +141,6 @@ func (ds *DirectorySource) collectFiles() error {
 		if err != nil {
 			return fmt.Errorf("reading file %s: %w", path, err)
 		}
-
-		// Make path relative to root
-		relPath, err := filepath.Rel(ds.rootPath, path)
-		if err != nil {
-			return fmt.Errorf("getting relative path: %w", err)
-		}
-
-		// Normalize path separators to forward slashes
-		relPath = filepath.ToSlash(relPath)
 
 		files = append(files, &filesource.FileInfo{
 			Path:    relPath,

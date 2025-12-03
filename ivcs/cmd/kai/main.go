@@ -21,6 +21,7 @@ import (
 	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/snapshot"
+	"kai/internal/status"
 	"kai/internal/util"
 	"kai/internal/workspace"
 )
@@ -298,8 +299,12 @@ var (
 	wsDescription string
 	wsDir         string
 	wsTarget      string
-	statusDir     string
-	logLimit      int
+	statusDir      string
+	statusAgainst  string
+	statusNameOnly bool
+	statusJSON     bool
+	statusSemantic bool
+	logLimit       int
 	repoPath      string
 	dirPath       string
 	editText      string
@@ -320,6 +325,10 @@ func init() {
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 10, "Number of entries to show")
 	statusCmd.Flags().StringVar(&statusDir, "dir", ".", "Directory to check for changes")
+	statusCmd.Flags().StringVar(&statusAgainst, "against", "", "Baseline ref/selector to compare against (default: @snap:last)")
+	statusCmd.Flags().BoolVar(&statusNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
+	statusCmd.Flags().BoolVar(&statusSemantic, "semantic", false, "Include semantic change type analysis for modified files")
 
 	// Workspace command flags
 	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (required)")
@@ -1099,150 +1108,86 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Println("Kai initialized")
-	fmt.Println()
-
 	db, err := openDB()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	// Count snapshots and changesets
-	snapshots, err := db.GetNodesByKind(graph.KindSnapshot)
-	if err != nil {
-		return err
-	}
-	changesets, err := db.GetNodesByKind(graph.KindChangeSet)
-	if err != nil {
-		return err
-	}
+	// For JSON output, skip the header info
+	if !statusJSON && !statusNameOnly {
+		fmt.Println("Kai initialized")
+		fmt.Println()
 
-	fmt.Printf("Snapshots:  %d\n", len(snapshots))
-	fmt.Printf("Changesets: %d\n", len(changesets))
-	fmt.Println()
-
-	if len(snapshots) == 0 {
-		fmt.Println("No snapshots yet. Create one with:")
-		fmt.Println("  kai snapshot --dir ./src")
-		fmt.Println("  kai snapshot <git-ref> --repo .")
-		return nil
-	}
-
-	// Find the latest snapshot by createdAt
-	var latestSnapshot *graph.Node
-	var latestTime int64
-	for _, snap := range snapshots {
-		if createdAt, ok := snap.Payload["createdAt"].(float64); ok {
-			if int64(createdAt) > latestTime {
-				latestTime = int64(createdAt)
-				latestSnapshot = snap
-			}
+		// Count snapshots and changesets
+		snapshots, err := db.GetNodesByKind(graph.KindSnapshot)
+		if err != nil {
+			return err
 		}
-	}
-
-	if latestSnapshot != nil {
-		sourceType, _ := latestSnapshot.Payload["sourceType"].(string)
-		sourceRef, _ := latestSnapshot.Payload["sourceRef"].(string)
-		if sourceRef == "" {
-			if gitRef, ok := latestSnapshot.Payload["gitRef"].(string); ok {
-				sourceRef = gitRef
-				sourceType = "git"
-			}
+		changesets, err := db.GetNodesByKind(graph.KindChangeSet)
+		if err != nil {
+			return err
 		}
 
-		t := time.UnixMilli(latestTime)
-		fmt.Printf("Latest snapshot: %s\n", util.BytesToHex(latestSnapshot.ID)[:12])
-		fmt.Printf("  Source: %s (%s)\n", sourceRef, sourceType)
-		fmt.Printf("  Date:   %s\n", t.Format("2006-01-02 15:04:05"))
+		fmt.Printf("Snapshots:  %d\n", len(snapshots))
+		fmt.Printf("Changesets: %d\n", len(changesets))
+		fmt.Println()
+
+		if len(snapshots) == 0 {
+			fmt.Println("No snapshots yet. Create one with:")
+			fmt.Println("  kai snapshot --dir ./src")
+			fmt.Println("  kai snapshot <git-ref> --repo .")
+			return nil
+		}
+
+		fmt.Printf("Checking for changes in: %s\n", statusDir)
 		fmt.Println()
 	}
 
-	// Check for pending changes by comparing current directory to latest snapshot
-	fmt.Printf("Checking for changes in: %s\n", statusDir)
-	fmt.Println()
-
-	// Get current directory files
-	currentSource, err := dirio.OpenDirectory(statusDir)
+	// Compute status using the new status package
+	result, err := status.Compute(db, status.Options{
+		Dir:      statusDir,
+		Against:  statusAgainst,
+		UseCache: true,
+		CacheDir: statusDir,
+	})
 	if err != nil {
-		return fmt.Errorf("opening directory: %w", err)
+		return err
 	}
 
-	currentFiles, err := currentSource.GetFiles()
-	if err != nil {
-		return fmt.Errorf("getting current files: %w", err)
-	}
-
-	// Build map of current files by path -> digest
-	currentFileMap := make(map[string]string)
-	for _, f := range currentFiles {
-		// Compute digest for comparison
-		digest := util.Blake3HashHex(f.Content)
-		currentFileMap[f.Path] = digest
-	}
-
-	// Get files from latest snapshot
-	snapshotFiles, err := snapshot.NewCreator(db, nil).GetSnapshotFiles(latestSnapshot.ID)
-	if err != nil {
-		return fmt.Errorf("getting snapshot files: %w", err)
-	}
-
-	snapshotFileMap := make(map[string]string)
-	for _, f := range snapshotFiles {
-		path, _ := f.Payload["path"].(string)
-		digest, _ := f.Payload["digest"].(string)
-		snapshotFileMap[path] = digest
-	}
-
-	// Compare
-	var added, modified, deleted []string
-
-	for path, currentDigest := range currentFileMap {
-		if snapshotDigest, exists := snapshotFileMap[path]; !exists {
-			added = append(added, path)
-		} else if currentDigest != snapshotDigest {
-			modified = append(modified, path)
+	// Run semantic analysis if requested
+	var semantic *status.SemanticResult
+	if statusSemantic && len(result.Modified) > 0 {
+		semantic, err = status.AnalyzeSemantic(db, result, status.SemanticOptions{
+			Dir: statusDir,
+		})
+		if err != nil {
+			// Non-fatal - continue without semantic info
+			fmt.Fprintf(os.Stderr, "warning: semantic analysis failed: %v\n", err)
 		}
 	}
 
-	for path := range snapshotFileMap {
-		if _, exists := currentFileMap[path]; !exists {
-			deleted = append(deleted, path)
-		}
+	// Determine output format
+	var format status.OutputFormat
+	if statusJSON {
+		format = status.FormatJSON
+	} else if statusNameOnly {
+		format = status.FormatNameOnly
+	} else {
+		format = status.FormatDefault
 	}
 
-	if len(added) == 0 && len(modified) == 0 && len(deleted) == 0 {
-		fmt.Println("No changes since last snapshot")
-		return nil
+	// Write output
+	if err := status.WriteOutputWithSemantic(os.Stdout, result, semantic, format); err != nil {
+		return err
 	}
 
-	fmt.Println("Changes since last snapshot:")
-	fmt.Println()
-
-	if len(added) > 0 {
-		fmt.Printf("  Added (%d):\n", len(added))
-		for _, path := range added {
-			fmt.Printf("    + %s\n", path)
-		}
+	// For default format, add helpful suggestion if there are changes
+	if format == status.FormatDefault && result.HasChanges() {
+		fmt.Println()
+		fmt.Println("Create a new snapshot to capture these changes:")
+		fmt.Printf("  kai snapshot --dir %s\n", statusDir)
 	}
-
-	if len(modified) > 0 {
-		fmt.Printf("  Modified (%d):\n", len(modified))
-		for _, path := range modified {
-			fmt.Printf("    ~ %s\n", path)
-		}
-	}
-
-	if len(deleted) > 0 {
-		fmt.Printf("  Deleted (%d):\n", len(deleted))
-		for _, path := range deleted {
-			fmt.Printf("    - %s\n", path)
-		}
-	}
-
-	fmt.Println()
-	fmt.Println("Create a new snapshot to capture these changes:")
-	fmt.Printf("  kai snapshot --dir %s\n", statusDir)
 
 	return nil
 }

@@ -1,5 +1,5 @@
-# Binary
-kai
+# Binary (at root only)
+/kai
 
 # Test artifacts
 *.test
