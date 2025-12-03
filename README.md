@@ -1528,6 +1528,7 @@ kai/
 │   ├── cmd/kailabd/
 │   │   └── main.go              # Server entry point
 │   ├── api/                     # HTTP handlers and middleware
+│   ├── repo/                    # Multi-repo registry with LRU caching
 │   ├── store/                   # SQLite storage layer
 │   ├── pack/                    # Pack format encoding/decoding
 │   ├── proto/                   # Wire protocol DTOs
@@ -1556,52 +1557,111 @@ kai/
 
 ## Kailab Server
 
-Kailab is a fast, DB-backed server for hosting Kai repositories remotely. It provides HTTP APIs for pushing and fetching snapshots, changesets, and other semantic objects.
+Kailab is a fast, multi-tenant, DB-backed server for hosting Kai repositories remotely. It provides HTTP APIs for pushing and fetching snapshots, changesets, and other semantic objects. A single Kailab process can serve many repositories across multiple tenants.
+
+### Architecture
+
+- **Multi-repo**: One server process serves many repositories
+- **Multi-tenant**: Repositories are organized by `/{tenant}/{repo}`
+- **Per-repo isolation**: Each repo has its own SQLite database
+- **LRU caching**: Open repo handles are cached with idle eviction
 
 ### Running the Server
 
 ```bash
 # Build and run
 cd kailab
-make build
-./kailabd
+go build -o kailabd ./cmd/kailabd
+./kailabd --data ./data --listen :7447
 
-# Or with custom configuration
-KAILAB_ADDR=:8080 KAILAB_DATA_DIR=/var/lib/kailab ./kailabd
+# Or with environment variables
+KAILAB_LISTEN=:7447 KAILAB_DATA=./data ./kailabd
+```
+
+**Output:**
+```
+kailabd starting...
+  listen:       :7447
+  data:         ./data
+  max_open:     256
+  idle_ttl:     10m0s
+Multi-repo mode: routes are /{tenant}/{repo}/v1/...
+Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/{tenant}/{repo}
 ```
 
 ### Server Configuration
 
-Environment variables:
+| Variable | Flag | Default | Description |
+|----------|------|---------|-------------|
+| `KAILAB_LISTEN` | `--listen` | `:7447` | HTTP listen address |
+| `KAILAB_DATA` | `--data` | `./data` | Base directory for repo databases |
+| `KAILAB_MAX_OPEN` | - | `256` | Max number of repos to keep open (LRU) |
+| `KAILAB_IDLE_TTL` | - | `10m` | How long to keep idle repos open |
+| `KAILAB_MAX_PACK_SIZE` | - | `256MB` | Maximum pack upload size |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KAILAB_ADDR` | `:9123` | HTTP listen address |
-| `KAILAB_DATA_DIR` | `./data` | Base directory for database and objects |
-| `KAILAB_TENANT` | `default` | Tenant namespace |
-| `KAILAB_REPO` | `main` | Repository name |
+### Filesystem Layout
+
+```
+data/
+├── acme/                    # tenant
+│   ├── webapp/              # repo
+│   │   └── kai.db           # SQLite database (WAL mode)
+│   └── api/
+│       └── kai.db
+└── other-org/
+    └── main/
+        └── kai.db
+```
+
+### Admin API
+
+Create and manage repositories via the admin API:
+
+```bash
+# Create a repository
+curl -X POST http://localhost:7447/admin/v1/repos \
+  -H "Content-Type: application/json" \
+  -d '{"tenant":"acme","repo":"webapp"}'
+
+# List all repositories
+curl http://localhost:7447/admin/v1/repos
+
+# Delete a repository
+curl -X DELETE http://localhost:7447/admin/v1/repos/acme/webapp
+```
 
 ### Remote Commands
 
 #### `kai remote set`
 
-Configure a remote server.
+Configure a remote server with tenant and repository.
 
 ```bash
-kai remote set <name> <url>
+kai remote set <name> <url> [flags]
 ```
+
+**Flags:**
+- `--tenant <name>` - Tenant/org name (default: `default`)
+- `--repo <name>` - Repository name (default: `main`)
 
 **Examples:**
 ```bash
-kai remote set origin http://localhost:9123
-kai remote set production https://kailab.example.com
+# Set remote with default tenant/repo
+kai remote set origin http://localhost:7447
+
+# Set remote with specific tenant/repo
+kai remote set origin http://localhost:7447 --tenant acme --repo webapp
+
+# Multiple remotes for different repos
+kai remote set staging http://localhost:7447 --tenant acme --repo staging
+kai remote set prod https://kailab.example.com --tenant acme --repo production
 ```
 
 ---
 
 #### `kai remote get`
 
-Get a remote's URL.
+Get a remote's configuration.
 
 ```bash
 kai remote get <name>
@@ -1610,7 +1670,10 @@ kai remote get <name>
 **Example:**
 ```bash
 kai remote get origin
-# Output: http://localhost:9123
+# Output:
+# URL:    http://localhost:7447
+# Tenant: acme
+# Repo:   webapp
 ```
 
 ---
@@ -1625,8 +1688,10 @@ kai remote list
 
 **Output:**
 ```
-origin       http://localhost:9123
-production   https://kailab.example.com
+NAME             TENANT        REPO          URL
+origin           acme          webapp        http://localhost:7447
+staging          acme          staging       http://localhost:7447
+prod             acme          production    https://kailab.example.com
 ```
 
 ---
@@ -1724,17 +1789,28 @@ snap.main    def456...  user@example.com  2024-12-02T14:00:00Z
 
 ### Server API
 
-The Kailab server exposes these HTTP endpoints:
+The Kailab server exposes these HTTP endpoints. All repo-scoped endpoints use the `/{tenant}/{repo}` prefix:
+
+**Admin Routes:**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/v1/push/negotiate` | Object negotiation (client sends have, server returns need) |
-| `POST` | `/v1/objects/pack` | Ingest zstd-compressed pack of objects |
-| `GET` | `/v1/objects/{digest}` | Get a single object by digest |
-| `PUT` | `/v1/refs/{name}` | Update a ref (with fast-forward check) |
-| `GET` | `/v1/refs` | List all refs |
-| `GET` | `/v1/log/head` | Get the latest log entry |
-| `GET` | `/v1/log/entries` | Get paginated ref history |
+| `GET` | `/health` | Health check |
+| `POST` | `/admin/v1/repos` | Create a new repository |
+| `GET` | `/admin/v1/repos` | List all repositories |
+| `DELETE` | `/admin/v1/repos/{tenant}/{repo}` | Delete a repository |
+
+**Repo-Scoped Routes** (prefix: `/{tenant}/{repo}`):
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/{tenant}/{repo}/v1/push/negotiate` | Object negotiation |
+| `POST` | `/{tenant}/{repo}/v1/objects/pack` | Ingest zstd-compressed pack |
+| `GET` | `/{tenant}/{repo}/v1/objects/{digest}` | Get a single object |
+| `PUT` | `/{tenant}/{repo}/v1/refs/{name}` | Update a ref |
+| `GET` | `/{tenant}/{repo}/v1/refs` | List all refs |
+| `GET` | `/{tenant}/{repo}/v1/log/head` | Get the latest log entry |
+| `GET` | `/{tenant}/{repo}/v1/log/entries` | Get paginated ref history |
 
 ### Pack Format
 
