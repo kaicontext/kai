@@ -66,6 +66,15 @@
       margin-bottom: 1.5rem;
       color: var(--fg);
     }
+    h3 {
+      font-size: 1.1rem;
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      color: var(--accent);
+    }
+    h3:first-of-type {
+      margin-top: 0;
+    }
     .features {
       display: grid;
       gap: 1.5rem;
@@ -194,33 +203,91 @@
 
     <section id="quickstart">
       <h2>Quick Start</h2>
-      <pre><code><span class="dim"># Initialize kai in your existing Git repo</span>
+
+      <h3>Add Kai to an Existing Git Repository</h3>
+      <pre><code><span class="dim"># Navigate to your git repo root</span>
+cd /path/to/existing-repo
+
+<span class="dim"># Initialize kai (creates .kai directory)</span>
 kai init
 
-<span class="dim"># Create snapshots from Git refs</span>
-kai snapshot main --repo .
-kai snapshot feature-branch --repo .
+<span class="dim"># Add .kai to .gitignore (kai manages its own history)</span>
+echo ".kai/" >> .gitignore
 
-<span class="dim"># Create a changeset between them</span>
-kai changeset create @snap:prev @snap:last
+<span class="dim"># Create initial snapshot of your source code</span>
+kai snapshot --dir ./src -m "Baseline from current git HEAD"
+
+<span class="dim"># Configure modules to match your project structure</span>
+cat > kai.modules.yaml << 'EOF'
+modules:
+  - name: API
+    paths: ["src/routes/**", "src/controllers/**"]
+  - name: Models
+    paths: ["src/models/**"]
+  - name: Utils
+    paths: ["src/utils/**", "lib/**"]
+  - name: Frontend
+    paths: ["src/components/**", "src/pages/**"]
+EOF
+
+<span class="dim"># Commit the kai config to git</span>
+git add kai.modules.yaml .gitignore
+git commit -m "Add kai version control"
+
+<span class="dim"># Verify setup</span>
+kai log
+kai status --dir ./src</code></pre>
+
+      <h3>Basic Workflow</h3>
+      <pre><code><span class="dim"># Check what's changed</span>
+kai status --dir ./src
+
+<span class="dim"># Create a snapshot after making changes</span>
+kai snapshot --dir ./src -m "Add new feature"
+
+<span class="dim"># Compare two snapshots</span>
+kai diff @snap:prev @snap:last
+
+<span class="dim"># Create a changeset with semantic analysis</span>
+kai changeset create @snap:prev @snap:last -m "Implemented user auth"
 
 <span class="dim"># View the auto-generated intent</span>
 kai intent render @cs:last
-<span class="highlight">Intent: Add formatDate and formatTime in Utils</span></code></pre>
-    </section>
+<span class="highlight">Intent: Add formatDate and formatTime in Utils</span>
 
-    <section>
-      <h2>Commands</h2>
-      <pre><code>kai init                 <span class="dim"># Initialize repository</span>
-kai snapshot             <span class="dim"># Create a snapshot</span>
-kai status               <span class="dim"># Show changed files</span>
-kai diff                 <span class="dim"># Show file differences</span>
-kai ws create &lt;name&gt;     <span class="dim"># Create workspace</span>
-kai ws stage &lt;name&gt;      <span class="dim"># Stage changes</span>
-kai changeset list       <span class="dim"># List changesets</span>
-kai intent render &lt;id&gt;   <span class="dim"># Show intent for changeset</span>
-kai log                  <span class="dim"># View history</span>
-kai checkout &lt;ref&gt;       <span class="dim"># Restore a snapshot</span></code></pre>
+<span class="dim"># View history</span>
+kai log</code></pre>
+
+      <h3>Workspace Workflow (Branching)</h3>
+      <pre><code><span class="dim"># Create a workspace for a feature</span>
+kai ws create --name feature/login --base @snap:last
+
+<span class="dim"># Make changes, then stage them</span>
+kai ws stage --ws feature/login --dir ./src -m "Work in progress"
+
+<span class="dim"># View workspace history</span>
+kai ws log --ws feature/login
+
+<span class="dim"># List all workspaces</span>
+kai ws list</code></pre>
+
+      <h3>Starting a New Project</h3>
+      <pre><code><span class="dim"># Create and enter your project directory</span>
+mkdir my-project && cd my-project
+
+<span class="dim"># Initialize kai</span>
+kai init
+
+<span class="dim"># Create your source files</span>
+mkdir src
+<span class="dim"># ... add your code ...</span>
+
+<span class="dim"># Create your first snapshot</span>
+kai snapshot --dir ./src -m "Initial version"
+
+<span class="dim"># Verify setup</span>
+kai log
+kai status --dir ./src</code></pre>
     </section>
 
     <footer>
