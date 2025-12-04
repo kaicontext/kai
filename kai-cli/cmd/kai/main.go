@@ -37,10 +37,14 @@ const (
 	modulesFile = "kai.modules.yaml"
 )
 
+// Version is the current kai CLI version
+var Version = "0.2.1"
+
 var rootCmd = &cobra.Command{
-	Use:   "kai",
-	Short: "Kai - semantic, intent-based version control",
-	Long:  `Kai is a local CLI that creates semantic snapshots from Git refs, computes changesets, classifies change types, and generates intent sentences.`,
+	Use:     "kai",
+	Short:   "Kai - semantic, intent-based version control",
+	Long:    `Kai is a local CLI that creates semantic snapshots from Git refs, computes changesets, classifies change types, and generates intent sentences.`,
+	Version: Version,
 }
 
 var initCmd = &cobra.Command{

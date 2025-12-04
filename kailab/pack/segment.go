@@ -30,46 +30,52 @@ const (
 
 // IngestSegment ingests a zstd-compressed pack from a reader.
 // It decompresses, parses the header, stores the segment, and indexes all objects.
+// Uses streaming decompression with a streaming hasher for better memory efficiency.
 func IngestSegment(db *store.DB, r io.Reader, actor string) (segmentID int64, indexed int, err error) {
-	// Decompress the entire stream
+	// Create streaming zstd decoder
 	decoder, err := zstd.NewReader(r)
 	if err != nil {
 		return 0, 0, fmt.Errorf("creating zstd decoder: %w", err)
 	}
 	defer decoder.Close()
 
-	// Read all decompressed content
-	decompressed, err := io.ReadAll(decoder)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decompressing: %w", err)
+	// Create streaming hasher - hash while reading
+	hasher := cas.NewBlake3Hasher()
+
+	// Use TeeReader to hash while reading
+	teeReader := io.TeeReader(decoder, hasher)
+
+	// Read header length (4 bytes)
+	headerLenBuf := make([]byte, HeaderLengthSize)
+	if _, err := io.ReadFull(teeReader, headerLenBuf); err != nil {
+		return 0, 0, fmt.Errorf("reading header length: %w", err)
 	}
 
-	if len(decompressed) < HeaderLengthSize {
-		return 0, 0, fmt.Errorf("pack too small: %d bytes", len(decompressed))
-	}
-
-	// Parse header length
-	headerLen := binary.BigEndian.Uint32(decompressed[:HeaderLengthSize])
+	headerLen := binary.BigEndian.Uint32(headerLenBuf)
 	if headerLen > MaxHeaderSize {
 		return 0, 0, fmt.Errorf("header too large: %d bytes", headerLen)
 	}
-	if int(HeaderLengthSize+headerLen) > len(decompressed) {
-		return 0, 0, fmt.Errorf("header length exceeds pack size")
+
+	// Read header JSON
+	headerData := make([]byte, headerLen)
+	if _, err := io.ReadFull(teeReader, headerData); err != nil {
+		return 0, 0, fmt.Errorf("reading header: %w", err)
 	}
 
-	// Parse header JSON
-	headerData := decompressed[HeaderLengthSize : HeaderLengthSize+headerLen]
 	var header proto.PackHeader
 	if err := json.Unmarshal(headerData, &header); err != nil {
 		return 0, 0, fmt.Errorf("parsing header: %w", err)
 	}
 
-	// Data starts after header
-	dataStart := int64(HeaderLengthSize + headerLen)
-	objectData := decompressed[dataStart:]
+	// Read remaining object data (streaming into buffer)
+	var objectData bytes.Buffer
+	if _, err := io.Copy(&objectData, teeReader); err != nil {
+		return 0, 0, fmt.Errorf("reading object data: %w", err)
+	}
 
-	// Compute checksum of the entire decompressed content
-	checksum := cas.Blake3Hash(decompressed)
+	// Get final checksum
+	checksum := hasher.Sum(nil)
+	objectBytes := objectData.Bytes()
 
 	// Begin transaction
 	tx, err := db.BeginTx()
@@ -79,19 +85,19 @@ func IngestSegment(db *store.DB, r io.Reader, actor string) (segmentID int64, in
 	defer tx.Rollback()
 
 	// Insert segment (store only the object data portion, not the header)
-	segmentID, err = db.InsertSegment(tx, checksum, objectData)
+	segmentID, err = db.InsertSegment(tx, checksum, objectBytes)
 	if err != nil {
 		return 0, 0, fmt.Errorf("inserting segment: %w", err)
 	}
 
 	// Index each object
 	for _, obj := range header.Objects {
-		if obj.Offset+obj.Length > int64(len(objectData)) {
+		if obj.Offset+obj.Length > int64(len(objectBytes)) {
 			return 0, 0, fmt.Errorf("object %x extends beyond data", obj.Digest[:8])
 		}
 
 		// Verify digest
-		content := objectData[obj.Offset : obj.Offset+obj.Length]
+		content := objectBytes[obj.Offset : obj.Offset+obj.Length]
 		computedDigest := cas.Blake3Hash(content)
 		if !bytes.Equal(computedDigest, obj.Digest) {
 			return 0, 0, fmt.Errorf("digest mismatch for object at offset %d", obj.Offset)
@@ -223,46 +229,52 @@ func ExtractObject(db *store.DB, digest []byte) ([]byte, string, error) {
 // ============================================================================
 
 // IngestSegmentToDB ingests a zstd-compressed pack from a reader using *sql.DB.
+// Uses streaming decompression with a streaming hasher for better memory efficiency.
 func IngestSegmentToDB(db *sql.DB, r io.Reader, actor string) (segmentID int64, indexed int, err error) {
-	// Decompress the entire stream
+	// Create streaming zstd decoder
 	decoder, err := zstd.NewReader(r)
 	if err != nil {
 		return 0, 0, fmt.Errorf("creating zstd decoder: %w", err)
 	}
 	defer decoder.Close()
 
-	// Read all decompressed content
-	decompressed, err := io.ReadAll(decoder)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decompressing: %w", err)
+	// Create streaming hasher - hash while reading
+	hasher := cas.NewBlake3Hasher()
+
+	// Use TeeReader to hash while reading
+	teeReader := io.TeeReader(decoder, hasher)
+
+	// Read header length (4 bytes)
+	headerLenBuf := make([]byte, HeaderLengthSize)
+	if _, err := io.ReadFull(teeReader, headerLenBuf); err != nil {
+		return 0, 0, fmt.Errorf("reading header length: %w", err)
 	}
 
-	if len(decompressed) < HeaderLengthSize {
-		return 0, 0, fmt.Errorf("pack too small: %d bytes", len(decompressed))
-	}
-
-	// Parse header length
-	headerLen := binary.BigEndian.Uint32(decompressed[:HeaderLengthSize])
+	headerLen := binary.BigEndian.Uint32(headerLenBuf)
 	if headerLen > MaxHeaderSize {
 		return 0, 0, fmt.Errorf("header too large: %d bytes", headerLen)
 	}
-	if int(HeaderLengthSize+headerLen) > len(decompressed) {
-		return 0, 0, fmt.Errorf("header length exceeds pack size")
+
+	// Read header JSON
+	headerData := make([]byte, headerLen)
+	if _, err := io.ReadFull(teeReader, headerData); err != nil {
+		return 0, 0, fmt.Errorf("reading header: %w", err)
 	}
 
-	// Parse header JSON
-	headerData := decompressed[HeaderLengthSize : HeaderLengthSize+headerLen]
 	var header proto.PackHeader
 	if err := json.Unmarshal(headerData, &header); err != nil {
 		return 0, 0, fmt.Errorf("parsing header: %w", err)
 	}
 
-	// Data starts after header
-	dataStart := int64(HeaderLengthSize + headerLen)
-	objectData := decompressed[dataStart:]
+	// Read remaining object data (streaming into buffer)
+	var objectData bytes.Buffer
+	if _, err := io.Copy(&objectData, teeReader); err != nil {
+		return 0, 0, fmt.Errorf("reading object data: %w", err)
+	}
 
-	// Compute checksum of the entire decompressed content
-	checksum := cas.Blake3Hash(decompressed)
+	// Get final checksum
+	checksum := hasher.Sum(nil)
+	objectBytes := objectData.Bytes()
 
 	// Begin transaction
 	tx, err := db.Begin()
@@ -272,19 +284,19 @@ func IngestSegmentToDB(db *sql.DB, r io.Reader, actor string) (segmentID int64, 
 	defer tx.Rollback()
 
 	// Insert segment (store only the object data portion, not the header)
-	segmentID, err = store.InsertSegmentTx(tx, checksum, objectData)
+	segmentID, err = store.InsertSegmentTx(tx, checksum, objectBytes)
 	if err != nil {
 		return 0, 0, fmt.Errorf("inserting segment: %w", err)
 	}
 
 	// Index each object
 	for _, obj := range header.Objects {
-		if obj.Offset+obj.Length > int64(len(objectData)) {
+		if obj.Offset+obj.Length > int64(len(objectBytes)) {
 			return 0, 0, fmt.Errorf("object %x extends beyond data", obj.Digest[:8])
 		}
 
 		// Verify digest
-		content := objectData[obj.Offset : obj.Offset+obj.Length]
+		content := objectBytes[obj.Offset : obj.Offset+obj.Length]
 		computedDigest := cas.Blake3Hash(content)
 		if !bytes.Equal(computedDigest, obj.Digest) {
 			return 0, 0, fmt.Errorf("digest mismatch for object at offset %d", obj.Offset)

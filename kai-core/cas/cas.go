@@ -112,6 +112,11 @@ func Blake3HashHex(data []byte) string {
 	return hex.EncodeToString(Blake3Hash(data))
 }
 
+// NewBlake3Hasher returns a new streaming BLAKE3 hasher.
+func NewBlake3Hasher() *blake3.Hasher {
+	return blake3.New(32, nil)
+}
+
 // NodeID computes the content-addressed ID for a node: blake3(kind + "\n" + canonicalJSON(payload))
 func NodeID(kind string, payload interface{}) ([]byte, error) {
 	canonicalPayload, err := CanonicalJSON(payload)
