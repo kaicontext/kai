@@ -26,6 +26,14 @@
 		@apply bg-kai-success-emphasis border-kai-success-emphasis;
 	}
 
+	.btn-danger {
+		@apply bg-kai-error border-kai-error text-white font-semibold;
+	}
+
+	.btn-danger:hover {
+		@apply bg-red-700 border-red-700;
+	}
+
 	/* GitHub-style inputs */
 	.input {
 		@apply bg-kai-bg border border-kai-border rounded-md px-3 py-[5px] text-kai-text text-sm w-full transition-colors duration-150;

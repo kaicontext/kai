@@ -14,6 +14,8 @@
 	let compareHead = $state('');
 	let diffResult = $state(null);
 	let diffLoading = $state(false);
+	let showDeleteConfirm = $state(false);
+	let deleting = $state(false);
 
 	$effect(() => {
 		currentOrg.set($page.params.slug);
@@ -53,6 +55,15 @@
 			refs = data.refs;
 		}
 		refsLoading = false;
+	}
+
+	async function deleteRepo() {
+		deleting = true;
+		const result = await api('DELETE', `/api/v1/orgs/${$page.params.slug}/repos/${$page.params.repo}`);
+		deleting = false;
+		if (!result.error) {
+			goto(`/orgs/${$page.params.slug}`);
+		}
 	}
 
 	function getCloneUrl() {
@@ -168,7 +179,42 @@ kai push origin snap.latest`;
 					<span class="badge badge-{repo.visibility} ml-2">{repo.visibility}</span>
 				</h2>
 			</div>
+			<button
+				class="btn btn-danger text-sm"
+				onclick={() => showDeleteConfirm = true}
+			>
+				Delete
+			</button>
 		</div>
+
+		<!-- Delete Confirmation Modal -->
+		{#if showDeleteConfirm}
+			<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+				<div class="bg-kai-bg-secondary border border-kai-border rounded-lg p-6 max-w-md w-full mx-4">
+					<h3 class="text-lg font-semibold mb-2">Delete Repository</h3>
+					<p class="text-kai-text-muted mb-4">
+						Are you sure you want to delete <strong>{$page.params.slug}/{$page.params.repo}</strong>?
+						This action cannot be undone.
+					</p>
+					<div class="flex gap-3 justify-end">
+						<button
+							class="btn"
+							onclick={() => showDeleteConfirm = false}
+							disabled={deleting}
+						>
+							Cancel
+						</button>
+						<button
+							class="btn btn-danger"
+							onclick={deleteRepo}
+							disabled={deleting}
+						>
+							{deleting ? 'Deleting...' : 'Delete'}
+						</button>
+					</div>
+				</div>
+			</div>
+		{/if}
 
 		<!-- Empty state - GitHub/GitLab style setup instructions -->
 		{#if refs.length === 0}
