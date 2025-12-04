@@ -114,7 +114,7 @@ Workspaces have three states: `active` (can stage changes), `shelved` (frozen), 
 | **Push / fetch latency** | < 100 ms globally | Depends on repo size / RTT |
 | **Change understanding** | Semantic (functions, classes, intent) | Line-based diffs |
 | **Storage model** | Content-addressed SQLite + zstd segments | Packfiles with delta compression |
-| **Merge conflicts** | Intent-aware (planned) | Text-based 3-way merge |
+| **Merge conflicts** | AST-aware semantic merge | Text-based 3-way merge |
 | **History queries** | "What changed this function?" | `git log -p --follow` |
 | **Repository size scaling** | O(1) push/fetch via negotiation | O(repo size) for clone |
 
@@ -988,6 +988,66 @@ If there are conflicts:
 ```
 Integration conflicts (1):
   auth/login.ts: File modified in both workspace and target
+```
+
+---
+
+### `kai merge`
+
+Perform AST-aware 3-way merge at symbol granularity.
+
+```bash
+kai merge <base-file> <left-file> <right-file> [flags]
+```
+
+**Arguments:**
+- `<base-file>` - Common ancestor file
+- `<left-file>` - Left/ours version
+- `<right-file>` - Right/theirs version
+
+**Flags:**
+- `--lang <lang>` - Language (js, ts, py) - auto-detected from extension if not specified
+- `-o, --output <path>` - Output file path (defaults to stdout)
+- `--json` - Output result as JSON (includes conflicts)
+
+**Examples:**
+```bash
+# Merge JavaScript files - output to stdout
+kai merge base.js left.js right.js
+
+# Merge Python files with explicit language
+kai merge base.py branch1.py branch2.py --lang py -o merged.py
+
+# Get JSON output with conflict details
+kai merge base.js left.js right.js --json
+```
+
+**What it does:**
+- Parses files using Tree-sitter to extract semantic units (functions, classes, constants)
+- Performs 3-way merge at symbol granularity, not line-by-line
+- Auto-merges changes to different functions in the same file
+- Detects semantic conflicts:
+
+| Conflict Kind | Description |
+|---------------|-------------|
+| `API_SIGNATURE_DIVERGED` | Both sides changed function parameters differently |
+| `CONST_VALUE_CONFLICT` | Both sides changed constant value differently |
+| `DELETE_vs_MODIFY` | One side deleted, other modified |
+| `CONCURRENT_CREATE` | Both sides created same-named unit |
+| `BODY_DIVERGED` | Same function body modified on both sides |
+
+**Example JSON output:**
+```json
+{
+  "success": false,
+  "conflicts": [
+    {
+      "kind": "BODY_DIVERGED",
+      "unit": "file::foo",
+      "message": "Function foo body modified on both sides"
+    }
+  ]
+}
 ```
 
 ---
