@@ -992,6 +992,73 @@ Integration conflicts (1):
 
 ---
 
+### `kai diff`
+
+Show semantic differences between two snapshots.
+
+```bash
+kai diff <base-ref> [head-ref] [flags]
+```
+
+**Arguments:**
+- `<base-ref>` - Base snapshot (ref, selector, or short ID)
+- `[head-ref]` - Head snapshot (optional; if omitted, compares against working directory)
+
+**Flags:**
+- `--semantic` - Show semantic diff (functions, classes, JSON keys, SQL tables)
+- `--json` - Output diff as JSON (implies --semantic)
+- `--name-only` - Output just paths with status prefixes (A/M/D)
+- `--dir <path>` - Directory to compare against (default: current directory)
+
+**Examples:**
+```bash
+# Compare two snapshots with semantic analysis
+kai diff @snap:prev @snap:last --semantic
+
+# Compare snapshot vs working directory
+kai diff @snap:last --semantic
+
+# Output as JSON for programmatic use
+kai diff @snap:prev @snap:last --json
+
+# Simple file-level diff
+kai diff @snap:prev @snap:last --name-only
+```
+
+**Output example:**
+```
+Diff: a1b2c3d4e5f6 → working directory
+
+~ auth/login.ts
+  ~ function login(user) -> function login(user, token)
+  + function validateMFA(code)
+
++ config.json
+  + timeout
+  + retries
+
+~ schema.sql
+  ~ users.email: VARCHAR(100) -> VARCHAR(255)
+  + users.created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+Summary: 3 files (1 added, 2 modified, 0 removed)
+         6 units (4 added, 2 modified, 0 removed)
+```
+
+**Diff granularity:**
+
+| Type | Support | Description |
+|------|---------|-------------|
+| Function | ✓ | Detects added/removed/modified functions with signature changes |
+| Class | ✓ | Detects class additions/removals |
+| Method | ✓ | Detects method changes within classes |
+| SQL Table | ✓ | Detects table additions/removals |
+| SQL Column | ✓ | Detects column additions/modifications/removals |
+| JSON Key | ✓ | Detects key additions/modifications/removals |
+| YAML Key | ✓ | Detects key additions/modifications/removals |
+
+---
+
 ### `kai merge`
 
 Perform AST-aware 3-way merge at symbol granularity.
@@ -1601,7 +1668,9 @@ kai/
 │   ├── util/                    # Canonical JSON utilities
 │   ├── parse/                   # Tree-sitter parsing
 │   ├── detect/                  # Change type detection
+│   ├── diff/                    # Semantic diff computation
 │   ├── intent/                  # Intent generation
+│   ├── merge/                   # AST-aware 3-way merge
 │   └── go.mod
 │
 ├── kailab/                      # Data plane server

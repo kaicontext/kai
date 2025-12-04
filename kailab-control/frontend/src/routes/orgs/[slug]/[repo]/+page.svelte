@@ -10,6 +10,10 @@
 	let loading = $state(true);
 	let refsLoading = $state(true);
 	let activeTab = $state('snapshots');
+	let compareBase = $state('');
+	let compareHead = $state('');
+	let diffResult = $state(null);
+	let diffLoading = $state(false);
 
 	$effect(() => {
 		currentOrg.set($page.params.slug);
@@ -108,6 +112,43 @@ kai push origin snap.latest`;
 	let changesets = $derived(refs.filter(r => r.name.startsWith('cs.')));
 	let workspaces = $derived(refs.filter(r => r.name.startsWith('ws.')));
 	let otherRefs = $derived(refs.filter(r => !r.name.startsWith('snap.') && !r.name.startsWith('cs.') && !r.name.startsWith('ws.')));
+
+	// Compare refs for diff
+	async function compareDiff() {
+		if (!compareBase || !compareHead) return;
+		diffLoading = true;
+		diffResult = null;
+
+		// In the future, this could call a server-side diff API
+		// For now, show a placeholder that explains CLI usage
+		await new Promise(resolve => setTimeout(resolve, 500));
+
+		diffResult = {
+			base: compareBase,
+			head: compareHead,
+			message: 'Semantic diff is available via CLI',
+			cliCommand: `kai diff @snap:${compareBase} @snap:${compareHead} --semantic`
+		};
+		diffLoading = false;
+	}
+
+	function getActionClass(action) {
+		switch(action) {
+			case 'added': return 'text-green-400';
+			case 'removed': return 'text-red-400';
+			case 'modified': return 'text-yellow-400';
+			default: return '';
+		}
+	}
+
+	function getActionIcon(action) {
+		switch(action) {
+			case 'added': return '+';
+			case 'removed': return '-';
+			case 'modified': return '~';
+			default: return ' ';
+		}
+	}
 </script>
 
 <div class="max-w-6xl mx-auto px-5 py-8">
@@ -203,6 +244,12 @@ kai push origin snap.latest</pre>
 						{/if}
 					</button>
 					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'compare' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
+						onclick={() => activeTab = 'compare'}
+					>
+						Compare
+					</button>
+					<button
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'setup' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
 						onclick={() => activeTab = 'setup'}
 					>
@@ -278,6 +325,80 @@ kai push origin snap.latest</pre>
 						</table>
 					</div>
 				{/if}
+			{:else if activeTab === 'compare'}
+				<div class="border border-kai-border rounded-md p-4">
+					<h4 class="font-medium mb-4">Compare Snapshots</h4>
+
+					{#if snapshots.length < 2}
+						<div class="text-center py-8 text-kai-text-muted">
+							<p>Need at least 2 snapshots to compare</p>
+						</div>
+					{:else}
+						<div class="grid grid-cols-2 gap-4 mb-4">
+							<div>
+								<label class="block text-sm text-kai-text-muted mb-1">Base (older)</label>
+								<select bind:value={compareBase} class="input w-full font-mono">
+									<option value="">Select snapshot...</option>
+									{#each snapshots as ref}
+										<option value={ref.name.replace('snap.', '')}>{ref.name}</option>
+									{/each}
+								</select>
+							</div>
+							<div>
+								<label class="block text-sm text-kai-text-muted mb-1">Head (newer)</label>
+								<select bind:value={compareHead} class="input w-full font-mono">
+									<option value="">Select snapshot...</option>
+									{#each snapshots as ref}
+										<option value={ref.name.replace('snap.', '')}>{ref.name}</option>
+									{/each}
+								</select>
+							</div>
+						</div>
+
+						<button
+							class="btn btn-primary"
+							disabled={!compareBase || !compareHead || compareBase === compareHead || diffLoading}
+							onclick={compareDiff}
+						>
+							{diffLoading ? 'Comparing...' : 'Compare'}
+						</button>
+
+						{#if diffResult}
+							<div class="mt-6 border-t border-kai-border pt-4">
+								<div class="mb-4">
+									<span class="font-mono text-sm">
+										{diffResult.base} → {diffResult.head}
+									</span>
+								</div>
+
+								<div class="bg-kai-bg rounded p-4">
+									<p class="text-kai-text-muted mb-3">{diffResult.message}</p>
+									<div class="bg-kai-bg-secondary rounded p-3">
+										<code class="text-sm font-mono text-kai-accent">{diffResult.cliCommand}</code>
+									</div>
+									<button
+										class="btn mt-3"
+										onclick={() => navigator.clipboard.writeText(diffResult.cliCommand)}
+									>
+										Copy Command
+									</button>
+								</div>
+
+								<div class="mt-4 text-sm text-kai-text-muted">
+									<p class="mb-2">
+										<strong>Tip:</strong> The <code class="bg-kai-bg px-1 rounded">kai diff --semantic</code> command shows:
+									</p>
+									<ul class="list-disc list-inside space-y-1">
+										<li>Functions added, removed, or modified</li>
+										<li>Classes and methods changed</li>
+										<li>JSON/YAML key changes</li>
+										<li>SQL table and column modifications</li>
+									</ul>
+								</div>
+							</div>
+						{/if}
+					{/if}
+				</div>
 			{:else if activeTab === 'setup'}
 				<div class="border border-kai-border rounded-md p-4">
 					<h4 class="font-medium mb-3">Clone URL</h4>

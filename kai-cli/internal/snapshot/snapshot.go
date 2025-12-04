@@ -361,6 +361,11 @@ func (c *Creator) Checkout(snapshotID []byte, targetDir string, clean bool) (*Ch
 	return result, nil
 }
 
+// GetFileContent reads file content by its digest from the object store.
+func (c *Creator) GetFileContent(digest string) ([]byte, error) {
+	return c.db.ReadObject(digest)
+}
+
 // cleanDirectory removes files that aren't in the snapshot
 func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error) {
 	deleted := 0

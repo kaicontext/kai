@@ -178,3 +178,28 @@ type RepoInfo struct {
 type ListReposResponse struct {
 	Repos []RepoInfo `json:"repos"`
 }
+
+// ----- Diff API -----
+
+// DiffRequest specifies refs to compare.
+type DiffRequest struct {
+	Base string `json:"base"`
+	Head string `json:"head,omitempty"` // If empty, diff shows base content
+}
+
+// DiffResponse contains the diff result.
+type DiffResponse struct {
+	Base       string         `json:"base"`
+	Head       string         `json:"head"`
+	BaseDigest []byte         `json:"baseDigest,omitempty"`
+	HeadDigest []byte         `json:"headDigest,omitempty"`
+	Files      []DiffFileInfo `json:"files"`
+}
+
+// DiffFileInfo describes a changed file.
+type DiffFileInfo struct {
+	Path      string `json:"path"`
+	Action    string `json:"action"` // "added", "modified", "removed"
+	OldDigest []byte `json:"oldDigest,omitempty"`
+	NewDigest []byte `json:"newDigest,omitempty"`
+}

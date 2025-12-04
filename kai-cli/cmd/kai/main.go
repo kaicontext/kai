@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"kai-core/diff"
 	"kai-core/merge"
 	"kai/internal/classify"
 	"kai/internal/dirio"
@@ -505,6 +506,8 @@ var (
 	// Diff flags
 	diffDir      string
 	diffNameOnly bool
+	diffSemantic bool
+	diffJSON     bool
 
 	// Snapshot flags
 	snapshotMessage string
@@ -549,6 +552,8 @@ func init() {
 	// Diff command flags
 	diffCmd.Flags().StringVar(&diffDir, "dir", ".", "Directory to compare against (when comparing snapshot vs working dir)")
 	diffCmd.Flags().BoolVar(&diffNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
+	diffCmd.Flags().BoolVar(&diffSemantic, "semantic", false, "Show semantic diff (functions, classes, JSON keys, SQL tables)")
+	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Output diff as JSON (implies --semantic)")
 
 	// Workspace command flags
 	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (required)")
@@ -861,10 +866,27 @@ kai fetch origin              # Download from server
 
 ### "I want to see what changed in my code"
 ` + "```" + `bash
+# Quick semantic diff (recommended)
+kai diff @snap:last --semantic
+
+# Or create a full changeset for detailed analysis
 kai snapshot --dir .
 kai analyze symbols @snap:last
 kai changeset create @snap:prev @snap:last
 kai dump @cs:last --json | jq '.nodes[] | select(.kind == "ChangeType")'
+` + "```" + `
+
+### "I want a semantic diff showing function/class changes"
+` + "```" + `bash
+kai diff @snap:prev @snap:last --semantic
+# Output shows:
+#   ~ auth/login.ts
+#     ~ function login(user) -> login(user, token)
+#     + function validateMFA(code)
+#   Summary: 1 file, 2 units changed
+
+# JSON output for programmatic use
+kai diff @snap:prev @snap:last --json
 ` + "```" + `
 
 ### "I want to compare two Git branches"
@@ -1680,6 +1702,11 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
+	// JSON implies semantic
+	if diffJSON {
+		diffSemantic = true
+	}
+
 	// Resolve base snapshot
 	baseSnapID, err := resolveSnapshotID(db, args[0])
 	if err != nil {
@@ -1694,14 +1721,21 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting base files: %w", err)
 	}
 
-	baseFileMap := make(map[string]string) // path -> digest
+	baseFileMap := make(map[string]string)   // path -> digest
+	baseContent := make(map[string][]byte)   // path -> content (for semantic diff)
 	for _, f := range baseFiles {
 		path, _ := f.Payload["path"].(string)
 		digest, _ := f.Payload["digest"].(string)
 		baseFileMap[path] = digest
+		if diffSemantic {
+			content, _ := creator.GetFileContent(digest)
+			baseContent[path] = content
+		}
 	}
 
 	var headFileMap map[string]string
+	var headContent map[string][]byte
+	var headLabel string
 
 	if len(args) == 2 {
 		// Compare two snapshots
@@ -1716,13 +1750,18 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		}
 
 		headFileMap = make(map[string]string)
+		headContent = make(map[string][]byte)
 		for _, f := range headFiles {
 			path, _ := f.Payload["path"].(string)
 			digest, _ := f.Payload["digest"].(string)
 			headFileMap[path] = digest
+			if diffSemantic {
+				content, _ := creator.GetFileContent(digest)
+				headContent[path] = content
+			}
 		}
 
-		fmt.Printf("Diff: %s → %s\n\n", util.BytesToHex(baseSnapID)[:12], util.BytesToHex(headSnapID)[:12])
+		headLabel = util.BytesToHex(headSnapID)[:12]
 	} else {
 		// Compare snapshot vs working directory
 		source, err := dirio.OpenDirectory(diffDir)
@@ -1736,14 +1775,18 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		}
 
 		headFileMap = make(map[string]string)
+		headContent = make(map[string][]byte)
 		for _, f := range currentFiles {
 			headFileMap[f.Path] = util.Blake3HashHex(f.Content)
+			if diffSemantic {
+				headContent[f.Path] = f.Content
+			}
 		}
 
-		fmt.Printf("Diff: %s → working directory (%s)\n\n", util.BytesToHex(baseSnapID)[:12], diffDir)
+		headLabel = "working directory"
 	}
 
-	// Compute differences
+	// Compute file-level differences
 	var added, modified, deleted []string
 
 	for path, headDigest := range headFileMap {
@@ -1764,10 +1807,67 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	sort.Strings(modified)
 	sort.Strings(deleted)
 
-	// Output
+	// No differences
 	if len(added) == 0 && len(modified) == 0 && len(deleted) == 0 {
-		fmt.Println("No differences.")
+		if diffJSON {
+			fmt.Println(`{"files":[],"summary":{"filesAdded":0,"filesModified":0,"filesRemoved":0,"unitsAdded":0,"unitsModified":0,"unitsRemoved":0}}`)
+		} else {
+			fmt.Println("No differences.")
+		}
 		return nil
+	}
+
+	// Semantic diff mode
+	if diffSemantic {
+		differ := diff.NewDiffer()
+		sd := &diff.SemanticDiff{
+			Base: util.BytesToHex(baseSnapID)[:12],
+			Head: headLabel,
+		}
+
+		// Process added files
+		for _, path := range added {
+			fd, _ := differ.DiffFile(path, nil, headContent[path])
+			if fd != nil {
+				sd.Files = append(sd.Files, *fd)
+			}
+		}
+
+		// Process modified files
+		for _, path := range modified {
+			fd, _ := differ.DiffFile(path, baseContent[path], headContent[path])
+			if fd != nil {
+				sd.Files = append(sd.Files, *fd)
+			}
+		}
+
+		// Process deleted files
+		for _, path := range deleted {
+			fd, _ := differ.DiffFile(path, baseContent[path], nil)
+			if fd != nil {
+				sd.Files = append(sd.Files, *fd)
+			}
+		}
+
+		sd.ComputeSummary()
+
+		if diffJSON {
+			jsonOut, err := sd.FormatJSON()
+			if err != nil {
+				return fmt.Errorf("formatting JSON: %w", err)
+			}
+			fmt.Println(string(jsonOut))
+		} else {
+			fmt.Printf("Diff: %s → %s\n\n", sd.Base, sd.Head)
+			fmt.Print(sd.FormatText())
+		}
+
+		return nil
+	}
+
+	// Simple file-level output
+	if !diffJSON {
+		fmt.Printf("Diff: %s → %s\n\n", util.BytesToHex(baseSnapID)[:12], headLabel)
 	}
 
 	if diffNameOnly {
