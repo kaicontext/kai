@@ -38,7 +38,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.2.1"
+var Version = "0.2.2"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -2673,6 +2673,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Batch update refs (single round-trip instead of N)
+	// Falls back to individual updates if server doesn't support batch endpoint
 	var batchUpdates []remote.BatchRefUpdate
 	for _, r := range refsToSync {
 		// Get old value from remote
@@ -2692,14 +2693,30 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if len(batchUpdates) > 0 {
 		result, err := client.BatchUpdateRefs(batchUpdates)
 		if err != nil {
-			return fmt.Errorf("updating refs: %w", err)
-		}
-
-		for _, res := range result.Results {
-			if res.OK {
-				fmt.Printf("  %s -> updated (push %s)\n", res.Name, result.PushID[:8])
+			// Fallback to individual updates if batch not supported (405 or other error)
+			if strings.Contains(err.Error(), "405") || strings.Contains(err.Error(), "Method Not Allowed") {
+				for _, upd := range batchUpdates {
+					res, err := client.UpdateRef(upd.Name, upd.Old, upd.New, upd.Force)
+					if err != nil {
+						fmt.Printf("  Failed to update ref %s: %v\n", upd.Name, err)
+						continue
+					}
+					if res.OK {
+						fmt.Printf("  %s -> %s (push %s)\n", upd.Name, hex.EncodeToString(upd.New)[:12], res.PushID[:8])
+					} else {
+						fmt.Printf("  %s: %s\n", upd.Name, res.Error)
+					}
+				}
 			} else {
-				fmt.Printf("  %s: %s\n", res.Name, res.Error)
+				return fmt.Errorf("updating refs: %w", err)
+			}
+		} else {
+			for _, res := range result.Results {
+				if res.OK {
+					fmt.Printf("  %s -> updated (push %s)\n", res.Name, result.PushID[:8])
+				} else {
+					fmt.Printf("  %s: %s\n", res.Name, res.Error)
+				}
 			}
 		}
 	}
