@@ -170,6 +170,9 @@ func (h *Handler) ExchangeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set HttpOnly cookies for browser security
+	setAuthCookies(w, accessToken, refreshToken, h.cfg.AccessTokenTTL, h.cfg.RefreshTokenTTL, h.cfg.Debug)
+
 	writeJSON(w, http.StatusOK, ExchangeTokenResponse{
 		AccessToken:  accessToken,
 		TokenType:    "Bearer",
@@ -241,6 +244,9 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set HttpOnly cookie for browser security (access token only on refresh)
+	setAccessTokenCookie(w, accessToken, h.cfg.AccessTokenTTL, h.cfg.Debug)
+
 	writeJSON(w, http.StatusOK, ExchangeTokenResponse{
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
@@ -262,6 +268,9 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to logout", err)
 		return
 	}
+
+	// Clear auth cookies
+	clearAuthCookies(w)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
@@ -450,4 +459,57 @@ func (h *Handler) DeleteToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ----- Cookie Helpers -----
+
+const (
+	accessTokenCookie  = "kai_access_token"
+	refreshTokenCookie = "kai_refresh_token"
+)
+
+// setAuthCookies sets both access and refresh token cookies.
+func setAuthCookies(w http.ResponseWriter, accessToken, refreshToken string, accessTTL, refreshTTL time.Duration, debug bool) {
+	setAccessTokenCookie(w, accessToken, accessTTL, debug)
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     refreshTokenCookie,
+		Value:    refreshToken,
+		Path:     "/api/v1/auth", // Only sent to auth endpoints
+		MaxAge:   int(refreshTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   !debug, // Secure in production (HTTPS only)
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// setAccessTokenCookie sets the access token cookie.
+func setAccessTokenCookie(w http.ResponseWriter, accessToken string, accessTTL time.Duration, debug bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     accessTokenCookie,
+		Value:    accessToken,
+		Path:     "/",
+		MaxAge:   int(accessTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   !debug, // Secure in production (HTTPS only)
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearAuthCookies clears both auth cookies.
+func clearAuthCookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     accessTokenCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     refreshTokenCookie,
+		Value:    "",
+		Path:     "/api/v1/auth",
+		MaxAge:   -1,
+		HttpOnly: true,
+	})
 }

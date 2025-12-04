@@ -67,9 +67,9 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	mux.Handle("GET /{tenant}/{repo}/v1/log/head", withRepo(http.HandlerFunc(h.LogHead)))
 	mux.Handle("GET /{tenant}/{repo}/v1/log/entries", withRepo(http.HandlerFunc(h.LogEntries)))
 
-	// Files
-	mux.Handle("GET /{tenant}/{repo}/v1/snapshots/{ref}/files", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
-	mux.Handle("GET /{tenant}/{repo}/v1/files/{digest}/content", withRepo(http.HandlerFunc(h.GetFileContent)))
+	// Files - use {ref...} pattern since ref names contain dots (e.g., snap.latest)
+	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
+	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent)))
 
 	return mux
 }

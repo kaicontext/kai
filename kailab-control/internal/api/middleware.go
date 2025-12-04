@@ -57,7 +57,13 @@ func RepoFromContext(ctx context.Context) *model.Repo {
 // WithAuth is middleware that authenticates requests.
 func (h *Handler) WithAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try Authorization header first, then cookie
 		token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			if cookie, err := r.Cookie("kai_access_token"); err == nil {
+				token = cookie.Value
+			}
+		}
 		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing authorization", nil)
 			return
@@ -115,7 +121,13 @@ func (h *Handler) WithAuth(next http.Handler) http.Handler {
 // WithOptionalAuth is middleware that authenticates if a token is present.
 func (h *Handler) WithOptionalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try Authorization header first, then cookie
 		token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			if cookie, err := r.Cookie("kai_access_token"); err == nil {
+				token = cookie.Value
+			}
+		}
 		if token == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -271,9 +283,16 @@ func WithDefaults(h http.Handler, debug bool) http.Handler {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		// Allow the requesting origin (for credentials support, can't use *)
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Kailab-Actor")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == "OPTIONS" {

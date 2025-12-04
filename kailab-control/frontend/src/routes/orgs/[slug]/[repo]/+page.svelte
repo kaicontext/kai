@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { currentUser, accessToken, currentOrg, currentRepo } from '$lib/stores.js';
+	import { currentUser, currentOrg, currentRepo } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
 
 	let repo = $state(null);
@@ -31,13 +31,10 @@
 	});
 
 	onMount(async () => {
-		if (!$accessToken) {
+		const user = await loadUser();
+		if (!user) {
 			goto('/login');
 			return;
-		}
-
-		if (!$currentUser) {
-			await loadUser();
 		}
 
 		await loadRepo();
@@ -179,7 +176,7 @@ kai push origin snap.latest`;
 		selectedFile = null;
 		fileContent = '';
 
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/snapshots/${snapshotRef}/files`);
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${snapshotRef}`);
 		if (data.files) {
 			files = data.files.sort((a, b) => a.path.localeCompare(b.path));
 		} else {
@@ -193,7 +190,7 @@ kai push origin snap.latest`;
 		fileContentLoading = true;
 		fileContent = '';
 
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${file.digest}/content`);
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/content/${file.digest}`);
 		if (data.content) {
 			// Content is base64 encoded
 			try {

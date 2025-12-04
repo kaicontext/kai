@@ -1,6 +1,6 @@
 <script>
 	import '../app.css';
-	import { currentUser, accessToken } from '$lib/stores.js';
+	import { currentUser } from '$lib/stores.js';
 	import { loadUser, logout } from '$lib/api.js';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -9,7 +9,8 @@
 	let { children } = $props();
 
 	onMount(async () => {
-		if ($accessToken && !$currentUser) {
+		// Try to load user from cookie-based session
+		if (!$currentUser) {
 			await loadUser();
 		}
 	});

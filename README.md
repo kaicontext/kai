@@ -8,8 +8,37 @@ Kai is a semantic, intent-based version control system that understands *what* y
 
 Unlike traditional diff tools that show line-by-line text changes, Kai understands your code at a semantic level—identifying functions, classes, variables, and how they relate to your project's architecture.
 
+## Design Principles
+
+### Idempotency
+Every command in Kai is idempotent—the same command always produces the same result, regardless of when or how many times you run it. There is no hidden state that changes behavior.
+
+```bash
+kai push origin --ws feature/auth   # Always pushes feature/auth
+kai snapshot --dir ./src            # Same dir = same snapshot hash
+kai changeset create snap.a snap.b  # Same inputs = same changeset
+```
+
+This is possible because everything in Kai is **content-addressed** and **immutable**. Objects are identified by their content hash, not by mutable pointers. Commands are explicit about what they operate on.
+
+### Immutability
+Once created, snapshots and changesets never change. They are permanent records identified by cryptographic hashes. This enables:
+- Safe concurrent operations (no race conditions)
+- Reliable caching and deduplication
+- Trustworthy history that can't be rewritten
+
+### Semantic Over Syntactic
+Kai operates on meaning, not text. Instead of "line 47 changed," Kai tells you "function `validateToken` signature changed." This makes changes understandable to humans and machines alike.
+
+### Explicit Over Implicit
+Commands require explicit targets rather than relying on hidden state. There's no "current workspace" that changes behavior—you always specify what you're operating on.
+
+### Speed as a Feature
+Kai is designed to be fast enough that you never wait. Content-addressed storage enables O(1) lookups. Push/pull operations transfer only missing objects. Snapshots are computed in parallel. The goal is sub-second response times for all common operations.
+
 ## Table of Contents
 
+- [Design Principles](#design-principles)
 - [Key Concepts](#key-concepts)
 - [Kai vs Git](#kai-vs-git)
 - [Installation](#installation)
@@ -1876,60 +1905,97 @@ kai remote del <name>
 
 #### `kai push`
 
-Push snapshots and changesets to a remote server.
+Push workspaces, changesets, or snapshots to a remote server.
+
+**In Kai, you primarily push workspaces** (the unit of collaboration). Changesets within the workspace are the meaningful units that collaborators review. Snapshots travel automatically as infrastructure.
 
 ```bash
-kai push [remote] [refs...]
+kai push [remote] [--ws <workspace>] [target...]
 ```
 
 **Arguments:**
 - `[remote]` - Remote name (default: `origin`)
-- `[refs...]` - Refs to push (default: `snap.latest`)
+- `[--ws <workspace>]` - Workspace to push (default: current workspace if set)
+- `[target...]` - Explicit targets with prefix: `cs:<ref>` or `snap:<ref>`
+
+**Push hierarchy:**
+
+| Level | Command | What gets pushed |
+|-------|---------|------------------|
+| **Primary** | `kai push origin` | Current workspace (all changesets + required snapshots) |
+| **Secondary** | `kai push origin cs:login_fix` | Single changeset (+ its base/head snapshots) |
+| **Tertiary** | `kai push origin snap:abc123` | Single snapshot (advanced/plumbing) |
 
 **Examples:**
 ```bash
-# Push latest snapshot to origin
-kai push
+# Push your current workspace (the normal workflow)
+kai push origin
 
-# Push specific refs
-kai push origin snap.main cs.latest
+# Push a specific workspace
+kai push origin --ws feature/auth
 
-# Push to a different remote
-kai push production snap.release
+# Push a single changeset for targeted review
+kai push origin cs:reduce_timeout
+
+# Push a snapshot (rarely needed, advanced)
+kai push origin snap:4a2556c0
 ```
 
+**What gets pushed for a workspace:**
+1. Workspace metadata (name, status, description)
+2. All changesets in the workspace stack (ordered)
+3. All snapshots those changesets reference (base/head)
+4. All file objects needed to reconstruct the snapshots
+5. Refs: `ws.<name>.base`, `ws.<name>.head`, `ws.<name>.stack`
+
+**Flags:**
+- `--dry-run` - Show what would be transferred without pushing
+- `--force` - Force ref updates on name collisions (content is immutable)
+
 **What happens:**
-1. Client sends list of object digests to server's negotiate endpoint
-2. Server responds with which objects it needs
-3. Client builds a zstd-compressed pack of missing objects
+1. Client discovers which objects remote already has (negotiation)
+2. Client computes minimal transfer set (missing changesets → snapshots → files)
+3. Client builds zstd-compressed pack of missing objects
 4. Pack is uploaded and ingested
-5. Refs are updated on the server
+5. Refs are atomically updated on server
+
+**Note:** Because content is immutable and addressed by hash, pushes are idempotent and there are no "push conflicts." Conflicts only occur at integration time, where semantic merge handles them.
 
 ---
 
 #### `kai fetch`
 
-Fetch refs and objects from a remote server.
+Fetch workspaces, changesets, or snapshots from a remote server.
 
 ```bash
-kai fetch [remote] [refs...]
+kai fetch [remote] [--ws <workspace>] [target...]
 ```
 
 **Arguments:**
 - `[remote]` - Remote name (default: `origin`)
-- `[refs...]` - Refs to fetch (default: `snap.latest`)
+- `[--ws <workspace>]` - Workspace to fetch
+- `[target...]` - Explicit targets with prefix: `cs:<ref>` or `snap:<ref>`
 
 **Examples:**
 ```bash
-# Fetch latest from origin
-kai fetch
+# Fetch all remote refs (metadata only, lazy content)
+kai fetch origin
 
-# Fetch specific refs
-kai fetch origin snap.main snap.feature
+# Fetch a specific workspace (downloads its changesets + snapshots)
+kai fetch origin --ws feature/auth
 
-# Fetch from production
-kai fetch production snap.release
+# Fetch a specific changeset
+kai fetch origin cs:login_fix
+
+# Fetch a specific snapshot
+kai fetch origin snap:main
 ```
+
+**What happens:**
+1. Fetches ref metadata from remote
+2. For workspaces: downloads all changesets in the stack + required snapshots
+3. For changesets: downloads the changeset + its base/head snapshots
+4. For snapshots: downloads the snapshot + file objects
 
 ---
 

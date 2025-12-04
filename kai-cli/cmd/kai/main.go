@@ -40,7 +40,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.2.3"
+var Version = "0.3.1"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -377,18 +377,25 @@ var remoteDelCmd = &cobra.Command{
 }
 
 var pushCmd = &cobra.Command{
-	Use:   "push [remote] [refs...]",
-	Short: "Push snapshots and refs to a remote server",
-	Long: `Push objects and refs to a remote Kailab server.
+	Use:   "push [remote] [target...]",
+	Short: "Push workspaces, changesets, or snapshots to a remote server",
+	Long: `Push workspaces, changesets, or snapshots to a remote Kailab server.
 
-By default, pushes to the 'origin' remote. You can specify refs to push,
-or push all local refs with --all.
+In Kai, you primarily push workspaces (the unit of collaboration). Changesets
+within the workspace are the meaningful units that collaborators review.
+Snapshots travel automatically as infrastructure.
+
+Targets can use prefixes:
+  cs:<ref>    Push a changeset (+ its base/head snapshots)
+  snap:<ref>  Push a snapshot (advanced/plumbing)
+  <ref>       Legacy: push a ref directly
 
 Examples:
-  kai push                        # Push snap.latest to origin
-  kai push origin snap.main       # Push specific ref
-  kai push --all                  # Push all refs
-  kai push --force snap.main      # Force push (non-fast-forward)`,
+  kai push                         # Push current workspace to origin
+  kai push origin --ws feature/auth # Push specific workspace
+  kai push origin cs:login_fix     # Push single changeset for review
+  kai push origin snap:abc123      # Push snapshot (rarely needed)
+  kai push --all                   # Push all refs (legacy)`,
 	RunE: runPush,
 }
 
@@ -515,6 +522,8 @@ var (
 	// Push/fetch flags
 	pushForce     bool
 	pushAll       bool
+	pushWorkspace string
+	pushDryRun    bool
 	remoteLogRef  string
 	remoteLogLimit int
 
@@ -597,7 +606,9 @@ func init() {
 
 	// Push/fetch command flags
 	pushCmd.Flags().BoolVarP(&pushForce, "force", "f", false, "Force push (allow non-fast-forward)")
-	pushCmd.Flags().BoolVar(&pushAll, "all", false, "Push all refs")
+	pushCmd.Flags().BoolVar(&pushAll, "all", false, "Push all refs (legacy)")
+	pushCmd.Flags().StringVar(&pushWorkspace, "ws", "", "Workspace to push")
+	pushCmd.Flags().BoolVar(&pushDryRun, "dry-run", false, "Show what would be transferred without pushing")
 	remoteLogCmd.Flags().StringVar(&remoteLogRef, "ref", "", "Filter by ref name")
 	remoteLogCmd.Flags().IntVarP(&remoteLogLimit, "limit", "n", 20, "Number of entries to show")
 
@@ -1008,15 +1019,19 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
+	fmt.Print("Loading module configuration... ")
 	matcher, err := loadMatcher()
 	if err != nil {
+		fmt.Println("failed")
 		return err
 	}
+	fmt.Printf("found %d modules\n", len(matcher.GetAllModules()))
 
 	var source filesource.FileSource
 
 	if dirPath != "" {
 		// Directory mode - no Git required
+		fmt.Printf("Scanning directory: %s\n", dirPath)
 		source, err = dirio.OpenDirectory(dirPath)
 		if err != nil {
 			return fmt.Errorf("opening directory: %w", err)
@@ -1027,22 +1042,50 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("git ref required (use --dir for directory mode)")
 		}
 		gitRef := args[0]
+		fmt.Printf("Opening git ref: %s\n", gitRef)
 		source, err = gitio.OpenSource(repoPath, gitRef)
 		if err != nil {
 			return fmt.Errorf("opening git source: %w", err)
 		}
 	}
 
+	fmt.Print("Reading files... ")
+	files, err := source.GetFiles()
+	if err != nil {
+		fmt.Println("failed")
+		return fmt.Errorf("getting files: %w", err)
+	}
+	fmt.Printf("found %d files\n", len(files))
+
+	fmt.Print("Creating snapshot... ")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
+		fmt.Println("failed")
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
+	fmt.Println("done")
 
 	// Auto-analyze symbols for better intent generation
-	if err := creator.AnalyzeSymbols(snapshotID); err != nil {
+	fmt.Printf("Analyzing symbols... ")
+	progress := func(current, total int, filename string) {
+		// Truncate filename if too long
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rAnalyzing symbols... %d/%d %s", current, total, display)
+		// Clear rest of line in case previous filename was longer
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
 		// Non-fatal - continue without symbols
+		fmt.Println(" failed")
 		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed: %v\n", err)
+	} else {
+		fmt.Print("\rAnalyzing symbols... done")
+		fmt.Print("\033[K")
+		fmt.Println()
 	}
 
 	// Add description if provided
@@ -1057,13 +1100,19 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update auto-refs
+	fmt.Print("Updating refs... ")
 	autoRefMgr := ref.NewAutoRefManager(db)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+		fmt.Println("failed")
 		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
+	} else {
+		fmt.Println("done")
 	}
 
+	fmt.Println()
 	fmt.Printf("Created snapshot: %s\n", util.BytesToHex(snapshotID))
 	fmt.Printf("Source: %s (%s)\n", source.Identifier(), source.SourceType())
+	fmt.Printf("Files: %d\n", len(files))
 	return nil
 }
 
@@ -1085,11 +1134,22 @@ func runAnalyzeSymbols(cmd *cobra.Command, args []string) error {
 	}
 
 	creator := snapshot.NewCreator(db, matcher)
-	if err := creator.AnalyzeSymbols(snapshotID); err != nil {
+	fmt.Printf("Analyzing symbols... ")
+	progress := func(current, total int, filename string) {
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rAnalyzing symbols... %d/%d %s", current, total, display)
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
 		return fmt.Errorf("analyzing symbols: %w", err)
 	}
 
-	fmt.Println("Symbol analysis complete")
+	fmt.Print("\rAnalyzing symbols... done")
+	fmt.Print("\033[K")
+	fmt.Println()
 	return nil
 }
 
@@ -2745,18 +2805,18 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	// Determine remote name
+	// Determine remote name and targets
 	remoteName := "origin"
-	refsToPush := []string{}
+	targets := []string{}
 
 	if len(args) > 0 {
 		// Check if first arg is a remote name
 		if _, err := remote.GetRemote(args[0]); err == nil {
 			remoteName = args[0]
-			refsToPush = args[1:]
+			targets = args[1:]
 		} else {
-			// First arg is a ref
-			refsToPush = args
+			// First arg is a target
+			targets = args
 		}
 	}
 
@@ -2773,38 +2833,134 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	// Get refs to push
 	refMgr := ref.NewRefManager(db)
+	wsMgr := workspace.NewManager(db)
 	var refsToSync []*ref.Ref
+	var workspaceToPush *workspace.Workspace
 
 	if pushAll {
+		// Legacy: push all refs
 		refsToSync, err = refMgr.List(nil)
 		if err != nil {
 			return fmt.Errorf("listing refs: %w", err)
 		}
-	} else if len(refsToPush) > 0 {
-		for _, name := range refsToPush {
-			r, err := refMgr.Get(name)
-			if err != nil {
-				return fmt.Errorf("getting ref '%s': %w", name, err)
-			}
-			if r != nil {
-				refsToSync = append(refsToSync, r)
+	} else if pushWorkspace != "" {
+		// Push specific workspace
+		workspaceToPush, err = wsMgr.Get(pushWorkspace)
+		if err != nil {
+			return fmt.Errorf("getting workspace: %w", err)
+		}
+		if workspaceToPush == nil {
+			return fmt.Errorf("workspace not found: %s", pushWorkspace)
+		}
+	} else if len(targets) > 0 {
+		// Parse targets with prefixes
+		for _, target := range targets {
+			if strings.HasPrefix(target, "cs:") {
+				// Changeset target
+				csRef := strings.TrimPrefix(target, "cs:")
+				r, err := refMgr.Get("cs." + csRef)
+				if err != nil {
+					return fmt.Errorf("getting changeset ref 'cs.%s': %w", csRef, err)
+				}
+				if r == nil {
+					// Try without prefix
+					r, err = refMgr.Get(csRef)
+					if err != nil {
+						return fmt.Errorf("getting changeset ref '%s': %w", csRef, err)
+					}
+				}
+				if r != nil {
+					refsToSync = append(refsToSync, r)
+				}
+			} else if strings.HasPrefix(target, "snap:") {
+				// Snapshot target
+				snapRef := strings.TrimPrefix(target, "snap:")
+				r, err := refMgr.Get("snap." + snapRef)
+				if err != nil {
+					return fmt.Errorf("getting snapshot ref 'snap.%s': %w", snapRef, err)
+				}
+				if r == nil {
+					// Try without prefix
+					r, err = refMgr.Get(snapRef)
+					if err != nil {
+						return fmt.Errorf("getting snapshot ref '%s': %w", snapRef, err)
+					}
+				}
+				if r != nil {
+					refsToSync = append(refsToSync, r)
+				}
+			} else {
+				// Legacy: direct ref name
+				r, err := refMgr.Get(target)
+				if err != nil {
+					return fmt.Errorf("getting ref '%s': %w", target, err)
+				}
+				if r != nil {
+					refsToSync = append(refsToSync, r)
+				}
 			}
 		}
 	} else {
-		// Default: push snap.latest if it exists
+		// No workspace specified, no targets - push snap.latest and cs.latest
 		r, _ := refMgr.Get("snap.latest")
 		if r != nil {
 			refsToSync = append(refsToSync, r)
 		}
-		// Also push cs.latest
 		r, _ = refMgr.Get("cs.latest")
 		if r != nil {
 			refsToSync = append(refsToSync, r)
 		}
 	}
 
+	// If pushing a workspace, collect its changesets and snapshots
+	if workspaceToPush != nil {
+		fmt.Printf("Pushing workspace '%s'...\n", workspaceToPush.Name)
+
+		// Add workspace refs
+		wsBaseRef := &ref.Ref{
+			Name:     fmt.Sprintf("ws.%s.base", workspaceToPush.Name),
+			TargetID: workspaceToPush.BaseSnapshot,
+		}
+		wsHeadRef := &ref.Ref{
+			Name:     fmt.Sprintf("ws.%s.head", workspaceToPush.Name),
+			TargetID: workspaceToPush.HeadSnapshot,
+		}
+		refsToSync = append(refsToSync, wsBaseRef, wsHeadRef)
+
+		// Add all changesets in the workspace
+		for _, csID := range workspaceToPush.OpenChangeSets {
+			// Get the changeset node to find its base/head snapshots
+			csNode, err := db.GetNode(csID)
+			if err != nil || csNode == nil {
+				continue
+			}
+
+			// Create a ref for this changeset
+			csRefName := fmt.Sprintf("ws.%s.cs.%s", workspaceToPush.Name, hex.EncodeToString(csID)[:8])
+			csRef := &ref.Ref{
+				Name:     csRefName,
+				TargetID: csID,
+			}
+			refsToSync = append(refsToSync, csRef)
+		}
+
+		fmt.Printf("  Base: %s\n", hex.EncodeToString(workspaceToPush.BaseSnapshot)[:12])
+		fmt.Printf("  Head: %s\n", hex.EncodeToString(workspaceToPush.HeadSnapshot)[:12])
+		fmt.Printf("  Changesets: %d\n", len(workspaceToPush.OpenChangeSets))
+	}
+
 	if len(refsToSync) == 0 {
 		fmt.Println("Nothing to push.")
+		return nil
+	}
+
+	// Dry run - just show what would be pushed
+	if pushDryRun {
+		fmt.Printf("\nDry run - would push to %s:\n", remoteName)
+		fmt.Printf("  Refs: %d\n", len(refsToSync))
+		for _, r := range refsToSync {
+			fmt.Printf("    %s -> %s\n", r.Name, hex.EncodeToString(r.TargetID)[:12])
+		}
 		return nil
 	}
 
@@ -2883,6 +3039,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 		// Build pack from missing objects
 		var packObjects []remote.PackObject
+		contentDigestSet := make(map[string]bool)
+
 		for _, digest := range missing {
 			node, err := db.GetNode(digest)
 			if err != nil {
@@ -2905,14 +3063,85 @@ func runPush(cmd *cobra.Command, args []string) error {
 				Kind:    string(node.Kind),
 				Content: content,
 			})
+
+			// For File nodes, also collect the content blob digest
+			if node.Kind == graph.KindFile {
+				if contentDigest, ok := node.Payload["digest"].(string); ok {
+					contentDigestSet[contentDigest] = true
+				}
+			}
 		}
 
-		if len(packObjects) > 0 {
-			result, err := client.PushPack(packObjects)
+		// Push content blobs for File nodes
+		// Content blobs are stored with digest = blake3(rawContent), no kind prefix
+		for contentDigestHex := range contentDigestSet {
+			contentBytes, err := db.ReadObject(contentDigestHex)
 			if err != nil {
-				return fmt.Errorf("pushing pack: %w", err)
+				continue
 			}
-			fmt.Printf("  Pushed segment %d (%d objects)\n", result.SegmentID, result.Indexed)
+			contentDigest, err := hex.DecodeString(contentDigestHex)
+			if err != nil {
+				continue
+			}
+			packObjects = append(packObjects, remote.PackObject{
+				Digest:  contentDigest,
+				Kind:    "Blob",
+				Content: contentBytes, // Raw content, no prefix
+			})
+		}
+
+		fmt.Printf("  Including %d content blobs\n", len(contentDigestSet))
+
+		if len(packObjects) > 0 {
+			// Batch packs to stay under server size limit (target 50MB per batch)
+			const maxBatchSize = 50 * 1024 * 1024 // 50MB
+			var batch []remote.PackObject
+			var batchSize int64
+			batchNum := 1
+			totalBatches := 1
+
+			// Calculate estimated total batches
+			var totalSize int64
+			for _, obj := range packObjects {
+				totalSize += int64(len(obj.Content))
+			}
+			if totalSize > maxBatchSize {
+				totalBatches = int(totalSize/maxBatchSize) + 1
+			}
+
+			for _, obj := range packObjects {
+				objSize := int64(len(obj.Content))
+
+				// If adding this object would exceed limit, push current batch
+				if batchSize+objSize > maxBatchSize && len(batch) > 0 {
+					fmt.Printf("\r  Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
+					result, err := client.PushPack(batch)
+					if err != nil {
+						return fmt.Errorf("pushing pack batch %d: %w", batchNum, err)
+					}
+					fmt.Printf(" segment %d\n", result.SegmentID)
+					batch = nil
+					batchSize = 0
+					batchNum++
+				}
+
+				batch = append(batch, obj)
+				batchSize += objSize
+			}
+
+			// Push remaining batch
+			if len(batch) > 0 {
+				if totalBatches > 1 {
+					fmt.Printf("\r  Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
+				} else {
+					fmt.Printf("  Pushing %d objects...", len(batch))
+				}
+				result, err := client.PushPack(batch)
+				if err != nil {
+					return fmt.Errorf("pushing pack: %w", err)
+				}
+				fmt.Printf(" segment %d\n", result.SegmentID)
+			}
 		}
 	} else {
 		fmt.Println("  All objects already on server.")

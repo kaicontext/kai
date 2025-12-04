@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { currentUser, accessToken } from '$lib/stores.js';
+	import { currentUser } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
 
 	let orgs = $state([]);
@@ -11,13 +11,11 @@
 	let newOrgName = $state('');
 
 	onMount(async () => {
-		if (!$accessToken) {
+		// Check auth via cookie
+		const user = await loadUser();
+		if (!user) {
 			goto('/login');
 			return;
-		}
-
-		if (!$currentUser) {
-			await loadUser();
 		}
 
 		await loadOrgs();

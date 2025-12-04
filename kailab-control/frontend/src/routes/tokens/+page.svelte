@@ -1,7 +1,7 @@
 <script>
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { currentUser, accessToken } from '$lib/stores.js';
+	import { currentUser } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
 
 	let tokens = $state([]);
@@ -12,13 +12,10 @@
 	let createdToken = $state('');
 
 	onMount(async () => {
-		if (!$accessToken) {
+		const user = await loadUser();
+		if (!user) {
 			goto('/login');
 			return;
-		}
-
-		if (!$currentUser) {
-			await loadUser();
 		}
 
 		await loadTokens();

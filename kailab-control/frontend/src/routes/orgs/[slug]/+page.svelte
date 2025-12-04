@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { currentUser, accessToken, currentOrg } from '$lib/stores.js';
+	import { currentUser, currentOrg } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
 
 	let repos = $state([]);
@@ -16,13 +16,10 @@
 	});
 
 	onMount(async () => {
-		if (!$accessToken) {
+		const user = await loadUser();
+		if (!user) {
 			goto('/login');
 			return;
-		}
-
-		if (!$currentUser) {
-			await loadUser();
 		}
 
 		await loadRepos();

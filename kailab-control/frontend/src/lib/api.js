@@ -1,35 +1,39 @@
 import { get } from 'svelte/store';
-import { accessToken, refreshToken, currentUser } from './stores.js';
+import { currentUser } from './stores.js';
 import { goto } from '$app/navigation';
 
 const API_BASE = '';
 
 export async function api(method, path, body = null) {
-	const token = get(accessToken);
 	const headers = {
 		'Content-Type': 'application/json'
 	};
 
-	if (token) {
-		headers['Authorization'] = `Bearer ${token}`;
-	}
+	const options = {
+		method,
+		headers,
+		credentials: 'include' // Send cookies with requests
+	};
 
-	const options = { method, headers };
 	if (body) {
 		options.body = JSON.stringify(body);
 	}
 
 	const response = await fetch(API_BASE + path, options);
 
-	if (response.status === 401 && get(refreshToken)) {
+	if (response.status === 401) {
+		// Try to refresh the token via cookie
 		const refreshed = await refreshAccessToken();
 		if (refreshed) {
-			headers['Authorization'] = `Bearer ${get(accessToken)}`;
 			const retryResponse = await fetch(API_BASE + path, {
 				method,
 				headers,
+				credentials: 'include',
 				body: body ? JSON.stringify(body) : null
 			});
+			if (retryResponse.status === 204) {
+				return {};
+			}
 			return retryResponse.json();
 		}
 	}
@@ -42,32 +46,34 @@ export async function api(method, path, body = null) {
 }
 
 async function refreshAccessToken() {
-	const refresh = get(refreshToken);
-	if (!refresh) return false;
-
 	try {
+		// Refresh token is sent via cookie automatically
 		const response = await fetch(API_BASE + '/api/v1/auth/refresh', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ refresh_token: refresh })
+			credentials: 'include',
+			body: JSON.stringify({}) // Empty body, refresh token is in cookie
 		});
 
 		if (response.ok) {
-			const data = await response.json();
-			accessToken.set(data.access_token);
-			return true;
+			return true; // New access token is set via cookie
 		}
 	} catch (e) {
 		console.error('Failed to refresh token', e);
 	}
 
-	logout();
 	return false;
 }
 
-export function logout() {
-	accessToken.set(null);
-	refreshToken.set(null);
+export async function logout() {
+	try {
+		await fetch(API_BASE + '/api/v1/auth/logout', {
+			method: 'POST',
+			credentials: 'include'
+		});
+	} catch (e) {
+		// Ignore errors
+	}
 	currentUser.set(null);
 	goto('/login');
 }
@@ -76,10 +82,19 @@ export async function loadUser() {
 	const data = await api('GET', '/api/v1/me');
 
 	if (data.error) {
-		logout();
 		return null;
 	}
 
 	currentUser.set(data);
 	return data;
+}
+
+// Check if user is authenticated (based on cookie presence)
+export async function checkAuth() {
+	const data = await api('GET', '/api/v1/me');
+	if (data.error) {
+		return false;
+	}
+	currentUser.set(data);
+	return true;
 }
