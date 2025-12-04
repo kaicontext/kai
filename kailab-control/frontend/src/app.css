@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	body {
+		@apply font-sans leading-relaxed antialiased;
+	}
+}
+
+@layer components {
+	/* GitHub-style buttons */
+	.btn {
+		@apply inline-flex items-center justify-center px-4 py-[5px] rounded-md border border-kai-border bg-kai-bg-tertiary text-kai-text text-sm font-medium cursor-pointer transition-colors duration-150;
+	}
+
+	.btn:hover {
+		@apply bg-kai-bg-secondary border-kai-text-muted;
+	}
+
+	.btn-primary {
+		@apply bg-kai-success border-kai-success text-white font-semibold;
+	}
+
+	.btn-primary:hover {
+		@apply bg-kai-success-emphasis border-kai-success-emphasis;
+	}
+
+	/* GitHub-style inputs */
+	.input {
+		@apply bg-kai-bg border border-kai-border rounded-md px-3 py-[5px] text-kai-text text-sm w-full transition-colors duration-150;
+		@apply focus:outline-none focus:border-kai-accent focus:ring-1 focus:ring-kai-accent;
+	}
+
+	.input::placeholder {
+		@apply text-kai-text-muted;
+	}
+
+	/* Cards */
+	.card {
+		@apply bg-kai-bg-secondary border border-kai-border rounded-md p-6 mb-4;
+	}
+
+	/* GitHub-style badges/labels */
+	.badge {
+		@apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border;
+	}
+
+	.badge-public {
+		@apply bg-kai-success/15 text-kai-success-emphasis border-transparent;
+	}
+
+	.badge-private {
+		@apply bg-kai-warning/15 text-kai-warning border-transparent;
+	}
+
+	/* Alerts */
+	.alert {
+		@apply p-3 rounded-md mb-4 text-sm;
+	}
+
+	.alert-success {
+		@apply bg-kai-success/10 border border-kai-success/40 text-kai-success-emphasis;
+	}
+
+	.alert-error {
+		@apply bg-kai-error/10 border border-kai-error/40 text-kai-error;
+	}
+
+	/* List items */
+	.list-item {
+		@apply flex justify-between items-center px-4 py-3 border-b border-kai-border last:border-b-0 transition-colors duration-150;
+	}
+
+	.list-item:hover {
+		@apply bg-kai-bg;
+	}
+
+	/* Code blocks */
+	.code-block {
+		@apply bg-kai-bg border border-kai-border rounded-md p-4 font-mono text-sm overflow-x-auto;
+	}
+
+	/* Links */
+	a {
+		@apply text-kai-accent hover:underline;
+	}
+}

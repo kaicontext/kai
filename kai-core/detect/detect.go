@@ -78,13 +78,20 @@ func (d *Detector) SetSymbols(fileID string, symbols []*graph.Node) {
 }
 
 // DetectChanges detects all change types between two versions of a file.
-func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string) ([]*ChangeType, error) {
-	beforeParsed, err := d.parser.Parse(beforeContent, "")
+// The lang parameter specifies the language for proper parsing (e.g., "py", "js", "ts").
+func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang ...string) ([]*ChangeType, error) {
+	// Default to JavaScript for backward compatibility
+	parseLang := "js"
+	if len(lang) > 0 && lang[0] != "" {
+		parseLang = lang[0]
+	}
+
+	beforeParsed, err := d.parser.Parse(beforeContent, parseLang)
 	if err != nil {
 		return nil, fmt.Errorf("parsing before: %w", err)
 	}
 
-	afterParsed, err := d.parser.Parse(afterContent, "")
+	afterParsed, err := d.parser.Parse(afterContent, parseLang)
 	if err != nil {
 		return nil, fmt.Errorf("parsing after: %w", err)
 	}
@@ -660,7 +667,7 @@ func NewFileChange(category ChangeCategory, path string) *ChangeType {
 // IsParseable returns true if the language supports semantic parsing.
 func IsParseable(lang string) bool {
 	switch lang {
-	case "ts", "js", "json":
+	case "ts", "js", "json", "py", "yaml":
 		return true
 	default:
 		return false

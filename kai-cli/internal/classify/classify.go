@@ -12,6 +12,7 @@ type FileRange = detect.FileRange
 type Evidence = detect.Evidence
 type ChangeType = detect.ChangeType
 type JSONSymbol = detect.JSONSymbol
+type YAMLSymbol = detect.YAMLSymbol
 
 // Detector wraps kai-core/detect.Detector to use local graph.Node type
 type Detector struct {
@@ -29,8 +30,9 @@ func (d *Detector) SetSymbols(fileID string, symbols []*coregraph.Node) {
 }
 
 // DetectChanges detects all change types between two versions of a file.
-func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string) ([]*ChangeType, error) {
-	return d.inner.DetectChanges(path, beforeContent, afterContent, fileID)
+// Optional lang parameter specifies the language for proper parsing.
+func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang ...string) ([]*ChangeType, error) {
+	return d.inner.DetectChanges(path, beforeContent, afterContent, fileID, lang...)
 }
 
 // DetectFileChange creates a FILE_CONTENT_CHANGED for non-parseable files.
@@ -67,4 +69,7 @@ var (
 	FormatJSONPath     = detect.FormatJSONPath
 	IsPackageJSON      = detect.IsPackageJSON
 	IsTSConfig         = detect.IsTSConfig
+	ExtractYAMLSymbols = detect.ExtractYAMLSymbols
+	DetectYAMLChanges  = detect.DetectYAMLChanges
+	FormatYAMLPath     = detect.FormatYAMLPath
 )

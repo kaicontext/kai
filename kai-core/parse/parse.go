@@ -1,4 +1,4 @@
-// Package parse provides Tree-sitter based parsing for TypeScript and JavaScript.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, and Python.
 package parse
 
 import (
@@ -7,6 +7,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/python"
 )
 
 // Range represents a source code range (0-based line and column).
@@ -30,26 +31,50 @@ type ParsedFile struct {
 	Symbols []*Symbol
 }
 
-// Parser wraps the Tree-sitter parser.
+// Parser wraps the Tree-sitter parser with multi-language support.
 type Parser struct {
-	parser *sitter.Parser
+	jsParser *sitter.Parser
+	pyParser *sitter.Parser
 }
 
-// NewParser creates a new parser (uses JavaScript parser which handles most TS/JS syntax).
+// NewParser creates a new parser with support for JavaScript/TypeScript and Python.
 func NewParser() *Parser {
-	parser := sitter.NewParser()
-	parser.SetLanguage(javascript.GetLanguage())
-	return &Parser{parser: parser}
+	jsParser := sitter.NewParser()
+	jsParser.SetLanguage(javascript.GetLanguage())
+
+	pyParser := sitter.NewParser()
+	pyParser.SetLanguage(python.GetLanguage())
+
+	return &Parser{
+		jsParser: jsParser,
+		pyParser: pyParser,
+	}
 }
 
-// Parse parses source code and extracts symbols.
+// Parse parses source code and extracts symbols based on language.
 func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
-	tree, err := p.parser.ParseCtx(context.Background(), nil, content)
+	var parser *sitter.Parser
+	var extractFn func(*sitter.Node, []byte) []*Symbol
+
+	switch lang {
+	case "py", "python":
+		parser = p.pyParser
+		extractFn = extractPythonSymbols
+	case "js", "ts", "javascript", "typescript":
+		parser = p.jsParser
+		extractFn = extractSymbols
+	default:
+		// Default to JavaScript parser for unknown languages
+		parser = p.jsParser
+		extractFn = extractSymbols
+	}
+
+	tree, err := parser.ParseCtx(context.Background(), nil, content)
 	if err != nil {
 		return nil, fmt.Errorf("parsing failed: %w", err)
 	}
 
-	symbols := extractSymbols(tree.RootNode(), content)
+	symbols := extractFn(tree.RootNode(), content)
 
 	return &ParsedFile{
 		Tree:    tree,
@@ -352,4 +377,200 @@ func RangesOverlap(r1, r2 Range) bool {
 		return false
 	}
 	return true
+}
+
+// ==================== Python Symbol Extraction ====================
+
+// extractPythonSymbols walks the Python AST and extracts function, class, and variable declarations.
+func extractPythonSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil {
+			break
+		}
+		if n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "function_definition":
+			sym := extractPythonFunction(n, content, "")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "class_definition":
+			sym := extractPythonClass(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			// Also extract methods within the class
+			methods := extractPythonMethods(n, content)
+			symbols = append(symbols, methods...)
+		case "assignment":
+			// Top-level assignments (module-level variables)
+			// In Python, assignments are wrapped in expression_statement within module
+			parent := n.Parent()
+			if parent != nil {
+				grandparent := parent.Parent()
+				if parent.Type() == "expression_statement" && grandparent != nil && grandparent.Type() == "module" {
+					syms := extractPythonAssignment(n, content)
+					symbols = append(symbols, syms...)
+				}
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractPythonFunction(node *sitter.Node, content []byte, className string) *Symbol {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "parameters":
+			params = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	fullName := name
+	if className != "" {
+		fullName = className + "." + name
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: fmt.Sprintf("def %s%s", name, params),
+	}
+}
+
+func extractPythonClass(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var bases string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "argument_list":
+			bases = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := "class " + name
+	if bases != "" {
+		signature += bases
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractPythonMethods(classNode *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+
+	// Find class name
+	var className string
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "identifier" {
+			className = child.Content(content)
+			break
+		}
+	}
+
+	// Find block (class body)
+	var classBody *sitter.Node
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "block" {
+			classBody = child
+			break
+		}
+	}
+
+	if classBody == nil {
+		return methods
+	}
+
+	// Find function definitions inside the block
+	for i := 0; i < int(classBody.ChildCount()); i++ {
+		child := classBody.Child(i)
+		if child.Type() == "function_definition" {
+			sym := extractPythonFunction(child, content, className)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		}
+	}
+
+	return methods
+}
+
+func extractPythonAssignment(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	// Look for identifier on the left side
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name := child.Content(content)
+			// Skip private/dunder variables for cleaner output
+			if len(name) > 0 && name[0] != '_' {
+				symbols = append(symbols, &Symbol{
+					Name:      name,
+					Kind:      "variable",
+					Range:     nodeRange(node),
+					Signature: name,
+				})
+			}
+			break
+		}
+		// Handle tuple unpacking like a, b = 1, 2
+		if child.Type() == "pattern_list" || child.Type() == "tuple_pattern" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				subChild := child.Child(j)
+				if subChild.Type() == "identifier" {
+					name := subChild.Content(content)
+					if len(name) > 0 && name[0] != '_' {
+						symbols = append(symbols, &Symbol{
+							Name:      name,
+							Kind:      "variable",
+							Range:     nodeRange(node),
+							Signature: name,
+						})
+					}
+				}
+			}
+			break
+		}
+	}
+
+	return symbols
 }

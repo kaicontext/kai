@@ -658,6 +658,9 @@ func shortID(s string) string {
 	return s
 }
 
+// skipModulesFile is set by clone to skip creating kai.modules.yaml
+var skipModulesFile bool
+
 func runInit(cmd *cobra.Command, args []string) error {
 	// Create .kai directory
 	if err := os.MkdirAll(kaiDir, 0755); err != nil {
@@ -672,8 +675,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Write default kai.modules.yaml in project root (not in .kai) only if it doesn't exist
 	// This file is meant to be committed to version control and shared with the team
-	if _, err := os.Stat(modulesFile); os.IsNotExist(err) {
-		modulesContent := `# Kai module definitions
+	// Skip during clone since the remote repo may have its own modules file
+	if !skipModulesFile {
+		if _, err := os.Stat(modulesFile); os.IsNotExist(err) {
+			modulesContent := `# Kai module definitions
 # This file maps file paths to logical modules for better intent generation.
 # Commit this file to version control to share with your team.
 #
@@ -690,8 +695,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 modules: []
 `
-		if err := os.WriteFile(modulesFile, []byte(modulesContent), 0644); err != nil {
-			return fmt.Errorf("writing %s: %w", modulesFile, err)
+			if err := os.WriteFile(modulesFile, []byte(modulesContent), 0644); err != nil {
+				return fmt.Errorf("writing %s: %w", modulesFile, err)
+			}
 		}
 	}
 
@@ -2401,19 +2407,38 @@ func completeRefName(cmd *cobra.Command, args []string, toComplete string) ([]st
 
 func runRemoteSet(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	url := args[1]
+	rawURL := args[1]
+
+	tenant := remoteTenant
+	repo := remoteRepo
+
+	// Parse URL to extract tenant/repo from path if not specified via flags
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Extract tenant/repo from path if flags are at default values
+	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	if len(pathParts) >= 2 && tenant == "default" && repo == "main" {
+		tenant = pathParts[0]
+		repo = pathParts[1]
+		// Rebuild base URL without tenant/repo path
+		parsedURL.Path = ""
+		rawURL = parsedURL.String()
+	}
 
 	entry := &remote.RemoteEntry{
-		URL:    url,
-		Tenant: remoteTenant,
-		Repo:   remoteRepo,
+		URL:    rawURL,
+		Tenant: tenant,
+		Repo:   repo,
 	}
 
 	if err := remote.SetRemote(name, entry); err != nil {
 		return fmt.Errorf("setting remote: %w", err)
 	}
 
-	fmt.Printf("Remote '%s' set to: %s (tenant=%s, repo=%s)\n", name, url, remoteTenant, remoteRepo)
+	fmt.Printf("Remote '%s' set to: %s (tenant=%s, repo=%s)\n", name, rawURL, tenant, repo)
 	return nil
 }
 
@@ -2533,14 +2558,54 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Collect all objects to push
+	// Collect all objects to push (including related objects via edges)
 	var allDigests [][]byte
 	digestSet := make(map[string]bool)
 
+	// Helper to add a digest if not already seen
+	addDigest := func(d []byte) {
+		key := hex.EncodeToString(d)
+		if !digestSet[key] {
+			digestSet[key] = true
+			allDigests = append(allDigests, d)
+		}
+	}
+
+	// Collect all objects reachable from each ref target
 	for _, r := range refsToSync {
-		if !digestSet[hex.EncodeToString(r.TargetID)] {
-			digestSet[hex.EncodeToString(r.TargetID)] = true
-			allDigests = append(allDigests, r.TargetID)
+		addDigest(r.TargetID)
+
+		// Get all edges from this node to find related objects
+		for _, edgeType := range []graph.EdgeType{
+			graph.EdgeHasFile,
+			graph.EdgeDefinesIn,
+			graph.EdgeModifies,
+			graph.EdgeHas,
+			graph.EdgeAffects,
+			graph.EdgeContains,
+		} {
+			edges, err := db.GetEdges(r.TargetID, edgeType)
+			if err != nil {
+				continue
+			}
+			for _, edge := range edges {
+				addDigest(edge.Dst)
+			}
+		}
+
+		// Also get edges by context (for edges created with 'at' = this node)
+		for _, edgeType := range []graph.EdgeType{
+			graph.EdgeHasFile,
+			graph.EdgeDefinesIn,
+		} {
+			edges, err := db.GetEdgesByContext(r.TargetID, edgeType)
+			if err != nil {
+				continue
+			}
+			for _, edge := range edges {
+				addDigest(edge.Src)
+				addDigest(edge.Dst)
+			}
 		}
 	}
 
@@ -2805,14 +2870,17 @@ func runClone(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Chdir(origDir)
 
-	// Initialize Kai
+	// Initialize Kai (skip creating kai.modules.yaml - the remote repo may have one)
 	fmt.Println("Initializing Kai...")
+	skipModulesFile = true
 	if err := runInit(cmd, nil); err != nil {
+		skipModulesFile = false
 		// Clean up on failure
 		os.Chdir(origDir)
 		os.RemoveAll(dirName)
 		return fmt.Errorf("initializing: %w", err)
 	}
+	skipModulesFile = false
 
 	// Set up the remote
 	fmt.Printf("Setting remote 'origin' to %s (tenant=%s, repo=%s)...\n", rawURL, tenant, repo)
@@ -2887,23 +2955,29 @@ func runClone(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			if content != nil {
-				var payload map[string]interface{}
-				if err := json.Unmarshal(content, &payload); err != nil {
-					continue
-				}
-
-				tx, err := db.BeginTx()
-				if err != nil {
-					continue
-				}
-				_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
-				if err != nil {
-					tx.Rollback()
-					continue
-				}
-				tx.Commit()
+			if content == nil {
+				fmt.Printf("  Warning: object %s not found on server\n", hex.EncodeToString(digest)[:12])
+				continue
 			}
+
+			var payload map[string]interface{}
+			if err := json.Unmarshal(content, &payload); err != nil {
+				fmt.Printf("  Warning: failed to parse object %s: %v\n", hex.EncodeToString(digest)[:12], err)
+				continue
+			}
+
+			tx, err := db.BeginTx()
+			if err != nil {
+				fmt.Printf("  Warning: failed to start transaction: %v\n", err)
+				continue
+			}
+			_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
+			if err != nil {
+				tx.Rollback()
+				fmt.Printf("  Warning: failed to insert object %s: %v\n", hex.EncodeToString(digest)[:12], err)
+				continue
+			}
+			tx.Commit()
 		}
 	}
 

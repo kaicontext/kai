@@ -299,6 +299,12 @@ func (c *Client) GetObject(digest []byte) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("reading body: %w", err)
 	}
 
+	// Content is stored as "Kind\n{json...}" for digest verification.
+	// Strip the kind prefix to return just the JSON payload.
+	if idx := bytes.IndexByte(content, '\n'); idx >= 0 {
+		content = content[idx+1:]
+	}
+
 	return content, kind, nil
 }
 

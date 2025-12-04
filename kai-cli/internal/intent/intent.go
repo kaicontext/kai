@@ -92,6 +92,8 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 	hasConstant := false
 	hasJSONField := false
 	hasJSONValue := false
+	hasYAMLKey := false
+	hasYAMLValue := false
 	hasFileContent := false
 
 	for _, ct := range changeTypes {
@@ -110,6 +112,10 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 			hasJSONField = true
 		case classify.JSONValueChanged, classify.JSONArrayChanged:
 			hasJSONValue = true
+		case classify.YAMLKeyAdded, classify.YAMLKeyRemoved:
+			hasYAMLKey = true
+		case classify.YAMLValueChanged:
+			hasYAMLValue = true
 		case classify.FileContentChanged:
 			hasFileContent = true
 		case classify.FileAdded:
@@ -144,6 +150,13 @@ func determineVerb(changeTypes []*classify.ChangeType) string {
 		return "Update"
 	}
 	if hasJSONValue {
+		return "Modify"
+	}
+	// YAML changes
+	if hasYAMLKey {
+		return "Update"
+	}
+	if hasYAMLValue {
 		return "Modify"
 	}
 	// File-level fallback
