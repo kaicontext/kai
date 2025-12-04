@@ -51,7 +51,7 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 	}
 
 	// Auto-analyze symbols for better intent generation
-	creator.AnalyzeSymbols(newSnapID) // Non-fatal if fails
+	creator.AnalyzeSymbols(newSnapID, nil) // Non-fatal if fails
 
 	// Add description to snapshot if message provided
 	if message != "" {
