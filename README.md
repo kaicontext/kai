@@ -405,7 +405,7 @@ export function login(user: User, device: string, ip: string): boolean {
 
 ```bash
 cd testdata/repo
-../../kai init
+kai init
 ```
 
 **What happens:**
@@ -436,7 +436,7 @@ Initialized Kai in .kai/
 Create a snapshot of the main branch:
 
 ```bash
-../../kai snapshot main --repo .
+kai snapshot main --repo .
 ```
 
 **Output:**
@@ -447,7 +447,7 @@ Created snapshot: d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00
 Create a snapshot of the feature branch:
 
 ```bash
-../../kai snapshot feature --repo .
+kai snapshot feature --repo .
 ```
 
 **Output:**
@@ -470,10 +470,10 @@ Extract symbols from each snapshot:
 
 ```bash
 # Analyze main branch snapshot
-../../kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
 
 # Analyze feature branch snapshot
-../../kai analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
+kai analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
 ```
 
 **Output:**
@@ -497,7 +497,7 @@ Symbol analysis complete
 Compare the two snapshots:
 
 ```bash
-../../kai changeset create \
+kai changeset create \
   d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc \
   4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
 ```
@@ -528,7 +528,7 @@ Affected modules: [Auth]
 Generate a human-readable intent sentence:
 
 ```bash
-../../kai intent render 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
+kai intent render 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
 ```
 
 **Output:**
@@ -547,7 +547,7 @@ Intent: Update Auth TIMEOUT
 
 **Override with custom intent:**
 ```bash
-../../kai intent render 90cd72... --edit "Reduce session timeout to 30 minutes"
+kai intent render 90cd72... --edit "Reduce session timeout to 30 minutes"
 ```
 
 ### Step 7: Dump ChangeSet as JSON
@@ -555,7 +555,7 @@ Intent: Update Auth TIMEOUT
 View the complete changeset data:
 
 ```bash
-../../kai dump 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203 --json
+kai dump 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203 --json
 ```
 
 This outputs a structured JSON document containing:
