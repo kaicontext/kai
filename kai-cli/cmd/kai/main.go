@@ -1303,6 +1303,10 @@ func runDump(cmd *cobra.Command, args []string) error {
 }
 
 func openDB() (*graph.DB, error) {
+	// Check if .kai directory exists
+	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("Kai not initialized. Run 'kai init' first")
+	}
 	dbPath := filepath.Join(kaiDir, dbFile)
 	objPath := filepath.Join(kaiDir, objectsDir)
 	return graph.Open(dbPath, objPath)
