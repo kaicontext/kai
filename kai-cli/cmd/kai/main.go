@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"kai-core/merge"
 	"kai/internal/classify"
 	"kai/internal/dirio"
 	"kai/internal/filesource"
@@ -38,7 +39,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.2.2"
+var Version = "0.2.3"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -203,6 +204,23 @@ var integrateCmd = &cobra.Command{
 	Use:   "integrate",
 	Short: "Integrate workspace changes into a target snapshot",
 	RunE:  runIntegrate,
+}
+
+var mergeCmd = &cobra.Command{
+	Use:   "merge <base-file> <left-file> <right-file>",
+	Short: "Perform AST-aware 3-way merge",
+	Long: `Perform an AST-aware 3-way merge at symbol granularity.
+
+Unlike line-based merge, this understands code structure and can:
+- Auto-merge changes to different functions in the same file
+- Detect API signature conflicts when both sides change function params
+- Classify conflicts semantically (DELETE_vs_MODIFY, CONCURRENT_CREATE, etc.)
+
+Examples:
+  kai merge base.js left.js right.js --lang js
+  kai merge base.py branch1.py branch2.py --lang py --output merged.py`,
+	Args: cobra.ExactArgs(3),
+	RunE: runMerge,
 }
 
 var checkoutCmd = &cobra.Command{
@@ -504,6 +522,11 @@ var (
 	// Clone flags
 	cloneTenant string
 	cloneRepo   string
+
+	// Merge flags
+	mergeLang   string
+	mergeOutput string
+	mergeJSON   bool
 )
 
 func init() {
@@ -581,6 +604,11 @@ func init() {
 	cloneCmd.Flags().StringVar(&cloneTenant, "tenant", "", "Tenant/org name (extracted from URL if not specified)")
 	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
 
+	// Merge flags
+	mergeCmd.Flags().StringVar(&mergeLang, "lang", "", "Language (js, ts, py) - auto-detected from extension if not specified")
+	mergeCmd.Flags().StringVarP(&mergeOutput, "output", "o", "", "Output file path (defaults to stdout)")
+	mergeCmd.Flags().BoolVar(&mergeJSON, "json", false, "Output result as JSON (includes conflicts)")
+
 	// Add remote subcommands
 	remoteCmd.AddCommand(remoteSetCmd)
 	remoteCmd.AddCommand(remoteGetCmd)
@@ -630,6 +658,7 @@ func init() {
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
+	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
 	rootCmd.AddCommand(refCmd)
 	rootCmd.AddCommand(pickCmd)
@@ -2034,6 +2063,123 @@ func runIntegrate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Applied %d changeset(s)\n", len(result.AppliedChangeSets))
 	if result.AutoResolved > 0 {
 		fmt.Printf("  Auto-resolved: %d change(s)\n", result.AutoResolved)
+	}
+
+	return nil
+}
+
+func runMerge(cmd *cobra.Command, args []string) error {
+	baseFile := args[0]
+	leftFile := args[1]
+	rightFile := args[2]
+
+	// Read file contents
+	baseContent, err := os.ReadFile(baseFile)
+	if err != nil {
+		return fmt.Errorf("reading base file: %w", err)
+	}
+	leftContent, err := os.ReadFile(leftFile)
+	if err != nil {
+		return fmt.Errorf("reading left file: %w", err)
+	}
+	rightContent, err := os.ReadFile(rightFile)
+	if err != nil {
+		return fmt.Errorf("reading right file: %w", err)
+	}
+
+	// Detect language from extension if not specified
+	lang := mergeLang
+	if lang == "" {
+		ext := strings.ToLower(filepath.Ext(baseFile))
+		switch ext {
+		case ".js":
+			lang = "js"
+		case ".ts", ".tsx":
+			lang = "ts"
+		case ".py":
+			lang = "py"
+		case ".go":
+			lang = "go"
+		default:
+			lang = "js" // fallback
+		}
+	}
+
+	// Perform merge
+	result, err := merge.Merge3Way(baseContent, leftContent, rightContent, lang)
+	if err != nil {
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	// Output as JSON if requested
+	if mergeJSON {
+		type jsonConflict struct {
+			Kind      string `json:"kind"`
+			Unit      string `json:"unit"`
+			Message   string `json:"message"`
+			LeftDiff  string `json:"leftDiff,omitempty"`
+			RightDiff string `json:"rightDiff,omitempty"`
+		}
+		type jsonResult struct {
+			Success   bool           `json:"success"`
+			Conflicts []jsonConflict `json:"conflicts,omitempty"`
+			Merged    string         `json:"merged,omitempty"`
+		}
+
+		jr := jsonResult{
+			Success: result.Success,
+		}
+		for _, c := range result.Conflicts {
+			jr.Conflicts = append(jr.Conflicts, jsonConflict{
+				Kind:      string(c.Kind),
+				Unit:      c.UnitKey.String(),
+				Message:   c.Message,
+				LeftDiff:  c.LeftDiff,
+				RightDiff: c.RightDiff,
+			})
+		}
+		if merged := result.Files["file"]; merged != nil {
+			jr.Merged = string(merged)
+		}
+
+		out, err := json.MarshalIndent(jr, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshaling result: %w", err)
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+
+	// Text output
+	if !result.Success {
+		fmt.Fprintf(os.Stderr, "Merge conflicts detected (%d):\n\n", len(result.Conflicts))
+		for _, c := range result.Conflicts {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", c.Kind, c.Message)
+			fmt.Fprintf(os.Stderr, "    Unit: %s\n", c.UnitKey.String())
+			if c.LeftDiff != "" {
+				fmt.Fprintf(os.Stderr, "    Left:  %s\n", c.LeftDiff)
+			}
+			if c.RightDiff != "" {
+				fmt.Fprintf(os.Stderr, "    Right: %s\n", c.RightDiff)
+			}
+			fmt.Fprintln(os.Stderr)
+		}
+		return fmt.Errorf("merge has conflicts")
+	}
+
+	// Success - output merged content
+	merged := result.Files["file"]
+	if merged == nil {
+		return fmt.Errorf("no merged content produced")
+	}
+
+	if mergeOutput != "" {
+		if err := os.WriteFile(mergeOutput, merged, 0644); err != nil {
+			return fmt.Errorf("writing output file: %w", err)
+		}
+		fmt.Printf("Merged successfully -> %s\n", mergeOutput)
+	} else {
+		fmt.Print(string(merged))
 	}
 
 	return nil
