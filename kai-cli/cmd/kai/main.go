@@ -201,6 +201,21 @@ var wsCloseCmd = &cobra.Command{
 	RunE:  runWsClose,
 }
 
+var wsDeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete a workspace (metadata and refs; run `kai prune` to reclaim storage)",
+	Long: `Delete a workspace permanently, removing the workspace node, edges, and refs.
+
+Content (snapshots, changesets, files) is NOT deleted - that's the GC's job.
+Run 'kai prune' after deleting workspaces to reclaim storage.
+
+Examples:
+  kai ws delete --ws feature/experiment --dry-run  # Preview what would be deleted
+  kai ws delete --ws feature/experiment            # Actually delete
+  kai ws delete --ws old-branch --keep-refs        # Keep refs (rare)`,
+	RunE: runWsDelete,
+}
+
 var integrateCmd = &cobra.Command{
 	Use:   "integrate",
 	Short: "Integrate workspace changes into a target snapshot",
@@ -431,6 +446,25 @@ Examples:
 	RunE: runClone,
 }
 
+var pruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Garbage-collect unreachable snapshots/changesets/files",
+	Long: `Garbage-collect unreachable content using mark-and-sweep.
+
+Roots (kept):
+  - All ref targets
+  - All workspace nodes (and their base/head/changesets)
+
+Everything not reachable from roots is swept.
+
+Examples:
+  kai prune --dry-run           # Preview what would be deleted
+  kai prune                     # Actually delete unreachable content
+  kai prune --since 7           # Only delete content older than 7 days
+  kai prune --aggressive        # Also sweep orphaned Symbols/Modules`,
+	RunE: runPrune,
+}
+
 var remoteLogCmd = &cobra.Command{
 	Use:   "remote-log [remote]",
 	Short: "Show remote ref history log",
@@ -482,11 +516,16 @@ var authStatusCmd = &cobra.Command{
 
 var (
 	// Workspace flags
-	wsName        string
-	wsBase        string
-	wsDescription string
-	wsDir         string
-	wsTarget      string
+	wsName           string
+	wsBase           string
+	wsDescription    string
+	wsDir            string
+	wsTarget         string
+	wsDeleteKeepRefs bool
+	wsDeleteDryRun   bool
+	pruneDryRun      bool
+	pruneSinceDays   int
+	pruneAggressive  bool
 	statusDir      string
 	statusAgainst  string
 	statusNameOnly bool
@@ -588,6 +627,11 @@ func init() {
 	wsCloseCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	wsCloseCmd.MarkFlagRequired("ws")
 
+	wsDeleteCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
+	wsDeleteCmd.Flags().BoolVar(&wsDeleteKeepRefs, "keep-refs", false, "Preserve workspace refs (rare)")
+	wsDeleteCmd.Flags().BoolVar(&wsDeleteDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
+	wsDeleteCmd.MarkFlagRequired("ws")
+
 	integrateCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	integrateCmd.Flags().StringVar(&wsTarget, "into", "", "Target snapshot ID (required)")
 	integrateCmd.MarkFlagRequired("ws")
@@ -619,6 +663,11 @@ func init() {
 	// Clone flags
 	cloneCmd.Flags().StringVar(&cloneTenant, "tenant", "", "Tenant/org name (extracted from URL if not specified)")
 	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
+
+	// Prune flags
+	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
+	pruneCmd.Flags().IntVar(&pruneSinceDays, "since", 0, "Only delete content older than N days (0 = no limit)")
+	pruneCmd.Flags().BoolVar(&pruneAggressive, "aggressive", false, "Also sweep orphaned Symbols and Modules")
 
 	// Merge flags
 	mergeCmd.Flags().StringVar(&mergeLang, "lang", "", "Language (js, ts, py) - auto-detected from extension if not specified")
@@ -655,6 +704,7 @@ func init() {
 	wsCmd.AddCommand(wsShelveCmd)
 	wsCmd.AddCommand(wsUnshelveCmd)
 	wsCmd.AddCommand(wsCloseCmd)
+	wsCmd.AddCommand(wsDeleteCmd)
 
 	analyzeCmd.AddCommand(analyzeSymbolsCmd)
 	changesetCmd.AddCommand(changesetCreateCmd)
@@ -683,6 +733,7 @@ func init() {
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
 	rootCmd.AddCommand(cloneCmd)
+	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(remoteLogCmd)
 
 	// Add auth subcommands
@@ -2192,6 +2243,43 @@ func runWsClose(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runWsDelete(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := workspace.NewManager(db)
+
+	// Dry-run: show plan
+	if wsDeleteDryRun {
+		plan, err := mgr.PlanDelete(wsName)
+		if err != nil {
+			return fmt.Errorf("planning delete: %w", err)
+		}
+
+		fmt.Println("Plan:")
+		fmt.Printf("  Remove Workspace node: %s\n", util.BytesToHex(plan.WorkspaceID)[:12])
+		fmt.Printf("  Remove edges: %d\n", plan.EdgesRemoved)
+		fmt.Printf("  Remove refs: %s\n", strings.Join(plan.RefsRemoved, ", "))
+		if plan.OrphanedCSCount > 0 {
+			fmt.Printf("Note: %d ChangeSet(s) will become unreferenced and eligible for GC.\n", plan.OrphanedCSCount)
+		}
+		fmt.Println("Run without --dry-run to apply.")
+		return nil
+	}
+
+	// Actually delete
+	if err := mgr.Delete(wsName, wsDeleteKeepRefs); err != nil {
+		return fmt.Errorf("deleting workspace: %w", err)
+	}
+
+	fmt.Printf("Workspace %q deleted.\n", wsName)
+	fmt.Println("Run `kai prune` to reclaim storage.")
+	return nil
+}
+
 func runIntegrate(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -3516,6 +3604,71 @@ func runClone(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nClone complete. Repository cloned into '%s'\n", dirName)
+	return nil
+}
+
+func runPrune(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	opts := graph.GCOptions{
+		SinceDays:  pruneSinceDays,
+		Aggressive: pruneAggressive,
+		DryRun:     pruneDryRun,
+	}
+
+	plan, err := db.BuildGCPlan(opts)
+	if err != nil {
+		return fmt.Errorf("building GC plan: %w", err)
+	}
+
+	// Show summary
+	totalNodes := len(plan.NodesToDelete)
+	if totalNodes == 0 && len(plan.ObjectsToDelete) == 0 {
+		fmt.Println("Nothing to prune. All content is reachable.")
+		return nil
+	}
+
+	if pruneDryRun {
+		fmt.Println("Would sweep:")
+	} else {
+		fmt.Println("Sweeping:")
+	}
+
+	if plan.SnapshotCount > 0 {
+		fmt.Printf("  Snapshots:  %d\n", plan.SnapshotCount)
+	}
+	if plan.ChangeSetCount > 0 {
+		fmt.Printf("  ChangeSets: %d\n", plan.ChangeSetCount)
+	}
+	if plan.FileCount > 0 {
+		fmt.Printf("  Files:      %d\n", plan.FileCount)
+	}
+	if plan.SymbolCount > 0 {
+		fmt.Printf("  Symbols:    %d\n", plan.SymbolCount)
+	}
+	if plan.ModuleCount > 0 {
+		fmt.Printf("  Modules:    %d\n", plan.ModuleCount)
+	}
+
+	if len(plan.ObjectsToDelete) > 0 {
+		fmt.Printf("  Objects:    %d (~%.2f MiB)\n", len(plan.ObjectsToDelete), float64(plan.BytesReclaimed)/(1024*1024))
+	}
+
+	if pruneDryRun {
+		fmt.Println("\nRun `kai prune` to proceed.")
+		return nil
+	}
+
+	// Actually execute
+	if err := db.ExecuteGC(plan); err != nil {
+		return fmt.Errorf("executing GC: %w", err)
+	}
+
+	fmt.Printf("\nPrune complete. Reclaimed %.2f MiB.\n", float64(plan.BytesReclaimed)/(1024*1024))
 	return nil
 }
 

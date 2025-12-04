@@ -190,6 +190,121 @@ func (m *Manager) Close(nameOrID string) error {
 	return m.updateStatus(ws.ID, StatusClosed)
 }
 
+// DeletePlan contains information about what will be deleted.
+type DeletePlan struct {
+	WorkspaceID     []byte
+	WorkspaceName   string
+	EdgesRemoved    int
+	RefsRemoved     []string
+	OrphanedCSCount int
+	OrphanedSnaps   int
+}
+
+// PlanDelete computes what would be deleted without actually deleting.
+func (m *Manager) PlanDelete(nameOrID string) (*DeletePlan, error) {
+	ws, err := m.Get(nameOrID)
+	if err != nil {
+		return nil, err
+	}
+	if ws == nil {
+		return nil, fmt.Errorf("workspace not found: %s", nameOrID)
+	}
+
+	plan := &DeletePlan{
+		WorkspaceID:   ws.ID,
+		WorkspaceName: ws.Name,
+	}
+
+	// Count edges
+	headEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeHeadAt)
+	baseEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeBasedOn)
+	csEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeHasChangeSet)
+	plan.EdgesRemoved = len(headEdges) + len(baseEdges) + len(csEdges)
+
+	// Workspace refs that would be removed
+	plan.RefsRemoved = []string{
+		"ws." + ws.Name + ".base",
+		"ws." + ws.Name + ".head",
+	}
+
+	// Count orphaned changesets (those only referenced by this workspace)
+	plan.OrphanedCSCount = len(ws.OpenChangeSets)
+
+	// Orphaned snapshots (simplified - actual GC will do proper reachability)
+	plan.OrphanedSnaps = 0
+	if len(headEdges) > 0 {
+		plan.OrphanedSnaps++
+	}
+
+	return plan, nil
+}
+
+// Delete permanently removes a workspace node, its edges, and related refs.
+// Content (snapshots, changesets) is NOT deleted - use prune for that.
+func (m *Manager) Delete(nameOrID string, keepRefs bool) error {
+	ws, err := m.Get(nameOrID)
+	if err != nil {
+		return err
+	}
+	if ws == nil {
+		return fmt.Errorf("workspace not found: %s", nameOrID)
+	}
+
+	tx, err := m.db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete edges: HEAD_AT, BASED_ON, HAS_CHANGESET
+	headEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeHeadAt)
+	for _, e := range headEdges {
+		if err := m.db.DeleteEdge(tx, ws.ID, graph.EdgeHeadAt, e.Dst); err != nil {
+			return fmt.Errorf("deleting HEAD_AT edge: %w", err)
+		}
+	}
+
+	baseEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeBasedOn)
+	for _, e := range baseEdges {
+		if err := m.db.DeleteEdge(tx, ws.ID, graph.EdgeBasedOn, e.Dst); err != nil {
+			return fmt.Errorf("deleting BASED_ON edge: %w", err)
+		}
+	}
+
+	csEdges, _ := m.db.GetEdges(ws.ID, graph.EdgeHasChangeSet)
+	for _, e := range csEdges {
+		if err := m.db.DeleteEdge(tx, ws.ID, graph.EdgeHasChangeSet, e.Dst); err != nil {
+			return fmt.Errorf("deleting HAS_CHANGESET edge: %w", err)
+		}
+	}
+
+	// Delete the workspace node
+	_, err = tx.Exec(`DELETE FROM nodes WHERE id = ? AND kind = ?`, ws.ID, string(graph.KindWorkspace))
+	if err != nil {
+		return fmt.Errorf("deleting workspace node: %w", err)
+	}
+
+	// Delete refs unless --keep-refs
+	if !keepRefs {
+		refNames := []string{
+			"ws." + ws.Name + ".base",
+			"ws." + ws.Name + ".head",
+		}
+		for _, refName := range refNames {
+			_, err = tx.Exec(`DELETE FROM refs WHERE name = ?`, refName)
+			if err != nil {
+				return fmt.Errorf("deleting ref %s: %w", refName, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
 // setStatus changes workspace status with validation.
 func (m *Manager) setStatus(nameOrID string, newStatus, expectedCurrent Status) error {
 	ws, err := m.Get(nameOrID)
