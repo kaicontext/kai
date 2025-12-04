@@ -17,6 +17,14 @@
 	let showDeleteConfirm = $state(false);
 	let deleting = $state(false);
 
+	// Files tab state
+	let selectedSnapshot = $state('');
+	let files = $state([]);
+	let filesLoading = $state(false);
+	let selectedFile = $state(null);
+	let fileContent = $state('');
+	let fileContentLoading = $state(false);
+
 	$effect(() => {
 		currentOrg.set($page.params.slug);
 		currentRepo.set($page.params.repo);
@@ -160,6 +168,82 @@ kai push origin snap.latest`;
 			default: return ' ';
 		}
 	}
+
+	// Files tab functions
+	async function loadFiles(snapshotRef) {
+		if (!snapshotRef) {
+			files = [];
+			return;
+		}
+		filesLoading = true;
+		selectedFile = null;
+		fileContent = '';
+
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/snapshots/${snapshotRef}/files`);
+		if (data.files) {
+			files = data.files.sort((a, b) => a.path.localeCompare(b.path));
+		} else {
+			files = [];
+		}
+		filesLoading = false;
+	}
+
+	async function loadFileContent(file) {
+		selectedFile = file;
+		fileContentLoading = true;
+		fileContent = '';
+
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${file.digest}/content`);
+		if (data.content) {
+			// Content is base64 encoded
+			try {
+				fileContent = atob(data.content);
+			} catch {
+				fileContent = '(Binary file)';
+			}
+		}
+		fileContentLoading = false;
+	}
+
+	// Build file tree structure
+	function buildFileTree(fileList) {
+		const tree = {};
+		for (const file of fileList) {
+			const parts = file.path.split('/');
+			let current = tree;
+			for (let i = 0; i < parts.length - 1; i++) {
+				const part = parts[i];
+				if (!current[part]) {
+					current[part] = { _isDir: true, _children: {} };
+				}
+				current = current[part]._children;
+			}
+			const fileName = parts[parts.length - 1];
+			current[fileName] = { _isDir: false, _file: file };
+		}
+		return tree;
+	}
+
+	function getLangIcon(lang) {
+		const icons = {
+			'ts': '🔷',
+			'tsx': '🔷',
+			'js': '🟨',
+			'jsx': '🟨',
+			'py': '🐍',
+			'go': '🔵',
+			'json': '📋',
+			'yaml': '📋',
+			'yml': '📋',
+			'sql': '🗃️',
+			'md': '📝',
+			'css': '🎨',
+			'html': '🌐'
+		};
+		return icons[lang] || '📄';
+	}
+
+	let fileTree = $derived(buildFileTree(files));
 </script>
 
 <div class="max-w-6xl mx-auto px-5 py-8">
@@ -290,6 +374,12 @@ kai push origin snap.latest</pre>
 						{/if}
 					</button>
 					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'files' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
+						onclick={() => activeTab = 'files'}
+					>
+						Files
+					</button>
+					<button
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'compare' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
 						onclick={() => activeTab = 'compare'}
 					>
@@ -371,6 +461,91 @@ kai push origin snap.latest</pre>
 						</table>
 					</div>
 				{/if}
+			{:else if activeTab === 'files'}
+				<div class="border border-kai-border rounded-md">
+					<!-- Snapshot selector -->
+					<div class="bg-kai-bg-secondary px-4 py-3 border-b border-kai-border">
+						<div class="flex items-center gap-4">
+							<label class="text-sm text-kai-text-muted">Snapshot:</label>
+							<select
+								bind:value={selectedSnapshot}
+								onchange={() => loadFiles(selectedSnapshot)}
+								class="input w-64 font-mono text-sm"
+							>
+								<option value="">Select a snapshot...</option>
+								{#each snapshots as ref}
+									<option value={ref.name}>{ref.name}</option>
+								{/each}
+							</select>
+							{#if filesLoading}
+								<span class="text-kai-text-muted text-sm">Loading...</span>
+							{:else if files.length > 0}
+								<span class="text-kai-text-muted text-sm">{files.length} files</span>
+							{/if}
+						</div>
+					</div>
+
+					{#if !selectedSnapshot}
+						<div class="text-center py-12 text-kai-text-muted">
+							<p>Select a snapshot to browse files</p>
+						</div>
+					{:else if filesLoading}
+						<div class="text-center py-12 text-kai-text-muted">
+							<p>Loading files...</p>
+						</div>
+					{:else if files.length === 0}
+						<div class="text-center py-12 text-kai-text-muted">
+							<p>No files in this snapshot</p>
+							<p class="text-xs mt-2">This snapshot may have been created before file tracking was enabled.</p>
+						</div>
+					{:else}
+						<div class="flex" style="min-height: 400px;">
+							<!-- File tree -->
+							<div class="w-72 border-r border-kai-border overflow-auto" style="max-height: 600px;">
+								<div class="p-2">
+									{#each files as file}
+										<button
+											class="w-full text-left px-2 py-1 rounded text-sm font-mono hover:bg-kai-bg-tertiary transition-colors flex items-center gap-2 {selectedFile?.digest === file.digest ? 'bg-kai-bg-tertiary text-kai-accent' : 'text-kai-text'}"
+											onclick={() => loadFileContent(file)}
+										>
+											<span class="text-xs">{getLangIcon(file.lang)}</span>
+											<span class="truncate">{file.path}</span>
+										</button>
+									{/each}
+								</div>
+							</div>
+
+							<!-- File content viewer -->
+							<div class="flex-1 overflow-auto" style="max-height: 600px;">
+								{#if !selectedFile}
+									<div class="flex items-center justify-center h-full text-kai-text-muted">
+										<p>Select a file to view</p>
+									</div>
+								{:else if fileContentLoading}
+									<div class="flex items-center justify-center h-full text-kai-text-muted">
+										<p>Loading...</p>
+									</div>
+								{:else}
+									<div class="p-4">
+										<div class="flex items-center justify-between mb-3 pb-2 border-b border-kai-border">
+											<div class="flex items-center gap-2">
+												<span>{getLangIcon(selectedFile.lang)}</span>
+												<span class="font-mono text-sm">{selectedFile.path}</span>
+											</div>
+											<button
+												class="btn text-xs"
+												onclick={() => navigator.clipboard.writeText(fileContent)}
+											>
+												Copy
+											</button>
+										</div>
+										<pre class="text-sm font-mono whitespace-pre-wrap break-all bg-kai-bg p-4 rounded border border-kai-border overflow-auto">{fileContent}</pre>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
+				</div>
 			{:else if activeTab === 'compare'}
 				<div class="border border-kai-border rounded-md p-4">
 					<h4 class="font-medium mb-4">Compare Snapshots</h4>

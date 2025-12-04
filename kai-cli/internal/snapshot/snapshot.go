@@ -41,19 +41,7 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 	}
 	defer tx.Rollback()
 
-	// Create snapshot node with source-agnostic payload
-	snapshotPayload := map[string]interface{}{
-		"sourceType": source.SourceType(),
-		"sourceRef":  source.Identifier(),
-		"fileCount":  len(files),
-		"createdAt":  util.NowMs(),
-	}
-	snapshotID, err := c.db.InsertNode(tx, graph.KindSnapshot, snapshotPayload)
-	if err != nil {
-		return nil, fmt.Errorf("inserting snapshot: %w", err)
-	}
-
-	// Create/ensure module nodes
+	// Create/ensure module nodes first
 	moduleIDs := make(map[string][]byte)
 	for _, mod := range c.matcher.GetAllModules() {
 		payload := c.matcher.GetModulePayload(mod.Name)
@@ -64,7 +52,14 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 		moduleIDs[mod.Name] = moduleID
 	}
 
-	// Process each file
+	// First pass: create all file nodes and collect their IDs
+	type fileInfo struct {
+		id      []byte
+		path    string
+		modules []string
+	}
+	fileInfos := make([]fileInfo, 0, len(files))
+
 	for _, file := range files {
 		// Write content to objects
 		digest, err := c.db.WriteObject(file.Content)
@@ -83,17 +78,44 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 			return nil, fmt.Errorf("inserting file: %w", err)
 		}
 
+		fileInfos = append(fileInfos, fileInfo{
+			id:      fileID,
+			path:    file.Path,
+			modules: c.matcher.MatchPath(file.Path),
+		})
+	}
+
+	// Build file digests list (hex-encoded) for the snapshot payload
+	fileDigests := make([]string, len(fileInfos))
+	for i, fi := range fileInfos {
+		fileDigests[i] = util.BytesToHex(fi.id)
+	}
+
+	// Create snapshot node with file digests embedded
+	snapshotPayload := map[string]interface{}{
+		"sourceType":  source.SourceType(),
+		"sourceRef":   source.Identifier(),
+		"fileCount":   len(files),
+		"fileDigests": fileDigests,
+		"createdAt":   util.NowMs(),
+	}
+	snapshotID, err := c.db.InsertNode(tx, graph.KindSnapshot, snapshotPayload)
+	if err != nil {
+		return nil, fmt.Errorf("inserting snapshot: %w", err)
+	}
+
+	// Second pass: create edges now that we have the snapshot ID
+	for _, fi := range fileInfos {
 		// Create edge: Snapshot HAS_FILE File
-		if err := c.db.InsertEdge(tx, snapshotID, graph.EdgeHasFile, fileID, nil); err != nil {
+		if err := c.db.InsertEdge(tx, snapshotID, graph.EdgeHasFile, fi.id, nil); err != nil {
 			return nil, fmt.Errorf("inserting HAS_FILE edge: %w", err)
 		}
 
 		// Map file to modules
-		modules := c.matcher.MatchPath(file.Path)
-		for _, modName := range modules {
+		for _, modName := range fi.modules {
 			if moduleID, ok := moduleIDs[modName]; ok {
 				// Create edge: Module CONTAINS File
-				if err := c.db.InsertEdge(tx, moduleID, graph.EdgeContains, fileID, snapshotID); err != nil {
+				if err := c.db.InsertEdge(tx, moduleID, graph.EdgeContains, fi.id, snapshotID); err != nil {
 					return nil, fmt.Errorf("inserting CONTAINS edge: %w", err)
 				}
 			}

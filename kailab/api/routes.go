@@ -3,6 +3,7 @@ package api
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -65,6 +66,10 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	// Log
 	mux.Handle("GET /{tenant}/{repo}/v1/log/head", withRepo(http.HandlerFunc(h.LogHead)))
 	mux.Handle("GET /{tenant}/{repo}/v1/log/entries", withRepo(http.HandlerFunc(h.LogEntries)))
+
+	// Files
+	mux.Handle("GET /{tenant}/{repo}/v1/snapshots/{ref}/files", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
+	mux.Handle("GET /{tenant}/{repo}/v1/files/{digest}/content", withRepo(http.HandlerFunc(h.GetFileContent)))
 
 	return mux
 }
@@ -532,6 +537,191 @@ func (h *Handler) LogEntries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, proto.LogEntriesResponse{Entries: logEntries})
+}
+
+// ----- Files -----
+
+func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	refName := r.PathValue("ref")
+	if refName == "" {
+		writeError(w, http.StatusBadRequest, "ref name required", nil)
+		return
+	}
+
+	// Get ref to find snapshot digest
+	ref, err := store.GetRef(rh.DB, refName)
+	if err != nil {
+		if err == store.ErrRefNotFound {
+			writeError(w, http.StatusNotFound, "ref not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get ref", err)
+		return
+	}
+
+	// Fetch snapshot object
+	snapshotContent, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+	if err != nil {
+		if err == store.ErrObjectNotFound {
+			writeError(w, http.StatusNotFound, "snapshot object not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get snapshot", err)
+		return
+	}
+
+	if kind != "Snapshot" {
+		writeError(w, http.StatusBadRequest, "ref does not point to a snapshot", nil)
+		return
+	}
+
+	// Parse snapshot payload (format: "Snapshot\n{json}")
+	snapshotJSON := snapshotContent
+	if idx := indexOf(snapshotContent, '\n'); idx >= 0 {
+		snapshotJSON = snapshotContent[idx+1:]
+	}
+
+	var snapshotPayload struct {
+		FileDigests []string `json:"fileDigests"`
+	}
+	if err := json.Unmarshal(snapshotJSON, &snapshotPayload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse snapshot", err)
+		return
+	}
+
+	// Fetch each file object
+	var files []*proto.FileEntry
+	for _, fileDigestHex := range snapshotPayload.FileDigests {
+		fileDigest, err := hex.DecodeString(fileDigestHex)
+		if err != nil {
+			continue
+		}
+
+		fileContent, fileKind, err := pack.ExtractObjectFromDB(rh.DB, fileDigest)
+		if err != nil {
+			continue
+		}
+		if fileKind != "File" {
+			continue
+		}
+
+		// Parse file payload
+		fileJSON := fileContent
+		if idx := indexOf(fileContent, '\n'); idx >= 0 {
+			fileJSON = fileContent[idx+1:]
+		}
+
+		var filePayload struct {
+			Path   string `json:"path"`
+			Digest string `json:"digest"`
+			Lang   string `json:"lang"`
+			Size   int64  `json:"size"`
+		}
+		if err := json.Unmarshal(fileJSON, &filePayload); err != nil {
+			continue
+		}
+
+		files = append(files, &proto.FileEntry{
+			Path:          filePayload.Path,
+			Digest:        fileDigestHex,
+			ContentDigest: filePayload.Digest,
+			Lang:          filePayload.Lang,
+			Size:          filePayload.Size,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, proto.FilesListResponse{
+		SnapshotDigest: hex.EncodeToString(ref.Target),
+		Files:          files,
+	})
+}
+
+func (h *Handler) GetFileContent(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	digestHex := r.PathValue("digest")
+	digest, err := hex.DecodeString(digestHex)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid digest", err)
+		return
+	}
+
+	// Fetch the file node first to get the content digest
+	fileContent, kind, err := pack.ExtractObjectFromDB(rh.DB, digest)
+	if err != nil {
+		if err == store.ErrObjectNotFound {
+			writeError(w, http.StatusNotFound, "file not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get file", err)
+		return
+	}
+
+	if kind != "File" {
+		writeError(w, http.StatusBadRequest, "digest does not point to a file", nil)
+		return
+	}
+
+	// Parse file payload
+	fileJSON := fileContent
+	if idx := indexOf(fileContent, '\n'); idx >= 0 {
+		fileJSON = fileContent[idx+1:]
+	}
+
+	var filePayload struct {
+		Path   string `json:"path"`
+		Digest string `json:"digest"` // content digest
+		Lang   string `json:"lang"`
+	}
+	if err := json.Unmarshal(fileJSON, &filePayload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse file", err)
+		return
+	}
+
+	// Fetch actual file content using the content digest
+	contentDigest, err := hex.DecodeString(filePayload.Digest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invalid content digest", err)
+		return
+	}
+
+	content, _, err := pack.ExtractObjectFromDB(rh.DB, contentDigest)
+	if err != nil {
+		if err == store.ErrObjectNotFound {
+			writeError(w, http.StatusNotFound, "file content not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get content", err)
+		return
+	}
+
+	// Return as base64 for binary safety
+	writeJSON(w, http.StatusOK, proto.FileContentResponse{
+		Path:    filePayload.Path,
+		Digest:  filePayload.Digest,
+		Content: base64.StdEncoding.EncodeToString(content),
+		Lang:    filePayload.Lang,
+	})
+}
+
+// indexOf returns the index of the first occurrence of b in data, or -1 if not found.
+func indexOf(data []byte, b byte) int {
+	for i, v := range data {
+		if v == b {
+			return i
+		}
+	}
+	return -1
 }
 
 // ----- Helpers -----

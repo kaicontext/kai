@@ -203,3 +203,28 @@ type DiffFileInfo struct {
 	OldDigest []byte `json:"oldDigest,omitempty"`
 	NewDigest []byte `json:"newDigest,omitempty"`
 }
+
+// ----- Files API -----
+
+// FileEntry represents a file in a snapshot.
+type FileEntry struct {
+	Path          string `json:"path"`
+	Digest        string `json:"digest"` // hex-encoded blake3 of file node
+	ContentDigest string `json:"contentDigest"` // hex-encoded blake3 of actual content
+	Lang          string `json:"lang,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+}
+
+// FilesListResponse contains files in a snapshot.
+type FilesListResponse struct {
+	SnapshotDigest string       `json:"snapshotDigest"` // hex-encoded
+	Files          []*FileEntry `json:"files"`
+}
+
+// FileContentResponse contains file content.
+type FileContentResponse struct {
+	Path    string `json:"path"`
+	Digest  string `json:"digest"`
+	Content string `json:"content"` // base64-encoded
+	Lang    string `json:"lang,omitempty"`
+}
