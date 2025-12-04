@@ -84,6 +84,33 @@ type RefUpdateResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// BatchRefUpdate represents a single ref update in a batch.
+type BatchRefUpdate struct {
+	Name  string `json:"name"`
+	Old   []byte `json:"old,omitempty"`
+	New   []byte `json:"new"`
+	Force bool   `json:"force,omitempty"`
+}
+
+// BatchRefUpdateRequest updates multiple refs atomically.
+type BatchRefUpdateRequest struct {
+	Updates []BatchRefUpdate `json:"updates"`
+}
+
+// BatchRefResult is the result for a single ref in a batch update.
+type BatchRefResult struct {
+	Name      string `json:"name"`
+	OK        bool   `json:"ok"`
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// BatchRefUpdateResponse is returned after updating multiple refs.
+type BatchRefUpdateResponse struct {
+	PushID  string           `json:"pushId"`
+	Results []BatchRefResult `json:"results"`
+}
+
 // RefEntry represents a single ref.
 type RefEntry struct {
 	Name      string `json:"name"`
@@ -224,6 +251,42 @@ func (c *Client) UpdateRef(name string, old, new []byte, force bool) (*RefUpdate
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
+	}
+
+	return &result, nil
+}
+
+// BatchUpdateRefs updates multiple refs atomically in a single request.
+func (c *Client) BatchUpdateRefs(updates []BatchRefUpdate) (*BatchRefUpdateResponse, error) {
+	req := BatchRefUpdateRequest{Updates: updates}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/refs/batch", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result BatchRefUpdateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
 	return &result, nil

@@ -45,6 +45,33 @@ type RefUpdateResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// BatchRefUpdate represents a single ref update in a batch.
+type BatchRefUpdate struct {
+	Name  string `json:"name"`
+	Old   []byte `json:"old,omitempty"`
+	New   []byte `json:"new"`
+	Force bool   `json:"force,omitempty"`
+}
+
+// BatchRefUpdateRequest is sent to update multiple refs atomically.
+type BatchRefUpdateRequest struct {
+	Updates []BatchRefUpdate `json:"updates"`
+}
+
+// BatchRefResult is the result for a single ref in a batch update.
+type BatchRefResult struct {
+	Name      string `json:"name"`
+	OK        bool   `json:"ok"`
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// BatchRefUpdateResponse is returned after updating multiple refs.
+type BatchRefUpdateResponse struct {
+	PushID  string           `json:"pushId"`
+	Results []BatchRefResult `json:"results"`
+}
+
 // RefEntry represents a single ref in list responses.
 type RefEntry struct {
 	Name      string `json:"name"`

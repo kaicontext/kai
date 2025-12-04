@@ -58,6 +58,7 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 
 	// Refs
 	mux.Handle("GET /{tenant}/{repo}/v1/refs", withRepo(http.HandlerFunc(h.ListRefs)))
+	mux.Handle("POST /{tenant}/{repo}/v1/refs/batch", withRepo(http.HandlerFunc(h.BatchUpdateRefs)))
 	mux.Handle("PUT /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.UpdateRef)))
 	mux.Handle("GET /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.GetRef)))
 
@@ -389,6 +390,89 @@ func (h *Handler) UpdateRef(w http.ResponseWriter, r *http.Request) {
 		OK:        true,
 		UpdatedAt: ref.UpdatedAt,
 		PushID:    pushID,
+	})
+}
+
+func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	var req proto.BatchRefUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if len(req.Updates) == 0 {
+		writeError(w, http.StatusBadRequest, "no updates provided", nil)
+		return
+	}
+
+	actor := r.Header.Get("X-Kailab-Actor")
+	if actor == "" {
+		actor = "anonymous"
+	}
+	pushID := uuid.New().String()
+
+	// Single transaction for all ref updates
+	tx, err := store.BeginTx(rh.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction", err)
+		return
+	}
+	defer tx.Rollback()
+
+	results := make([]proto.BatchRefResult, len(req.Updates))
+
+	for i, upd := range req.Updates {
+		if len(upd.New) == 0 {
+			results[i] = proto.BatchRefResult{
+				Name:  upd.Name,
+				OK:    false,
+				Error: "new target required",
+			}
+			continue
+		}
+
+		var err error
+		if upd.Force {
+			err = store.ForceSetRef(rh.DB, tx, upd.Name, upd.New, actor, pushID)
+		} else {
+			err = store.SetRefFF(rh.DB, tx, upd.Name, upd.Old, upd.New, actor, pushID)
+		}
+
+		if err != nil {
+			errMsg := "failed to update ref"
+			if err == store.ErrRefMismatch {
+				errMsg = "ref mismatch (not fast-forward)"
+			}
+			results[i] = proto.BatchRefResult{
+				Name:  upd.Name,
+				OK:    false,
+				Error: errMsg,
+			}
+			continue
+		}
+
+		ref, _ := store.GetRef(rh.DB, upd.Name)
+		results[i] = proto.BatchRefResult{
+			Name:      upd.Name,
+			OK:        true,
+			UpdatedAt: ref.UpdatedAt,
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, proto.BatchRefUpdateResponse{
+		PushID:  pushID,
+		Results: results,
 	})
 }
 

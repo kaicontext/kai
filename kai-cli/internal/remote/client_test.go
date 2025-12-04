@@ -313,6 +313,63 @@ func TestClient_UpdateRef_Conflict(t *testing.T) {
 	}
 }
 
+func TestClient_BatchUpdateRefs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/test/repo/v1/refs/batch" {
+			t.Errorf("expected path '/test/repo/v1/refs/batch', got %s", r.URL.Path)
+		}
+		if r.Header.Get("X-Kailab-Actor") == "" {
+			t.Error("expected X-Kailab-Actor header")
+		}
+
+		var req BatchRefUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if len(req.Updates) != 2 {
+			t.Errorf("expected 2 updates, got %d", len(req.Updates))
+		}
+
+		resp := BatchRefUpdateResponse{
+			PushID: "batch123",
+			Results: []BatchRefResult{
+				{Name: "snap.latest", OK: true, UpdatedAt: 123},
+				{Name: "cs.latest", OK: true, UpdatedAt: 124},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	client.Actor = "testuser"
+
+	updates := []BatchRefUpdate{
+		{Name: "snap.latest", New: []byte{1, 2, 3}},
+		{Name: "cs.latest", New: []byte{4, 5, 6}},
+	}
+
+	result, err := client.BatchUpdateRefs(updates)
+	if err != nil {
+		t.Fatalf("BatchUpdateRefs failed: %v", err)
+	}
+
+	if result.PushID != "batch123" {
+		t.Errorf("expected PushID 'batch123', got %q", result.PushID)
+	}
+	if len(result.Results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(result.Results))
+	}
+	for _, res := range result.Results {
+		if !res.OK {
+			t.Errorf("expected ref %s to be OK", res.Name)
+		}
+	}
+}
+
 func TestClient_ParseError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

@@ -2611,10 +2611,21 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Pushing to %s (%s)...\n", remoteName, client.BaseURL)
 
-	// Negotiate
-	missing, err := client.Negotiate(allDigests)
-	if err != nil {
-		return fmt.Errorf("negotiating: %w", err)
+	// Skip negotiate for small pushes (< 100 objects) - just send everything
+	// Server will dedupe on ingest. This saves a round-trip.
+	const negotiateThreshold = 100
+	var missing [][]byte
+
+	if len(allDigests) >= negotiateThreshold {
+		// Negotiate for larger pushes
+		var err error
+		missing, err = client.Negotiate(allDigests)
+		if err != nil {
+			return fmt.Errorf("negotiating: %w", err)
+		}
+	} else {
+		// For small pushes, send all objects (server dedupes)
+		missing = allDigests
 	}
 
 	if len(missing) > 0 {
@@ -2657,7 +2668,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		fmt.Println("  All objects already on server.")
 	}
 
-	// Update refs
+	// Batch update refs (single round-trip instead of N)
+	var batchUpdates []remote.BatchRefUpdate
 	for _, r := range refsToSync {
 		// Get old value from remote
 		remoteRef, _ := client.GetRef(r.Name)
@@ -2665,17 +2677,26 @@ func runPush(cmd *cobra.Command, args []string) error {
 		if remoteRef != nil {
 			oldTarget = remoteRef.Target
 		}
+		batchUpdates = append(batchUpdates, remote.BatchRefUpdate{
+			Name:  r.Name,
+			Old:   oldTarget,
+			New:   r.TargetID,
+			Force: pushForce,
+		})
+	}
 
-		result, err := client.UpdateRef(r.Name, oldTarget, r.TargetID, pushForce)
+	if len(batchUpdates) > 0 {
+		result, err := client.BatchUpdateRefs(batchUpdates)
 		if err != nil {
-			fmt.Printf("  Failed to update ref %s: %v\n", r.Name, err)
-			continue
+			return fmt.Errorf("updating refs: %w", err)
 		}
 
-		if result.OK {
-			fmt.Printf("  %s -> %s (push %s)\n", r.Name, hex.EncodeToString(r.TargetID)[:12], result.PushID[:8])
-		} else {
-			fmt.Printf("  %s: %s\n", r.Name, result.Error)
+		for _, res := range result.Results {
+			if res.OK {
+				fmt.Printf("  %s -> updated (push %s)\n", res.Name, result.PushID[:8])
+			} else {
+				fmt.Printf("  %s: %s\n", res.Name, res.Error)
+			}
 		}
 	}
 
