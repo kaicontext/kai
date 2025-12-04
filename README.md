@@ -24,6 +24,7 @@ Unlike traditional diff tools that show line-by-line text changes, Kai understan
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Kailab Server](#kailab-server)
+- [Kailab Control Plane](#kailab-control-plane)
 - [Roadmap](#roadmap)
 
 ---
@@ -396,6 +397,7 @@ cd testdata/repo
 - Initializes SQLite database with schema
 - Creates `objects/` directory for content storage
 - Copies default rule files to `rules/`
+- Creates `AGENTS.md` guide for AI assistants
 
 **Output:**
 ```
@@ -405,6 +407,7 @@ Initialized Kai in .kai/
 **Directory structure created:**
 ```
 .kai/
+├── AGENTS.md          # AI agent guide
 ├── db.sqlite          # SQLite database
 ├── objects/           # Content-addressed file storage
 └── rules/
@@ -561,6 +564,7 @@ kai init
 - `.kai/objects/` - Content-addressed storage directory
 - `.kai/rules/modules.yaml` - Module definitions
 - `.kai/rules/changetypes.yaml` - Change type rules
+- `.kai/AGENTS.md` - AI agent guide for understanding Kai commands
 
 **Notes:**
 - Run this once per project
@@ -1524,7 +1528,7 @@ kai/
 │   ├── intent/                  # Intent generation
 │   └── go.mod
 │
-├── kailab/                      # Remote server
+├── kailab/                      # Data plane server
 │   ├── cmd/kailabd/
 │   │   └── main.go              # Server entry point
 │   ├── api/                     # HTTP handlers and middleware
@@ -1534,6 +1538,23 @@ kai/
 │   ├── proto/                   # Wire protocol DTOs
 │   ├── background/              # Background enrichment workers
 │   ├── config/                  # Environment configuration
+│   └── go.mod
+│
+├── kailab-control/              # Control plane server
+│   ├── cmd/kailab-control/
+│   │   └── main.go              # Server entry point
+│   ├── internal/
+│   │   ├── api/                 # HTTP handlers, middleware, routes
+│   │   ├── auth/                # JWT, magic links, PATs
+│   │   ├── cfg/                 # Environment configuration
+│   │   ├── db/                  # SQLite database layer
+│   │   ├── model/               # Data models
+│   │   └── routing/             # Shard picker
+│   ├── frontend/                # Svelte + Tailwind web console
+│   │   ├── src/
+│   │   │   ├── lib/             # Stores, API client
+│   │   │   └── routes/          # Page components
+│   │   └── package.json
 │   └── go.mod
 │
 └── README.md
@@ -1787,6 +1808,61 @@ snap.latest  abc123...  user@example.com  2024-12-02T15:30:00Z
 snap.main    def456...  user@example.com  2024-12-02T14:00:00Z
 ```
 
+---
+
+#### `kai auth login`
+
+Authenticate with a Kailab control plane server.
+
+```bash
+kai auth login [server-url]
+```
+
+**Arguments:**
+- `[server-url]` - Server URL (optional, uses origin remote's URL if not provided)
+
+**Examples:**
+```bash
+# Login to a specific server
+kai auth login http://localhost:8080
+
+# Login using the origin remote's URL
+kai auth login
+```
+
+**What happens:**
+1. Prompts for your email address
+2. Sends a magic link to your email (in dev mode, token is returned directly)
+3. You enter the token from your email
+4. Tokens are exchanged and stored in `~/.kai/credentials.json`
+
+---
+
+#### `kai auth logout`
+
+Clear stored credentials.
+
+```bash
+kai auth logout
+```
+
+---
+
+#### `kai auth status`
+
+Show current authentication status.
+
+```bash
+kai auth status
+```
+
+**Output:**
+```
+Logged in as: user@example.com
+Server:       http://localhost:8080
+Status:       Authenticated
+```
+
 ### Server API
 
 The Kailab server exposes these HTTP endpoints. All repo-scoped endpoints use the `/{tenant}/{repo}` prefix:
@@ -1842,6 +1918,137 @@ This provides:
 - Audit trail of all ref changes
 - Tamper detection via hash chain
 - Attribution to actors (users/systems)
+
+---
+
+## Kailab Control Plane
+
+Kailab Control is a GitLab-like control plane service that provides user authentication, organization management, and repository metadata. It acts as a gateway to one or more Kailab data plane shards.
+
+### Features
+
+- **Magic Link Authentication** - Passwordless login via email
+- **JWT Access Tokens** - Short-lived tokens with refresh capability
+- **Personal Access Tokens (PATs)** - Long-lived tokens for CLI/API access
+- **Organizations** - Namespaces for grouping repositories
+- **Role-Based Access Control** - Owner, Admin, Maintainer, Developer, Reporter, Guest
+- **Reverse Proxy** - Routes authenticated requests to kailabd shards
+- **Web Console** - Svelte + Tailwind frontend for management
+
+### Running the Control Plane
+
+```bash
+cd kailab-control
+
+# Build
+make build
+
+# Run in development mode (includes debug logging, dev tokens)
+make dev
+
+# Run in production
+./kailab-control
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KLC_LISTEN` | `:8080` | HTTP listen address |
+| `KLC_DB_URL` | `kailab-control.db` | SQLite database path |
+| `KLC_JWT_KEY` | (required) | JWT signing key |
+| `KLC_SHARDS` | `default=http://localhost:7447` | Comma-separated shard URLs |
+| `KLC_DEBUG` | `false` | Enable debug mode |
+
+### API Endpoints
+
+**Authentication:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/auth/magic-link` | Request magic link email |
+| `POST` | `/api/v1/auth/token` | Exchange magic token for access/refresh tokens |
+| `POST` | `/api/v1/auth/refresh` | Refresh access token |
+| `POST` | `/api/v1/auth/logout` | Logout (delete sessions) |
+| `GET` | `/api/v1/me` | Get current user info |
+
+**Organizations:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/orgs` | Create organization |
+| `GET` | `/api/v1/orgs` | List user's organizations |
+| `GET` | `/api/v1/orgs/{org}` | Get organization details |
+| `GET` | `/api/v1/orgs/{org}/members` | List members |
+| `POST` | `/api/v1/orgs/{org}/members` | Add member |
+| `DELETE` | `/api/v1/orgs/{org}/members/{id}` | Remove member |
+
+**Repositories:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/orgs/{org}/repos` | Create repository |
+| `GET` | `/api/v1/orgs/{org}/repos` | List repositories |
+| `GET` | `/api/v1/orgs/{org}/repos/{repo}` | Get repository |
+| `DELETE` | `/api/v1/orgs/{org}/repos/{repo}` | Delete repository |
+
+**API Tokens:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/tokens` | Create PAT |
+| `GET` | `/api/v1/tokens` | List PATs |
+| `DELETE` | `/api/v1/tokens/{id}` | Delete PAT |
+
+**Data Plane Proxy:**
+
+| Pattern | Description |
+|---------|-------------|
+| `/{org}/{repo}/v1/*` | Proxied to kailabd shard |
+
+### Typical Workflow
+
+```bash
+# 1. Start the control plane
+cd kailab-control && make dev
+
+# 2. Start a kailabd shard
+cd kailab && ./kailabd --data ./data
+
+# 3. Configure CLI remote
+kai remote set origin http://localhost:8080 --tenant myorg --repo myrepo
+
+# 4. Login
+kai auth login http://localhost:8080
+
+# 5. Push/fetch as usual (now authenticated)
+kai push origin snap.latest
+kai fetch origin snap.main
+```
+
+### Web Console
+
+The control plane includes a web console built with Svelte and Tailwind CSS.
+
+**Development:**
+```bash
+cd kailab-control
+
+# Run frontend dev server (hot reload)
+make web-dev
+
+# In another terminal, run the Go backend
+make dev
+```
+
+**Production build:**
+```bash
+# Build frontend (outputs to internal/api/web/)
+make web
+
+# Build Go binary (embeds frontend)
+make build
+```
 
 ---
 

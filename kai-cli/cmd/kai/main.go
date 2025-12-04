@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -382,6 +383,24 @@ Examples:
 	RunE: runFetch,
 }
 
+var cloneCmd = &cobra.Command{
+	Use:   "clone <url> [directory]",
+	Short: "Clone a repository from a remote server",
+	Long: `Clone a Kai repository from a remote Kailab server.
+
+Creates a new directory, initializes Kai, sets up the remote, and fetches all refs.
+
+The URL format is: http://server/tenant/repo
+Or specify tenant and repo separately with flags.
+
+Examples:
+  kai clone http://localhost:8080/myorg/myrepo
+  kai clone http://localhost:8080/myorg/myrepo myproject
+  kai clone http://localhost:8080 --tenant myorg --repo myrepo`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: runClone,
+}
+
 var remoteLogCmd = &cobra.Command{
 	Use:   "remote-log [remote]",
 	Short: "Show remote ref history log",
@@ -392,6 +411,43 @@ Examples:
   kai remote-log origin -n 20    # Show 20 entries
   kai remote-log --ref snap.main # Filter by ref`,
 	RunE: runRemoteLog,
+}
+
+// Auth commands
+var authCmd = &cobra.Command{
+	Use:   "auth",
+	Short: "Manage authentication",
+	Long: `Manage authentication with Kailab servers.
+
+Examples:
+  kai auth login                  # Interactive login
+  kai auth logout                 # Clear credentials
+  kai auth status                 # Show auth status`,
+}
+
+var authLoginCmd = &cobra.Command{
+	Use:   "login [server-url]",
+	Short: "Login to a Kailab server",
+	Long: `Authenticate with a Kailab control plane server.
+
+If no server URL is provided, uses the origin remote's URL.
+
+Examples:
+  kai auth login                              # Login using origin remote
+  kai auth login http://localhost:8080        # Login to specific server`,
+	RunE: runAuthLogin,
+}
+
+var authLogoutCmd = &cobra.Command{
+	Use:   "logout",
+	Short: "Logout and clear credentials",
+	RunE:  runAuthLogout,
+}
+
+var authStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show current authentication status",
+	RunE:  runAuthStatus,
 }
 
 var (
@@ -440,6 +496,10 @@ var (
 	// Remote set flags
 	remoteTenant  string
 	remoteRepo    string
+
+	// Clone flags
+	cloneTenant string
+	cloneRepo   string
 )
 
 func init() {
@@ -513,6 +573,10 @@ func init() {
 	remoteSetCmd.Flags().StringVar(&remoteTenant, "tenant", "default", "Tenant/org name for the remote")
 	remoteSetCmd.Flags().StringVar(&remoteRepo, "repo", "main", "Repository name for the remote")
 
+	// Clone flags
+	cloneCmd.Flags().StringVar(&cloneTenant, "tenant", "", "Tenant/org name (extracted from URL if not specified)")
+	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
+
 	// Add remote subcommands
 	remoteCmd.AddCommand(remoteSetCmd)
 	remoteCmd.AddCommand(remoteGetCmd)
@@ -569,7 +633,14 @@ func init() {
 	rootCmd.AddCommand(remoteCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
+	rootCmd.AddCommand(cloneCmd)
 	rootCmd.AddCommand(remoteLogCmd)
+
+	// Add auth subcommands
+	authCmd.AddCommand(authLoginCmd)
+	authCmd.AddCommand(authLogoutCmd)
+	authCmd.AddCommand(authStatusCmd)
+	rootCmd.AddCommand(authCmd)
 }
 
 func main() {
@@ -621,6 +692,173 @@ modules: []
 `
 		if err := os.WriteFile(modulesFile, []byte(modulesContent), 0644); err != nil {
 			return fmt.Errorf("writing %s: %w", modulesFile, err)
+		}
+	}
+
+	// Write AI agent guide in .kai directory
+	agentGuideFile := filepath.Join(kaiDir, "AGENTS.md")
+	if _, err := os.Stat(agentGuideFile); os.IsNotExist(err) {
+		agentGuide := `# Kai - AI Agent Guide
+
+This project uses **Kai**, a semantic version control system. Unlike Git which tracks
+line-by-line text changes, Kai understands code at a semantic level—identifying
+functions, classes, variables, and how they relate to your project's architecture.
+
+## What is Kai?
+
+Kai is NOT a replacement for Git. It works alongside Git (or standalone) to provide:
+- **Semantic snapshots** - Captures what your code means, not just what it looks like
+- **Change classification** - Automatically detects if you added a function, changed a condition, etc.
+- **Intent generation** - Creates human-readable summaries like "Update Auth login timeout"
+
+Think of it as: Git tracks "line 42 changed from X to Y", Kai tracks "the login function's timeout was reduced from 1 hour to 30 minutes".
+
+## Getting Started from Scratch
+
+If this is a new project without Kai, follow these steps:
+
+### Step 1: Initialize Kai
+` + "```" + `bash
+cd /path/to/your/project
+kai init
+` + "```" + `
+This creates a ` + "`" + `.kai/` + "`" + ` directory with the database and object storage.
+
+### Step 2: Create Your First Snapshot
+` + "```" + `bash
+# Option A: From a Git branch/tag/commit
+kai snapshot main --repo .
+
+# Option B: From a directory (no Git required)
+kai snapshot --dir .
+` + "```" + `
+This captures the current state of your codebase. Output shows a snapshot ID like ` + "`" + `abc123...` + "`" + `
+
+### Step 3: Analyze Symbols
+` + "```" + `bash
+kai analyze symbols @snap:last
+` + "```" + `
+This parses your code and extracts functions, classes, and variables.
+
+### Step 4: Make Changes and Snapshot Again
+After modifying code:
+` + "```" + `bash
+kai snapshot --dir .
+kai analyze symbols @snap:last
+` + "```" + `
+
+### Step 5: Create a ChangeSet
+` + "```" + `bash
+kai changeset create @snap:prev @snap:last
+` + "```" + `
+This compares the two snapshots and classifies what changed.
+
+### Step 6: Generate Intent
+` + "```" + `bash
+kai intent render @cs:last
+` + "```" + `
+Output: ` + "`" + `Intent: Update Auth login` + "`" + ` (auto-generated summary)
+
+### Step 7: Export as JSON (Optional)
+` + "```" + `bash
+kai dump @cs:last --json
+` + "```" + `
+Get full structured data about the changeset.
+
+## The Flow (Summary)
+
+` + "```" + `
+[Code Changes] → snapshot → analyze → changeset → intent
+     ↓              ↓          ↓          ↓          ↓
+  Your edits    Capture    Extract    Compare    Summarize
+                 state     symbols    changes    in English
+` + "```" + `
+
+## Quick Reference
+
+### Check Status
+` + "```" + `bash
+kai status                    # Show pending changes since last snapshot
+` + "```" + `
+
+### References (avoid typing long hashes)
+- ` + "`" + `@snap:last` + "`" + ` - Most recent snapshot
+- ` + "`" + `@snap:prev` + "`" + ` - Previous snapshot
+- ` + "`" + `@cs:last` + "`" + ` - Most recent changeset
+- ` + "`" + `snap.main` + "`" + `, ` + "`" + `cs.feature` + "`" + ` - Named refs (create with ` + "`" + `kai ref set snap.main @snap:last` + "`" + `)
+
+### Remote Operations (sync with server)
+` + "```" + `bash
+kai clone http://server/org/repo           # Clone a repository (creates directory)
+kai clone http://server/org/repo mydir     # Clone into specific directory
+kai remote set origin https://kailab.example.com --tenant myorg --repo myproject
+kai auth login                # Authenticate
+kai push origin snap.latest   # Upload to server
+kai fetch origin              # Download from server
+` + "```" + `
+
+## Key Concepts
+
+| Concept | What it is | Analogy |
+|---------|------------|---------|
+| **Snapshot** | Semantic capture of codebase | Like a Git commit, but understands code structure |
+| **ChangeSet** | Diff between two snapshots | Like ` + "`" + `git diff` + "`" + `, but classifies change types |
+| **Intent** | Human summary of changes | Like a commit message, but auto-generated |
+| **Module** | Logical file grouping | Like folders, but by feature (Auth, Billing, etc.) |
+
+## Change Types Kai Detects
+
+| Type | What it means | Example |
+|------|---------------|---------|
+| ` + "`" + `FUNCTION_ADDED` + "`" + ` | New function created | Added ` + "`" + `validateToken()` + "`" + ` |
+| ` + "`" + `FUNCTION_REMOVED` + "`" + ` | Function deleted | Removed ` + "`" + `legacyAuth()` + "`" + ` |
+| ` + "`" + `CONDITION_CHANGED` + "`" + ` | If/comparison changed | ` + "`" + `if (x > 100)` + "`" + ` → ` + "`" + `if (x > 50)` + "`" + ` |
+| ` + "`" + `CONSTANT_UPDATED` + "`" + ` | Literal value changed | ` + "`" + `TIMEOUT = 3600` + "`" + ` → ` + "`" + `1800` + "`" + ` |
+| ` + "`" + `API_SURFACE_CHANGED` + "`" + ` | Function signature changed | Added parameter to function |
+| ` + "`" + `FILE_ADDED` + "`" + ` | New file created | Added ` + "`" + `auth/mfa.ts` + "`" + ` |
+| ` + "`" + `FILE_DELETED` + "`" + ` | File removed | Deleted ` + "`" + `deprecated/old.ts` + "`" + ` |
+
+## Common Tasks
+
+### "I want to see what changed in my code"
+` + "```" + `bash
+kai snapshot --dir .
+kai analyze symbols @snap:last
+kai changeset create @snap:prev @snap:last
+kai dump @cs:last --json | jq '.nodes[] | select(.kind == "ChangeType")'
+` + "```" + `
+
+### "I want to compare two Git branches"
+` + "```" + `bash
+kai snapshot main --repo .
+kai snapshot feature-branch --repo .
+kai analyze symbols @snap:prev
+kai analyze symbols @snap:last
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+` + "```" + `
+
+### "I want to save a named reference"
+` + "```" + `bash
+kai ref set snap.main @snap:last      # Name the current snapshot
+kai ref set snap.v1.0 abc123          # Name by ID
+kai ref list                          # See all refs
+` + "```" + `
+
+## Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| "Kai not initialized" | Run ` + "`" + `kai init` + "`" + ` first |
+| "No snapshots found" | Create one with ` + "`" + `kai snapshot --dir .` + "`" + ` |
+| "ambiguous prefix" | Use more characters of the ID, or use ` + "`" + `@snap:last` + "`" + ` |
+
+## More Information
+
+Run ` + "`" + `kai --help` + "`" + ` or ` + "`" + `kai <command> --help` + "`" + ` for detailed usage.
+`
+		if err := os.WriteFile(agentGuideFile, []byte(agentGuide), 0644); err != nil {
+			return fmt.Errorf("writing AGENTS.md: %w", err)
 		}
 	}
 
@@ -2504,6 +2742,188 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runClone(cmd *cobra.Command, args []string) error {
+	rawURL := args[0]
+
+	// Parse the URL to extract tenant and repo if not provided via flags
+	tenant := cloneTenant
+	repo := cloneRepo
+
+	// Parse URL: http://server/tenant/repo
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Extract tenant/repo from path if not specified via flags
+	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	if len(pathParts) >= 2 && tenant == "" && repo == "" {
+		tenant = pathParts[0]
+		repo = pathParts[1]
+		// Rebuild base URL without tenant/repo path
+		parsedURL.Path = ""
+		rawURL = parsedURL.String()
+	}
+
+	// Validate we have tenant and repo
+	if tenant == "" {
+		return fmt.Errorf("tenant not specified (use --tenant or include in URL path)")
+	}
+	if repo == "" {
+		return fmt.Errorf("repo not specified (use --repo or include in URL path)")
+	}
+
+	// Determine directory name
+	dirName := repo
+	if len(args) > 1 {
+		dirName = args[1]
+	}
+
+	// Check if directory already exists
+	if _, err := os.Stat(dirName); err == nil {
+		return fmt.Errorf("directory '%s' already exists", dirName)
+	}
+
+	fmt.Printf("Cloning into '%s'...\n", dirName)
+
+	// Create the directory
+	if err := os.MkdirAll(dirName, 0755); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
+
+	// Change to the new directory
+	origDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting current directory: %w", err)
+	}
+	if err := os.Chdir(dirName); err != nil {
+		return fmt.Errorf("changing to directory: %w", err)
+	}
+	defer os.Chdir(origDir)
+
+	// Initialize Kai
+	fmt.Println("Initializing Kai...")
+	if err := runInit(cmd, nil); err != nil {
+		// Clean up on failure
+		os.Chdir(origDir)
+		os.RemoveAll(dirName)
+		return fmt.Errorf("initializing: %w", err)
+	}
+
+	// Set up the remote
+	fmt.Printf("Setting remote 'origin' to %s (tenant=%s, repo=%s)...\n", rawURL, tenant, repo)
+	entry := &remote.RemoteEntry{
+		URL:    rawURL,
+		Tenant: tenant,
+		Repo:   repo,
+	}
+	if err := remote.SetRemote("origin", entry); err != nil {
+		os.Chdir(origDir)
+		os.RemoveAll(dirName)
+		return fmt.Errorf("setting remote: %w", err)
+	}
+
+	// Open database for fetch
+	db, err := openDB()
+	if err != nil {
+		os.Chdir(origDir)
+		os.RemoveAll(dirName)
+		return err
+	}
+	defer db.Close()
+
+	// Create client for remote
+	client, err := remote.NewClientForRemote("origin")
+	if err != nil {
+		os.Chdir(origDir)
+		os.RemoveAll(dirName)
+		return fmt.Errorf("creating client: %w", err)
+	}
+
+	// Check server health
+	if err := client.Health(); err != nil {
+		os.Chdir(origDir)
+		os.RemoveAll(dirName)
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
+	}
+
+	fmt.Println("Fetching refs...")
+
+	// Fetch all refs from remote
+	remoteRefs, err := client.ListRefs("")
+	if err != nil {
+		fmt.Printf("Warning: could not list refs: %v\n", err)
+		fmt.Println("Clone complete (empty repository).")
+		return nil
+	}
+
+	if len(remoteRefs) == 0 {
+		fmt.Println("Clone complete (empty repository).")
+		return nil
+	}
+
+	fmt.Printf("  Found %d ref(s)\n", len(remoteRefs))
+
+	// Collect objects to fetch
+	var objectsToFetch [][]byte
+	for _, r := range remoteRefs {
+		exists, _ := db.HasNode(r.Target)
+		if !exists {
+			objectsToFetch = append(objectsToFetch, r.Target)
+		}
+	}
+
+	if len(objectsToFetch) > 0 {
+		fmt.Printf("  Fetching %d object(s)...\n", len(objectsToFetch))
+
+		for _, digest := range objectsToFetch {
+			content, kind, err := client.GetObject(digest)
+			if err != nil {
+				fmt.Printf("  Warning: failed to get object %s: %v\n", hex.EncodeToString(digest)[:12], err)
+				continue
+			}
+
+			if content != nil {
+				var payload map[string]interface{}
+				if err := json.Unmarshal(content, &payload); err != nil {
+					continue
+				}
+
+				tx, err := db.BeginTx()
+				if err != nil {
+					continue
+				}
+				_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
+				if err != nil {
+					tx.Rollback()
+					continue
+				}
+				tx.Commit()
+			}
+		}
+	}
+
+	// Update local refs
+	refMgr := ref.NewRefManager(db)
+	for _, r := range remoteRefs {
+		localName := fmt.Sprintf("remote/origin/%s", r.Name)
+		kind := ref.KindSnapshot
+		if strings.HasPrefix(r.Name, "cs.") {
+			kind = ref.KindChangeSet
+		} else if strings.HasPrefix(r.Name, "ws.") {
+			kind = ref.KindWorkspace
+		}
+
+		if err := refMgr.Set(localName, r.Target, kind); err != nil {
+			continue
+		}
+		fmt.Printf("  %s -> %s\n", localName, hex.EncodeToString(r.Target)[:12])
+	}
+
+	fmt.Printf("\nClone complete. Repository cloned into '%s'\n", dirName)
+	return nil
+}
+
 func runRemoteLog(cmd *cobra.Command, args []string) error {
 	// Determine remote name
 	remoteName := "origin"
@@ -2560,6 +2980,60 @@ func runRemoteLog(cmd *cobra.Command, args []string) error {
 		default:
 			fmt.Printf("%s  %-10s  %s\n", timestamp, e.Actor, e.Kind)
 		}
+	}
+
+	return nil
+}
+
+// Auth command implementations
+
+func runAuthLogin(cmd *cobra.Command, args []string) error {
+	var serverURL string
+
+	if len(args) > 0 {
+		serverURL = args[0]
+	} else {
+		// Try to get URL from origin remote
+		entry, err := remote.GetRemote("origin")
+		if err != nil {
+			return fmt.Errorf("no server URL provided and no 'origin' remote configured\n\nUsage: kai auth login <server-url>\nExample: kai auth login http://localhost:8080")
+		}
+		serverURL = entry.URL
+	}
+
+	return remote.Login(serverURL)
+}
+
+func runAuthLogout(cmd *cobra.Command, args []string) error {
+	if err := remote.Logout(); err != nil {
+		return fmt.Errorf("logout failed: %w", err)
+	}
+	fmt.Println("Logged out successfully.")
+	return nil
+}
+
+func runAuthStatus(cmd *cobra.Command, args []string) error {
+	email, serverURL, loggedIn := remote.GetAuthStatus()
+
+	if !loggedIn {
+		fmt.Println("Not logged in.")
+		fmt.Println("\nUse 'kai auth login' to authenticate.")
+		return nil
+	}
+
+	fmt.Printf("Logged in as: %s\n", email)
+	fmt.Printf("Server:       %s\n", serverURL)
+
+	// Try to validate the token
+	token, err := remote.GetValidAccessToken()
+	if err != nil {
+		fmt.Println("Status:       Token invalid or expired")
+		fmt.Println("\nUse 'kai auth login' to re-authenticate.")
+		return nil
+	}
+
+	if token != "" {
+		fmt.Println("Status:       Authenticated")
 	}
 
 	return nil

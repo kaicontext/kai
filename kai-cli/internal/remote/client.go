@@ -24,12 +24,16 @@ type Client struct {
 	Repo       string
 	HTTPClient *http.Client
 	Actor      string
+	AuthToken  string
 }
 
 // NewClient creates a new Kailab client.
 // baseURL should be the server base (e.g., http://localhost:7447)
 // tenant and repo specify the repository to operate on.
 func NewClient(baseURL, tenant, repo string) *Client {
+	// Try to load auth token
+	token, _ := GetValidAccessToken()
+
 	return &Client{
 		BaseURL: baseURL,
 		Tenant:  tenant,
@@ -37,7 +41,8 @@ func NewClient(baseURL, tenant, repo string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
-		Actor: os.Getenv("USER"),
+		Actor:     os.Getenv("USER"),
+		AuthToken: token,
 	}
 }
 
@@ -163,6 +168,9 @@ func (c *Client) PushPack(objects []PackObject) (*PackIngestResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -196,6 +204,9 @@ func (c *Client) UpdateRef(name string, old, new []byte, force bool) (*RefUpdate
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -353,11 +364,26 @@ func (c *Client) Health() error {
 // --- Helper methods ---
 
 func (c *Client) get(path string) (*http.Response, error) {
-	return c.HTTPClient.Get(c.BaseURL + path)
+	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	return c.HTTPClient.Do(req)
 }
 
 func (c *Client) post(path string, body []byte) (*http.Response, error) {
-	return c.HTTPClient.Post(c.BaseURL+path, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", c.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	return c.HTTPClient.Do(req)
 }
 
 func (c *Client) parseError(resp *http.Response) error {
@@ -473,6 +499,23 @@ func LoadConfig() (*Config, error) {
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		// Try to migrate from old format (remotes were strings)
+		var oldCfg struct {
+			Remotes map[string]string `json:"remotes"`
+		}
+		if err2 := json.Unmarshal(data, &oldCfg); err2 == nil && len(oldCfg.Remotes) > 0 {
+			cfg.Remotes = make(map[string]*RemoteEntry)
+			for name, url := range oldCfg.Remotes {
+				cfg.Remotes[name] = &RemoteEntry{
+					URL:    url,
+					Tenant: "default",
+					Repo:   "main",
+				}
+			}
+			// Save migrated config
+			SaveConfig(&cfg)
+			return &cfg, nil
+		}
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if cfg.Remotes == nil {
