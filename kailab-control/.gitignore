@@ -1,0 +1,6 @@
+
+# Binary and database files
+kailab-control
+*.db
+*.db-shm
+*.db-wal

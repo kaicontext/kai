@@ -197,9 +197,15 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 			case "json":
 				// Use JSON-specific detection
 				changes, err = classify.DetectJSONChanges(path, beforeContent, afterContent)
+			case "yaml":
+				// Use YAML-specific detection
+				changes, err = classify.DetectYAMLChanges(path, beforeContent, afterContent)
 			case "ts", "js":
-				// Use tree-sitter based detection
-				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
+				// Use tree-sitter based detection for JavaScript/TypeScript
+				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]), lang)
+			case "py":
+				// Use tree-sitter based detection for Python
+				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]), "py")
 			default:
 				// Non-parseable files get FILE_CONTENT_CHANGED
 				changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
