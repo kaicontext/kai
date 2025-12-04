@@ -11,6 +11,7 @@ Unlike traditional diff tools that show line-by-line text changes, Kai understan
 ## Table of Contents
 
 - [Key Concepts](#key-concepts)
+- [Kai vs Git](#kai-vs-git)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Human-Friendly References](#human-friendly-references)
@@ -103,6 +104,21 @@ A **workspace** is a lightweight, mutable branch-like overlay on top of immutabl
 - Integrate (merge) changes back into a target snapshot
 
 Workspaces have three states: `active` (can stage changes), `shelved` (frozen), and `closed` (permanent).
+
+---
+
+## Kai vs Git
+
+| Feature | Kai | Git |
+|---------|-----|-----|
+| **Push / fetch latency** | < 100 ms globally | Depends on repo size / RTT |
+| **Change understanding** | Semantic (functions, classes, intent) | Line-based diffs |
+| **Storage model** | Content-addressed SQLite + zstd segments | Packfiles with delta compression |
+| **Merge conflicts** | Intent-aware (planned) | Text-based 3-way merge |
+| **History queries** | "What changed this function?" | `git log -p --follow` |
+| **Repository size scaling** | O(1) push/fetch via negotiation | O(repo size) for clone |
+
+Kai is designed to complement Git, not replace it. Use Git for your source of truth and Kai for semantic analysis, faster remote sync, and intent-based workflows.
 
 ---
 
