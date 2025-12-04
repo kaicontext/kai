@@ -628,7 +628,6 @@ Created snapshot: <64-character-hex-id>
 - `.ts`, `.tsx` - TypeScript
 - `.js`, `.jsx` - JavaScript
 - `.py` - Python
-- `.go` - Go
 - `.json` - JSON
 - `.yaml`, `.yml` - YAML
 - `.sql` - SQL schemas
