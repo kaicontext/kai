@@ -54,9 +54,11 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 
 	// First pass: create all file nodes and collect their IDs
 	type fileInfo struct {
-		id      []byte
-		path    string
-		modules []string
+		id            []byte
+		path          string
+		lang          string
+		contentDigest string
+		modules       []string
 	}
 	fileInfos := make([]fileInfo, 0, len(files))
 
@@ -79,9 +81,11 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 		}
 
 		fileInfos = append(fileInfos, fileInfo{
-			id:      fileID,
-			path:    file.Path,
-			modules: c.matcher.MatchPath(file.Path),
+			id:            fileID,
+			path:          file.Path,
+			lang:          file.Lang,
+			contentDigest: digest,
+			modules:       c.matcher.MatchPath(file.Path),
 		})
 	}
 
@@ -91,12 +95,24 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 		fileDigests[i] = util.BytesToHex(fi.id)
 	}
 
+	// Build files array with metadata for fast listing (no extra DB lookups needed)
+	filesMetadata := make([]map[string]interface{}, len(fileInfos))
+	for i, fi := range fileInfos {
+		filesMetadata[i] = map[string]interface{}{
+			"path":          fi.path,
+			"lang":          fi.lang,
+			"digest":        util.BytesToHex(fi.id),
+			"contentDigest": fi.contentDigest,
+		}
+	}
+
 	// Create snapshot node with file digests embedded
 	snapshotPayload := map[string]interface{}{
 		"sourceType":  source.SourceType(),
 		"sourceRef":   source.Identifier(),
 		"fileCount":   len(files),
 		"fileDigests": fileDigests,
+		"files":       filesMetadata, // New: inline file metadata for fast listing
 		"createdAt":   util.NowMs(),
 	}
 	snapshotID, err := c.db.InsertNode(tx, graph.KindSnapshot, snapshotPayload)
@@ -129,8 +145,12 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 	return snapshotID, nil
 }
 
+// ProgressFunc is called during long operations to report progress.
+// current is the current item number (1-based), total is the total count, filename is the current file.
+type ProgressFunc func(current, total int, filename string)
+
 // AnalyzeSymbols extracts symbols from all files in a snapshot.
-func (c *Creator) AnalyzeSymbols(snapshotID []byte) error {
+func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error {
 	// Get all files in the snapshot
 	edges, err := c.db.GetEdges(snapshotID, graph.EdgeHasFile)
 	if err != nil {
@@ -145,12 +165,24 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte) error {
 	}
 	defer tx.Rollback()
 
-	for _, edge := range edges {
+	total := len(edges)
+	for i, edge := range edges {
 		fileNode, err := c.db.GetNode(edge.Dst)
 		if err != nil {
 			return fmt.Errorf("getting file node: %w", err)
 		}
 		if fileNode == nil {
+			continue
+		}
+
+		// Get filename for progress reporting
+		filename, _ := fileNode.Payload["path"].(string)
+		if progress != nil {
+			progress(i+1, total, filename)
+		}
+
+		// Skip binary and image files - they can't be parsed for symbols
+		if isBinaryOrImageFile(filename) {
 			continue
 		}
 
@@ -163,6 +195,12 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte) error {
 		content, err := c.db.ReadObject(digest)
 		if err != nil {
 			return fmt.Errorf("reading object: %w", err)
+		}
+
+		// Skip very large files (likely minified or generated)
+		// 500KB is a reasonable limit for symbol extraction
+		if len(content) > 500*1024 {
+			continue
 		}
 
 		// Parse the file
@@ -434,4 +472,34 @@ func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error
 	})
 
 	return deleted, err
+}
+
+// isBinaryOrImageFile returns true if the file extension indicates a binary or image file
+// that shouldn't be parsed for symbols.
+func isBinaryOrImageFile(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	// Images
+	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp", ".tiff", ".tif":
+		return true
+	// Fonts
+	case ".woff", ".woff2", ".ttf", ".otf", ".eot":
+		return true
+	// Media
+	case ".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm", ".ogg", ".flac":
+		return true
+	// Archives
+	case ".zip", ".tar", ".gz", ".rar", ".7z", ".bz2":
+		return true
+	// Documents
+	case ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx":
+		return true
+	// Binaries
+	case ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a":
+		return true
+	// Other non-parseable
+	case ".lock", ".map", ".min.js", ".min.css":
+		return true
+	}
+	return false
 }
