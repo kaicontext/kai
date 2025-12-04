@@ -625,10 +625,13 @@ Created snapshot: <64-character-hex-id>
 ```
 
 **Supported file types:**
-- `.ts` - TypeScript
-- `.tsx` - TypeScript JSX
-- `.js` - JavaScript
-- `.jsx` - JavaScript JSX
+- `.ts`, `.tsx` - TypeScript
+- `.js`, `.jsx` - JavaScript
+- `.py` - Python
+- `.go` - Go
+- `.json` - JSON
+- `.yaml`, `.yml` - YAML
+- `.sql` - SQL schemas
 
 ---
 
