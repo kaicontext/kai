@@ -990,6 +990,62 @@ kai ws close --ws <name>
 
 ---
 
+### `kai ws delete`
+
+Delete a workspace permanently (metadata and refs).
+
+```bash
+kai ws delete --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dry-run` - Show what would be deleted without actually deleting
+- `--keep-refs` - Preserve workspace refs (rare)
+
+**Examples:**
+```bash
+# Preview what would be deleted
+kai ws delete --ws feature/experiment --dry-run
+
+# Actually delete
+kai ws delete --ws feature/experiment
+
+# Delete but keep refs (rare)
+kai ws delete --ws old-branch --keep-refs
+```
+
+**Note:** Content (snapshots, changesets, files) is NOT deleted - that's the GC's job. Run `kai prune` after deleting workspaces to reclaim storage.
+
+---
+
+### `kai ws checkout`
+
+Checkout workspace head snapshot to filesystem.
+
+```bash
+kai ws checkout --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dir <path>` - Target directory to write files to (default: current directory)
+- `--clean` - Delete files not in snapshot
+
+**Examples:**
+```bash
+# Checkout to current directory
+kai ws checkout --ws feature/auth
+
+# Checkout to specific directory
+kai ws checkout --ws feature/auth --dir ./src
+
+# Checkout with clean (removes extra files)
+kai ws checkout --ws feature/auth --clean
+```
+
+---
+
 ### `kai integrate`
 
 Integrate workspace changes into a target snapshot.
@@ -1280,6 +1336,167 @@ kai completion fish > ~/.config/fish/completions/kai.fish
 # PowerShell
 kai completion powershell | Out-String | Invoke-Expression
 ```
+
+---
+
+### `kai prune`
+
+Garbage collect unreferenced content (snapshots, changesets, files).
+
+```bash
+kai prune [flags]
+```
+
+**Flags:**
+- `--dry-run` - Show what would be deleted without actually deleting
+- `--since <days>` - Only delete content older than N days (0 = no limit)
+- `--aggressive` - Also sweep orphaned Symbols and Modules
+
+**Examples:**
+```bash
+# Preview what would be deleted
+kai prune --dry-run
+
+# Actually delete unreferenced content
+kai prune
+
+# Only delete content older than 30 days
+kai prune --since 30
+
+# Aggressive cleanup (includes symbols and modules)
+kai prune --aggressive
+```
+
+**What happens:**
+1. Collects all roots (refs targets, workspace nodes)
+2. Marks all reachable nodes from roots (BFS traversal)
+3. Deletes any nodes not marked as reachable
+4. Deletes orphaned object files from `.kai/objects/`
+
+**Note:** Run this after `kai ws delete` to reclaim storage.
+
+---
+
+### `kai review`
+
+Code review commands centered on changesets.
+
+#### `kai review open`
+
+Open a new review for a changeset or workspace.
+
+```bash
+kai review open <target-id> --title <title> [flags]
+```
+
+**Arguments:**
+- `<target-id>` - ChangeSet or Workspace ID to review
+
+**Flags:**
+- `--title <title>` - Review title (required)
+- `--desc <text>` - Review description
+- `--reviewers <names>` - Reviewers (can be specified multiple times)
+
+**Example:**
+```bash
+kai review open cs.latest --title "Fix authentication timeout" --reviewers alice --reviewers bob
+```
+
+---
+
+#### `kai review list`
+
+List all reviews.
+
+```bash
+kai review list
+```
+
+**Output:**
+```
+ID            STATE     TITLE                        AUTHOR    TARGET
+a1b2c3d4...   open      Fix authentication timeout   alice     ChangeSet
+d4e5f6a7...   approved  Add billing module           bob       Workspace
+```
+
+---
+
+#### `kai review view`
+
+View details of a review.
+
+```bash
+kai review view <review-id> [flags]
+```
+
+**Flags:**
+- `--json` - Output as JSON
+
+---
+
+#### `kai review status`
+
+Change the status of a review.
+
+```bash
+kai review status <review-id> <new-state>
+```
+
+**States:** `draft`, `open`, `approved`, `changes_requested`, `merged`, `abandoned`
+
+---
+
+#### `kai review approve`
+
+Approve a review.
+
+```bash
+kai review approve <review-id>
+```
+
+---
+
+#### `kai review request-changes`
+
+Request changes on a review.
+
+```bash
+kai review request-changes <review-id>
+```
+
+---
+
+#### `kai review close`
+
+Close a review with a final state.
+
+```bash
+kai review close <review-id> --state <merged|abandoned>
+```
+
+---
+
+#### `kai review ready`
+
+Mark a draft review as ready for review.
+
+```bash
+kai review ready <review-id>
+```
+
+---
+
+#### `kai review export`
+
+Export a review as markdown or HTML.
+
+```bash
+kai review export <review-id> [flags]
+```
+
+**Flags:**
+- `--markdown` - Export as markdown
+- `--html` - Export as HTML
 
 ---
 
@@ -1942,11 +2159,15 @@ kai push origin snap:4a2556c0
 ```
 
 **What gets pushed for a workspace:**
-1. Workspace metadata (name, status, description)
+1. Workspace node (metadata: name, status, description)
 2. All changesets in the workspace stack (ordered)
 3. All snapshots those changesets reference (base/head)
 4. All file objects needed to reconstruct the snapshots
-5. Refs: `ws.<name>.base`, `ws.<name>.head`, `ws.<name>.stack`
+5. Refs created:
+   - `ws.<name>` → workspace node (enables `fetch --ws`)
+   - `ws.<name>.base` → base snapshot
+   - `ws.<name>.head` → head snapshot
+   - `ws.<name>.cs.<id>` → each changeset
 
 **Flags:**
 - `--dry-run` - Show what would be transferred without pushing
@@ -1973,16 +2194,21 @@ kai fetch [remote] [--ws <workspace>] [target...]
 
 **Arguments:**
 - `[remote]` - Remote name (default: `origin`)
-- `[--ws <workspace>]` - Workspace to fetch
 - `[target...]` - Explicit targets with prefix: `cs:<ref>` or `snap:<ref>`
+
+**Flags:**
+- `--ws <name>` - Fetch a specific workspace by name and recreate it locally
 
 **Examples:**
 ```bash
 # Fetch all remote refs (metadata only, lazy content)
 kai fetch origin
 
-# Fetch a specific workspace (downloads its changesets + snapshots)
+# Fetch a specific workspace (downloads and recreates locally)
 kai fetch origin --ws feature/auth
+
+# Then checkout the workspace to filesystem
+kai ws checkout --ws feature/auth --dir ./src
 
 # Fetch a specific changeset
 kai fetch origin cs:login_fix
@@ -1991,11 +2217,17 @@ kai fetch origin cs:login_fix
 kai fetch origin snap:main
 ```
 
-**What happens:**
+**What happens with `--ws`:**
+1. Fetches the workspace ref (`ws.<name>`)
+2. Downloads the workspace node and all related objects (snapshots, changesets)
+3. Uses BFS to recursively fetch dependencies (parent snapshots, changeset before/after snapshots)
+4. Recreates the workspace locally with proper edges (BASED_ON, HEAD_AT, HAS_CHANGESET)
+5. Sets both local (`ws.<name>`) and remote tracking (`remote/origin/ws.<name>`) refs
+
+**What happens without `--ws`:**
 1. Fetches ref metadata from remote
-2. For workspaces: downloads all changesets in the stack + required snapshots
-3. For changesets: downloads the changeset + its base/head snapshots
-4. For snapshots: downloads the snapshot + file objects
+2. For changesets: downloads the changeset + its base/head snapshots
+3. For snapshots: downloads the snapshot + file objects
 
 ---
 

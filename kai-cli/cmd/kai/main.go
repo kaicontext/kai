@@ -25,6 +25,7 @@ import (
 	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/remote"
+	"kai/internal/review"
 	"kai/internal/snapshot"
 	"kai/internal/status"
 	"kai/internal/util"
@@ -214,6 +215,20 @@ Examples:
   kai ws delete --ws feature/experiment            # Actually delete
   kai ws delete --ws old-branch --keep-refs        # Keep refs (rare)`,
 	RunE: runWsDelete,
+}
+
+var wsCheckoutCmd = &cobra.Command{
+	Use:   "checkout",
+	Short: "Checkout workspace head snapshot to filesystem",
+	Long: `Restore the filesystem to match the workspace's head snapshot.
+
+This writes files from the workspace's current state to a directory.
+
+Examples:
+  kai ws checkout --ws feature/auth                # Checkout to current directory
+  kai ws checkout --ws feature/auth --dir ./src   # Checkout to specific directory
+  kai ws checkout --ws feature/auth --clean       # Remove files not in snapshot`,
+	RunE: runWsCheckout,
 }
 
 var integrateCmd = &cobra.Command{
@@ -514,6 +529,104 @@ var authStatusCmd = &cobra.Command{
 	RunE:  runAuthStatus,
 }
 
+// Review commands
+var reviewCmd = &cobra.Command{
+	Use:   "review",
+	Short: "Manage code reviews for changesets",
+	Long: `Create and manage code reviews for changesets or workspaces.
+
+Reviews are anchored to semantic entities (changesets, symbols) not lines.
+
+Examples:
+  kai review open @cs:last --title "Add auth"    # Open a review
+  kai review list                                 # List all reviews
+  kai review view <id>                            # View a review
+  kai review approve <id>                         # Approve a review
+  kai review close <id> --state merged            # Close as merged`,
+}
+
+var reviewOpenCmd = &cobra.Command{
+	Use:   "open <changeset|workspace>",
+	Short: "Open a new review",
+	Long: `Open a new code review for a changeset or workspace.
+
+Examples:
+  kai review open @cs:last --title "Reduce timeout"
+  kai review open @ws:feature/auth:head --title "Auth feature" --reviewers alice --reviewers bob`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewOpen,
+}
+
+var reviewListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all reviews",
+	RunE:  runReviewList,
+}
+
+var reviewViewCmd = &cobra.Command{
+	Use:   "view <review-id>",
+	Short: "View a review",
+	Long: `View details of a review including its changeset, status, and comments.
+
+Examples:
+  kai review view abc123
+  kai review view abc123 --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewView,
+}
+
+var reviewStatusCmd = &cobra.Command{
+	Use:   "status <review-id>",
+	Short: "Show review status",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReviewStatus,
+}
+
+var reviewApproveCmd = &cobra.Command{
+	Use:   "approve <review-id>",
+	Short: "Approve a review",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReviewApprove,
+}
+
+var reviewRequestChangesCmd = &cobra.Command{
+	Use:   "request-changes <review-id>",
+	Short: "Request changes on a review",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReviewRequestChanges,
+}
+
+var reviewCloseCmd = &cobra.Command{
+	Use:   "close <review-id>",
+	Short: "Close a review",
+	Long: `Close a review with a final state.
+
+Examples:
+  kai review close abc123 --state merged
+  kai review close abc123 --state abandoned`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewClose,
+}
+
+var reviewReadyCmd = &cobra.Command{
+	Use:   "ready <review-id>",
+	Short: "Mark a draft review as ready for review",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReviewReady,
+}
+
+var reviewExportCmd = &cobra.Command{
+	Use:   "export <review-id>",
+	Short: "Export review as markdown or HTML",
+	Long: `Export a review summary for posting to GitHub/GitLab PRs.
+
+Examples:
+  kai review export abc123 --markdown > review.md
+  kai review export abc123 --html > review.html`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewExport,
+}
+
 var (
 	// Workspace flags
 	wsName           string
@@ -523,9 +636,20 @@ var (
 	wsTarget         string
 	wsDeleteKeepRefs bool
 	wsDeleteDryRun   bool
+	wsCheckoutClean  bool
 	pruneDryRun      bool
 	pruneSinceDays   int
 	pruneAggressive  bool
+
+	// Review flags
+	reviewTitle       string
+	reviewDesc        string
+	reviewReviewers   []string
+	reviewCloseState  string
+	reviewExportMD    bool
+	reviewExportHTML  bool
+	reviewJSON        bool
+
 	statusDir      string
 	statusAgainst  string
 	statusNameOnly bool
@@ -573,6 +697,9 @@ var (
 	// Clone flags
 	cloneTenant string
 	cloneRepo   string
+
+	// Fetch flags
+	fetchWorkspace string
 
 	// Merge flags
 	mergeLang   string
@@ -632,6 +759,11 @@ func init() {
 	wsDeleteCmd.Flags().BoolVar(&wsDeleteDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
 	wsDeleteCmd.MarkFlagRequired("ws")
 
+	wsCheckoutCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
+	wsCheckoutCmd.Flags().StringVar(&wsDir, "dir", ".", "Target directory to write files to")
+	wsCheckoutCmd.Flags().BoolVar(&wsCheckoutClean, "clean", false, "Delete files not in snapshot")
+	wsCheckoutCmd.MarkFlagRequired("ws")
+
 	integrateCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	integrateCmd.Flags().StringVar(&wsTarget, "into", "", "Target snapshot ID (required)")
 	integrateCmd.MarkFlagRequired("ws")
@@ -664,10 +796,27 @@ func init() {
 	cloneCmd.Flags().StringVar(&cloneTenant, "tenant", "", "Tenant/org name (extracted from URL if not specified)")
 	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
 
+	// Fetch flags
+	fetchCmd.Flags().StringVar(&fetchWorkspace, "ws", "", "Fetch a specific workspace by name and recreate it locally")
+
 	// Prune flags
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
 	pruneCmd.Flags().IntVar(&pruneSinceDays, "since", 0, "Only delete content older than N days (0 = no limit)")
 	pruneCmd.Flags().BoolVar(&pruneAggressive, "aggressive", false, "Also sweep orphaned Symbols and Modules")
+
+	// Review flags
+	reviewOpenCmd.Flags().StringVar(&reviewTitle, "title", "", "Review title (required)")
+	reviewOpenCmd.Flags().StringVar(&reviewDesc, "desc", "", "Review description")
+	reviewOpenCmd.Flags().StringArrayVar(&reviewReviewers, "reviewers", nil, "Reviewers (can be specified multiple times)")
+	reviewOpenCmd.MarkFlagRequired("title")
+
+	reviewViewCmd.Flags().BoolVar(&reviewJSON, "json", false, "Output as JSON")
+
+	reviewCloseCmd.Flags().StringVar(&reviewCloseState, "state", "", "Close state: merged or abandoned (required)")
+	reviewCloseCmd.MarkFlagRequired("state")
+
+	reviewExportCmd.Flags().BoolVar(&reviewExportMD, "markdown", false, "Export as markdown")
+	reviewExportCmd.Flags().BoolVar(&reviewExportHTML, "html", false, "Export as HTML")
 
 	// Merge flags
 	mergeCmd.Flags().StringVar(&mergeLang, "lang", "", "Language (js, ts, py) - auto-detected from extension if not specified")
@@ -705,6 +854,7 @@ func init() {
 	wsCmd.AddCommand(wsUnshelveCmd)
 	wsCmd.AddCommand(wsCloseCmd)
 	wsCmd.AddCommand(wsDeleteCmd)
+	wsCmd.AddCommand(wsCheckoutCmd)
 
 	analyzeCmd.AddCommand(analyzeSymbolsCmd)
 	changesetCmd.AddCommand(changesetCreateCmd)
@@ -741,6 +891,18 @@ func init() {
 	authCmd.AddCommand(authLogoutCmd)
 	authCmd.AddCommand(authStatusCmd)
 	rootCmd.AddCommand(authCmd)
+
+	// Add review subcommands
+	reviewCmd.AddCommand(reviewOpenCmd)
+	reviewCmd.AddCommand(reviewListCmd)
+	reviewCmd.AddCommand(reviewViewCmd)
+	reviewCmd.AddCommand(reviewStatusCmd)
+	reviewCmd.AddCommand(reviewApproveCmd)
+	reviewCmd.AddCommand(reviewRequestChangesCmd)
+	reviewCmd.AddCommand(reviewCloseCmd)
+	reviewCmd.AddCommand(reviewReadyCmd)
+	reviewCmd.AddCommand(reviewExportCmd)
+	rootCmd.AddCommand(reviewCmd)
 }
 
 func main() {
@@ -2280,6 +2442,56 @@ func runWsDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runWsCheckout(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Get the workspace
+	mgr := workspace.NewManager(db)
+	ws, err := mgr.Get(wsName)
+	if err != nil {
+		return fmt.Errorf("getting workspace: %w", err)
+	}
+	if ws == nil {
+		return fmt.Errorf("workspace %q not found", wsName)
+	}
+
+	// Resolve target directory to absolute path
+	targetDir, err := filepath.Abs(wsDir)
+	if err != nil {
+		return fmt.Errorf("resolving target directory: %w", err)
+	}
+
+	// Create target directory if it doesn't exist
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
+	}
+
+	// Checkout the head snapshot
+	creator := snapshot.NewCreator(db, nil)
+	result, err := creator.Checkout(ws.HeadSnapshot, targetDir, wsCheckoutClean)
+	if err != nil {
+		return fmt.Errorf("checkout failed: %w", err)
+	}
+
+	fmt.Printf("Checkout complete!\n")
+	fmt.Printf("  Workspace: %s\n", ws.Name)
+	fmt.Printf("  Snapshot:  %s\n", util.BytesToHex(ws.HeadSnapshot)[:12])
+	fmt.Printf("  Target:    %s\n", result.TargetDir)
+	fmt.Printf("  Written:   %d file(s)\n", result.FilesWritten)
+	if result.FilesDeleted > 0 {
+		fmt.Printf("  Deleted:   %d file(s)\n", result.FilesDeleted)
+	}
+	if result.FilesSkipped > 0 {
+		fmt.Printf("  Skipped:   %d file(s)\n", result.FilesSkipped)
+	}
+
+	return nil
+}
+
 func runIntegrate(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -3004,16 +3216,24 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if workspaceToPush != nil {
 		fmt.Printf("Pushing workspace '%s'...\n", workspaceToPush.Name)
 
-		// Add workspace refs
+		// Add workspace node ref (for fetch --ws to work)
+		wsNodeRef := &ref.Ref{
+			Name:       fmt.Sprintf("ws.%s", workspaceToPush.Name),
+			TargetID:   workspaceToPush.ID,
+			TargetKind: ref.KindWorkspace,
+		}
+		// Add workspace snapshot refs
 		wsBaseRef := &ref.Ref{
-			Name:     fmt.Sprintf("ws.%s.base", workspaceToPush.Name),
-			TargetID: workspaceToPush.BaseSnapshot,
+			Name:       fmt.Sprintf("ws.%s.base", workspaceToPush.Name),
+			TargetID:   workspaceToPush.BaseSnapshot,
+			TargetKind: ref.KindSnapshot,
 		}
 		wsHeadRef := &ref.Ref{
-			Name:     fmt.Sprintf("ws.%s.head", workspaceToPush.Name),
-			TargetID: workspaceToPush.HeadSnapshot,
+			Name:       fmt.Sprintf("ws.%s.head", workspaceToPush.Name),
+			TargetID:   workspaceToPush.HeadSnapshot,
+			TargetKind: ref.KindSnapshot,
 		}
-		refsToSync = append(refsToSync, wsBaseRef, wsHeadRef)
+		refsToSync = append(refsToSync, wsNodeRef, wsBaseRef, wsHeadRef)
 
 		// Add all changesets in the workspace
 		for _, csID := range workspaceToPush.OpenChangeSets {
@@ -3077,6 +3297,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 			graph.EdgeHas,
 			graph.EdgeAffects,
 			graph.EdgeContains,
+			graph.EdgeBasedOn,
+			graph.EdgeHeadAt,
+			graph.EdgeHasChangeSet,
 		} {
 			edges, err := db.GetEdges(r.TargetID, edgeType)
 			if err != nil {
@@ -3322,6 +3545,11 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Fetching from %s (%s)...\n", remoteName, client.BaseURL)
+
+	// Handle workspace fetch if --ws flag is set
+	if fetchWorkspace != "" {
+		return fetchWorkspaceFromRemote(db, client, remoteName, fetchWorkspace)
+	}
 
 	// Get refs from remote
 	var remoteRefs []*remote.RefEntry
@@ -3784,5 +4012,552 @@ func runAuthStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Status:       Authenticated")
 	}
 
+	return nil
+}
+
+// Review command implementations
+
+func runReviewOpen(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Resolve the target (changeset or workspace)
+	resolver := ref.NewResolver(db)
+	result, err := resolver.Resolve(args[0], nil)
+	if err != nil {
+		return fmt.Errorf("resolving target: %w", err)
+	}
+
+	// Validate target kind
+	if result.Kind != ref.KindChangeSet && result.Kind != ref.KindWorkspace {
+		return fmt.Errorf("target must be a changeset or workspace, got %s", result.Kind)
+	}
+
+	// Get author (use system user for now)
+	author := os.Getenv("USER")
+	if author == "" {
+		author = "unknown"
+	}
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.Open(result.ID, reviewTitle, reviewDesc, author, reviewReviewers)
+	if err != nil {
+		return fmt.Errorf("opening review: %w", err)
+	}
+
+	fmt.Printf("Review opened: %s\n", review.IDToHex(rev.ID)[:12])
+	fmt.Printf("Title:         %s\n", rev.Title)
+	fmt.Printf("State:         %s\n", rev.State)
+	fmt.Printf("Target:        %s (%s)\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
+	if len(rev.Reviewers) > 0 {
+		fmt.Printf("Reviewers:     %s\n", strings.Join(rev.Reviewers, ", "))
+	}
+
+	return nil
+}
+
+func runReviewList(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	reviews, err := mgr.List()
+	if err != nil {
+		return fmt.Errorf("listing reviews: %w", err)
+	}
+
+	if len(reviews) == 0 {
+		fmt.Println("No reviews found.")
+		return nil
+	}
+
+	fmt.Printf("%-12s  %-10s  %-30s  %s\n", "ID", "STATE", "TITLE", "TARGET")
+	fmt.Println(strings.Repeat("-", 80))
+
+	for _, r := range reviews {
+		title := r.Title
+		if len(title) > 30 {
+			title = title[:27] + "..."
+		}
+		fmt.Printf("%-12s  %-10s  %-30s  %s\n",
+			review.IDToHex(r.ID)[:12],
+			r.State,
+			title,
+			util.BytesToHex(r.TargetID)[:12])
+	}
+
+	return nil
+}
+
+func runReviewView(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	if reviewJSON {
+		data := map[string]interface{}{
+			"id":          review.IDToHex(rev.ID),
+			"title":       rev.Title,
+			"description": rev.Description,
+			"state":       rev.State,
+			"author":      rev.Author,
+			"reviewers":   rev.Reviewers,
+			"targetId":    util.BytesToHex(rev.TargetID),
+			"targetKind":  rev.TargetKind,
+			"createdAt":   rev.CreatedAt,
+			"updatedAt":   rev.UpdatedAt,
+		}
+		output, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Println(string(output))
+		return nil
+	}
+
+	fmt.Printf("Review: %s\n", review.IDToHex(rev.ID)[:12])
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("Title:       %s\n", rev.Title)
+	if rev.Description != "" {
+		fmt.Printf("Description: %s\n", rev.Description)
+	}
+	fmt.Printf("State:       %s\n", rev.State)
+	fmt.Printf("Author:      %s\n", rev.Author)
+	if len(rev.Reviewers) > 0 {
+		fmt.Printf("Reviewers:   %s\n", strings.Join(rev.Reviewers, ", "))
+	}
+	fmt.Printf("Target:      %s (%s)\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
+	fmt.Printf("Created:     %s\n", time.UnixMilli(rev.CreatedAt).Format(time.RFC3339))
+	fmt.Printf("Updated:     %s\n", time.UnixMilli(rev.UpdatedAt).Format(time.RFC3339))
+
+	// If target is a changeset, show the intent
+	if rev.TargetKind == graph.KindChangeSet {
+		target, _ := db.GetNode(rev.TargetID)
+		if target != nil {
+			if intentStr, ok := target.Payload["intent"].(string); ok && intentStr != "" {
+				fmt.Println()
+				fmt.Println("Intent:")
+				fmt.Printf("  %s\n", intentStr)
+			}
+		}
+	}
+
+	return nil
+}
+
+func runReviewStatus(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Review %s: %s\n", review.IDToHex(rev.ID)[:12], rev.State)
+	return nil
+}
+
+func runReviewApprove(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	if err := mgr.Approve(rev.ID); err != nil {
+		return fmt.Errorf("approving review: %w", err)
+	}
+
+	fmt.Printf("Review %s approved.\n", review.IDToHex(rev.ID)[:12])
+	return nil
+}
+
+func runReviewRequestChanges(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	if err := mgr.RequestChanges(rev.ID); err != nil {
+		return fmt.Errorf("requesting changes: %w", err)
+	}
+
+	fmt.Printf("Review %s: changes requested.\n", review.IDToHex(rev.ID)[:12])
+	return nil
+}
+
+func runReviewClose(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	state := review.State(reviewCloseState)
+	if state != review.StateMerged && state != review.StateAbandoned {
+		return fmt.Errorf("--state must be 'merged' or 'abandoned'")
+	}
+
+	if err := mgr.Close(rev.ID, state); err != nil {
+		return fmt.Errorf("closing review: %w", err)
+	}
+
+	fmt.Printf("Review %s closed as %s.\n", review.IDToHex(rev.ID)[:12], state)
+	return nil
+}
+
+func runReviewReady(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	if err := mgr.MarkReady(rev.ID); err != nil {
+		return fmt.Errorf("marking ready: %w", err)
+	}
+
+	fmt.Printf("Review %s is now open for review.\n", review.IDToHex(rev.ID)[:12])
+	return nil
+}
+
+func runReviewExport(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	// Get target for more context
+	target, _ := mgr.GetTarget(rev.ID)
+
+	if reviewExportMD || (!reviewExportMD && !reviewExportHTML) {
+		// Default to markdown
+		fmt.Printf("# %s\n\n", rev.Title)
+		if rev.Description != "" {
+			fmt.Printf("%s\n\n", rev.Description)
+		}
+		fmt.Printf("**State:** %s  \n", rev.State)
+		fmt.Printf("**Author:** %s  \n", rev.Author)
+		if len(rev.Reviewers) > 0 {
+			fmt.Printf("**Reviewers:** %s  \n", strings.Join(rev.Reviewers, ", "))
+		}
+		fmt.Printf("**Target:** `%s` (%s)  \n\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
+
+		// If target is a changeset, show details
+		if target != nil && target.Kind == graph.KindChangeSet {
+			if intentStr, ok := target.Payload["intent"].(string); ok && intentStr != "" {
+				fmt.Printf("## Intent\n\n%s\n\n", intentStr)
+			}
+
+			// Show affected symbols if available
+			edges, _ := db.GetEdges(target.ID, graph.EdgeAffects)
+			if len(edges) > 0 {
+				fmt.Println("## Affected Symbols")
+				fmt.Println()
+				for _, edge := range edges {
+					sym, _ := db.GetNode(edge.Dst)
+					if sym != nil {
+						name, _ := sym.Payload["name"].(string)
+						kind, _ := sym.Payload["kind"].(string)
+						fmt.Printf("- `%s` (%s)\n", name, kind)
+					}
+				}
+				fmt.Println()
+			}
+		}
+
+		fmt.Println("---")
+		fmt.Println("*Generated by [Kai](https://github.com/rite-day/ivcs)*")
+		return nil
+	}
+
+	if reviewExportHTML {
+		fmt.Println("<!DOCTYPE html>")
+		fmt.Println("<html><head><title>Review: " + rev.Title + "</title>")
+		fmt.Println("<style>body{font-family:sans-serif;max-width:800px;margin:0 auto;padding:20px}</style>")
+		fmt.Println("</head><body>")
+		fmt.Printf("<h1>%s</h1>\n", rev.Title)
+		if rev.Description != "" {
+			fmt.Printf("<p>%s</p>\n", rev.Description)
+		}
+		fmt.Printf("<p><strong>State:</strong> %s</p>\n", rev.State)
+		fmt.Printf("<p><strong>Author:</strong> %s</p>\n", rev.Author)
+		fmt.Printf("<p><strong>Target:</strong> <code>%s</code> (%s)</p>\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
+		fmt.Println("</body></html>")
+	}
+
+	return nil
+}
+
+// fetchWorkspaceFromRemote fetches a workspace and all its dependencies from a remote.
+func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, wsName string) error {
+	// Construct the workspace ref name
+	refName := "ws." + wsName
+
+	// Fetch the workspace ref
+	wsRef, err := client.GetRef(refName)
+	if err != nil {
+		return fmt.Errorf("getting workspace ref: %w", err)
+	}
+	if wsRef == nil {
+		return fmt.Errorf("workspace '%s' not found on remote", wsName)
+	}
+
+	fmt.Printf("  Found workspace ref: %s -> %s\n", refName, hex.EncodeToString(wsRef.Target)[:12])
+
+	// Check if workspace already exists locally
+	wsMgr := workspace.NewManager(db)
+	existingWs, err := wsMgr.Get(wsName)
+	if err != nil {
+		return fmt.Errorf("checking existing workspace: %w", err)
+	}
+	if existingWs != nil {
+		return fmt.Errorf("workspace '%s' already exists locally (delete it first with 'kai ws delete --ws %s')", wsName, wsName)
+	}
+
+	// Fetch the workspace node
+	wsContent, wsKind, err := client.GetObject(wsRef.Target)
+	if err != nil {
+		return fmt.Errorf("fetching workspace object: %w", err)
+	}
+	if wsContent == nil {
+		return fmt.Errorf("workspace object not found on remote")
+	}
+	if wsKind != "Workspace" {
+		return fmt.Errorf("expected Workspace, got %s", wsKind)
+	}
+
+	var wsPayload map[string]interface{}
+	if err := json.Unmarshal(wsContent, &wsPayload); err != nil {
+		return fmt.Errorf("parsing workspace payload: %w", err)
+	}
+
+	fmt.Printf("  Fetching workspace: %s\n", wsName)
+
+	// Extract references to fetch
+	var objectsToFetch [][]byte
+	seenObjects := make(map[string]bool)
+
+	// Add base snapshot
+	if baseHex, ok := wsPayload["baseSnapshot"].(string); ok && baseHex != "" {
+		if baseID, err := util.HexToBytes(baseHex); err == nil {
+			objectsToFetch = append(objectsToFetch, baseID)
+			seenObjects[string(baseID)] = true
+		}
+	}
+
+	// Add head snapshot
+	if headHex, ok := wsPayload["headSnapshot"].(string); ok && headHex != "" {
+		if headID, err := util.HexToBytes(headHex); err == nil {
+			if !seenObjects[string(headID)] {
+				objectsToFetch = append(objectsToFetch, headID)
+				seenObjects[string(headID)] = true
+			}
+		}
+	}
+
+	// Add open changesets
+	if csArr, ok := wsPayload["openChangeSets"].([]interface{}); ok {
+		for _, csHex := range csArr {
+			if hexStr, ok := csHex.(string); ok {
+				if csID, err := util.HexToBytes(hexStr); err == nil {
+					if !seenObjects[string(csID)] {
+						objectsToFetch = append(objectsToFetch, csID)
+						seenObjects[string(csID)] = true
+					}
+				}
+			}
+		}
+	}
+
+	// Fetch all related objects (BFS to get dependencies)
+	fetchedCount := 0
+	for len(objectsToFetch) > 0 {
+		objID := objectsToFetch[0]
+		objectsToFetch = objectsToFetch[1:]
+
+		// Skip if already exists locally
+		exists, _ := db.HasNode(objID)
+		if exists {
+			continue
+		}
+
+		content, kind, err := client.GetObject(objID)
+		if err != nil {
+			fmt.Printf("  Warning: failed to fetch object %s: %v\n", hex.EncodeToString(objID)[:12], err)
+			continue
+		}
+		if content == nil {
+			fmt.Printf("  Warning: object %s not found on remote\n", hex.EncodeToString(objID)[:12])
+			continue
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(content, &payload); err != nil {
+			fmt.Printf("  Warning: failed to parse object %s: %v\n", hex.EncodeToString(objID)[:12], err)
+			continue
+		}
+
+		// Insert the node
+		tx, err := db.BeginTx()
+		if err != nil {
+			continue
+		}
+		_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
+		if err != nil {
+			tx.Rollback()
+			fmt.Printf("  Warning: failed to insert object %s: %v\n", hex.EncodeToString(objID)[:12], err)
+			continue
+		}
+		tx.Commit()
+		fetchedCount++
+
+		// For Snapshot nodes, queue their parent if present
+		if kind == "Snapshot" {
+			if parentHex, ok := payload["parent"].(string); ok && parentHex != "" {
+				if parentID, err := util.HexToBytes(parentHex); err == nil {
+					if !seenObjects[string(parentID)] {
+						objectsToFetch = append(objectsToFetch, parentID)
+						seenObjects[string(parentID)] = true
+					}
+				}
+			}
+		}
+
+		// For ChangeSet nodes, queue their before/after snapshots
+		if kind == "ChangeSet" {
+			if beforeHex, ok := payload["beforeSnapshot"].(string); ok && beforeHex != "" {
+				if beforeID, err := util.HexToBytes(beforeHex); err == nil {
+					if !seenObjects[string(beforeID)] {
+						objectsToFetch = append(objectsToFetch, beforeID)
+						seenObjects[string(beforeID)] = true
+					}
+				}
+			}
+			if afterHex, ok := payload["afterSnapshot"].(string); ok && afterHex != "" {
+				if afterID, err := util.HexToBytes(afterHex); err == nil {
+					if !seenObjects[string(afterID)] {
+						objectsToFetch = append(objectsToFetch, afterID)
+						seenObjects[string(afterID)] = true
+					}
+				}
+			}
+		}
+	}
+
+	if fetchedCount > 0 {
+		fmt.Printf("  Fetched %d object(s)\n", fetchedCount)
+	}
+
+	// Now create the workspace locally
+	tx, err := db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Insert workspace node with the same ID as remote
+	if err := db.InsertWorkspace(tx, wsRef.Target, wsPayload); err != nil {
+		return fmt.Errorf("inserting workspace: %w", err)
+	}
+
+	// Create BASED_ON edge
+	if baseHex, ok := wsPayload["baseSnapshot"].(string); ok && baseHex != "" {
+		if baseID, err := util.HexToBytes(baseHex); err == nil {
+			if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeBasedOn, baseID, nil); err != nil {
+				return fmt.Errorf("inserting BASED_ON edge: %w", err)
+			}
+		}
+	}
+
+	// Create HEAD_AT edge
+	if headHex, ok := wsPayload["headSnapshot"].(string); ok && headHex != "" {
+		if headID, err := util.HexToBytes(headHex); err == nil {
+			if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeHeadAt, headID, nil); err != nil {
+				return fmt.Errorf("inserting HEAD_AT edge: %w", err)
+			}
+		}
+	}
+
+	// Create HAS_CHANGESET edges
+	if csArr, ok := wsPayload["openChangeSets"].([]interface{}); ok {
+		for _, csHex := range csArr {
+			if hexStr, ok := csHex.(string); ok {
+				if csID, err := util.HexToBytes(hexStr); err == nil {
+					if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeHasChangeSet, csID, nil); err != nil {
+						fmt.Printf("  Warning: failed to insert HAS_CHANGESET edge: %v\n", err)
+					}
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	// Create local workspace ref
+	refMgr := ref.NewRefManager(db)
+	if err := refMgr.Set(refName, wsRef.Target, ref.KindWorkspace); err != nil {
+		return fmt.Errorf("setting local ref: %w", err)
+	}
+
+	// Also store remote tracking ref
+	remoteRefName := fmt.Sprintf("remote/%s/%s", remoteName, refName)
+	if err := refMgr.Set(remoteRefName, wsRef.Target, ref.KindWorkspace); err != nil {
+		fmt.Printf("  Warning: failed to set remote tracking ref: %v\n", err)
+	}
+
+	fmt.Printf("  Created workspace: %s\n", wsName)
+	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(wsRef.Target)[:12])
+	fmt.Println("Fetch complete.")
 	return nil
 }

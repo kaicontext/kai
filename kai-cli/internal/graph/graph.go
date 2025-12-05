@@ -23,13 +23,15 @@ type Edge = coregraph.Edge
 
 // Re-export constants from kai-core/graph
 const (
-	KindFile       = coregraph.KindFile
-	KindModule     = coregraph.KindModule
-	KindSymbol     = coregraph.KindSymbol
-	KindSnapshot   = coregraph.KindSnapshot
-	KindChangeSet  = coregraph.KindChangeSet
-	KindChangeType = coregraph.KindChangeType
-	KindWorkspace  = coregraph.KindWorkspace
+	KindFile          = coregraph.KindFile
+	KindModule        = coregraph.KindModule
+	KindSymbol        = coregraph.KindSymbol
+	KindSnapshot      = coregraph.KindSnapshot
+	KindChangeSet     = coregraph.KindChangeSet
+	KindChangeType    = coregraph.KindChangeType
+	KindWorkspace     = coregraph.KindWorkspace
+	KindReview        = coregraph.KindReview
+	KindReviewComment = coregraph.KindReviewComment
 
 	EdgeContains     = coregraph.EdgeContains
 	EdgeDefinesIn    = coregraph.EdgeDefinesIn
@@ -40,6 +42,10 @@ const (
 	EdgeBasedOn      = coregraph.EdgeBasedOn
 	EdgeHeadAt       = coregraph.EdgeHeadAt
 	EdgeHasChangeSet = coregraph.EdgeHasChangeSet
+	EdgeReviewOf     = coregraph.EdgeReviewOf
+	EdgeHasComment   = coregraph.EdgeHasComment
+	EdgeAnchorsTo    = coregraph.EdgeAnchorsTo
+	EdgeSupersedes   = coregraph.EdgeSupersedes
 )
 
 // DB wraps the SQLite database connection.
@@ -494,6 +500,24 @@ func (db *DB) InsertWorkspace(tx *sql.Tx, id []byte, payload map[string]interfac
 	`, id, string(KindWorkspace), string(payloadJSON), cas.NowMs())
 	if err != nil {
 		return fmt.Errorf("inserting workspace: %w", err)
+	}
+
+	return nil
+}
+
+// InsertReview inserts a review with a provided ID (UUID-based, not content-addressed).
+func (db *DB) InsertReview(tx *sql.Tx, id []byte, payload map[string]interface{}) error {
+	payloadJSON, err := cas.CanonicalJSON(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO nodes (id, kind, payload, created_at)
+		VALUES (?, ?, ?, ?)
+	`, id, string(KindReview), string(payloadJSON), cas.NowMs())
+	if err != nil {
+		return fmt.Errorf("inserting review: %w", err)
 	}
 
 	return nil

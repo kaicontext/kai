@@ -5,13 +5,15 @@ package graph
 type NodeKind string
 
 const (
-	KindFile       NodeKind = "File"
-	KindModule     NodeKind = "Module"
-	KindSymbol     NodeKind = "Symbol"
-	KindSnapshot   NodeKind = "Snapshot"
-	KindChangeSet  NodeKind = "ChangeSet"
-	KindChangeType NodeKind = "ChangeType"
-	KindWorkspace  NodeKind = "Workspace"
+	KindFile          NodeKind = "File"
+	KindModule        NodeKind = "Module"
+	KindSymbol        NodeKind = "Symbol"
+	KindSnapshot      NodeKind = "Snapshot"
+	KindChangeSet     NodeKind = "ChangeSet"
+	KindChangeType    NodeKind = "ChangeType"
+	KindWorkspace     NodeKind = "Workspace"
+	KindReview        NodeKind = "Review"
+	KindReviewComment NodeKind = "ReviewComment"
 )
 
 // EdgeType represents the type of relationship between nodes.
@@ -27,6 +29,10 @@ const (
 	EdgeBasedOn      EdgeType = "BASED_ON"      // Workspace -> base Snapshot
 	EdgeHeadAt       EdgeType = "HEAD_AT"       // Workspace -> head Snapshot
 	EdgeHasChangeSet EdgeType = "HAS_CHANGESET" // Workspace -> ChangeSet (ordered)
+	EdgeReviewOf     EdgeType = "REVIEW_OF"     // Review -> ChangeSet or Workspace
+	EdgeHasComment   EdgeType = "HAS_COMMENT"   // Review -> ReviewComment
+	EdgeAnchorsTo    EdgeType = "ANCHORS_TO"    // ReviewComment -> Symbol/File
+	EdgeSupersedes   EdgeType = "SUPERSEDES"    // ChangeSet -> ChangeSet (iteration)
 )
 
 // Node represents a node in the graph.
