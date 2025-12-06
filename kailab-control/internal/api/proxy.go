@@ -48,8 +48,13 @@ func (h *Handler) ProxyHandler() http.Handler {
 			return
 		}
 
-		// Authenticate
+		// Authenticate - check header first, then cookie
 		token := auth.ExtractBearerToken(r.Header.Get("Authorization"))
+		if token == "" {
+			if cookie, err := r.Cookie("kai_access_token"); err == nil {
+				token = cookie.Value
+			}
+		}
 
 		var user *model.User
 		var claims *auth.Claims

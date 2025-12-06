@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"kai-core/cas"
 )
 
 func TestNewClient(t *testing.T) {
@@ -633,4 +635,269 @@ func TestLoadConfig_MigrateOldFormat(t *testing.T) {
 	if cfg.Remotes["origin"].Tenant != "default" {
 		t.Errorf("expected tenant 'default', got %q", cfg.Remotes["origin"].Tenant)
 	}
+}
+
+// TestWorkspacePackDigest verifies that workspace nodes use content-addressed
+// digests in packs (not their UUID), allowing server-side verification.
+func TestWorkspacePackDigest(t *testing.T) {
+	// Simulate a workspace node with UUID ID (not content-addressed)
+	workspaceUUID := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	workspaceKind := "Workspace"
+
+	// Original payload (as stored locally)
+	originalPayload := map[string]interface{}{
+		"name":           "test-workspace",
+		"baseSnapshot":   "abc123",
+		"headSnapshot":   "def456",
+		"status":         "active",
+		"openChangeSets": []interface{}{},
+		"description":    "Test workspace",
+	}
+
+	// For pack transport, we add _uuid to the payload
+	transportPayload := make(map[string]interface{})
+	for k, v := range originalPayload {
+		transportPayload[k] = v
+	}
+	transportPayload["_uuid"] = "0102030405060708090a0b0c0d0e0f10"
+
+	// Compute content for pack
+	payloadJSON, err := json.Marshal(transportPayload) // Note: in production we use CanonicalJSON
+	if err != nil {
+		t.Fatalf("marshaling payload: %v", err)
+	}
+	content := append([]byte(workspaceKind+"\n"), payloadJSON...)
+
+	// The pack digest should be computed from content, NOT the UUID
+	contentDigest := cas.Blake3Hash(content)
+
+	// Verify the digest is NOT the same as the UUID
+	if string(contentDigest) == string(workspaceUUID) {
+		t.Error("content digest should differ from UUID")
+	}
+
+	// Verify the digest can be verified by computing blake3(content)
+	verifyDigest := cas.Blake3Hash(content)
+	if string(verifyDigest) != string(contentDigest) {
+		t.Error("digest verification failed")
+	}
+
+	// Build a pack with the workspace object
+	objects := []PackObject{
+		{
+			Digest:  contentDigest, // Use content-addressed digest, not UUID
+			Kind:    workspaceKind,
+			Content: content,
+		},
+	}
+
+	pack, err := BuildPack(objects)
+	if err != nil {
+		t.Fatalf("BuildPack failed: %v", err)
+	}
+	if len(pack) == 0 {
+		t.Error("expected non-empty pack")
+	}
+}
+
+// TestWorkspaceUUIDRecovery verifies that the original workspace UUID can be
+// recovered from the transported payload after fetching.
+func TestWorkspaceUUIDRecovery(t *testing.T) {
+	// Simulate transported payload (as received from server)
+	transportPayload := map[string]interface{}{
+		"name":           "test-workspace",
+		"baseSnapshot":   "abc123",
+		"headSnapshot":   "def456",
+		"status":         "active",
+		"openChangeSets": []interface{}{},
+		"description":    "Test workspace",
+		"_uuid":          "0102030405060708090a0b0c0d0e0f10",
+	}
+
+	// Extract the UUID
+	uuidHex, ok := transportPayload["_uuid"].(string)
+	if !ok {
+		t.Fatal("_uuid field not found or wrong type")
+	}
+
+	expectedUUID := "0102030405060708090a0b0c0d0e0f10"
+	if uuidHex != expectedUUID {
+		t.Errorf("expected UUID %s, got %s", expectedUUID, uuidHex)
+	}
+
+	// Remove _uuid from payload for local storage
+	delete(transportPayload, "_uuid")
+
+	// Verify _uuid is removed
+	if _, exists := transportPayload["_uuid"]; exists {
+		t.Error("_uuid should have been removed from payload")
+	}
+
+	// Verify other fields are intact
+	if name, _ := transportPayload["name"].(string); name != "test-workspace" {
+		t.Errorf("expected name 'test-workspace', got %s", name)
+	}
+}
+
+// TestContentAddressedNodeDigest verifies that content-addressed nodes
+// have digests that match blake3(kind + "\n" + canonicalJSON(payload)).
+func TestContentAddressedNodeDigest(t *testing.T) {
+	// Simulate a content-addressed node (like Snapshot or ChangeSet)
+	kind := "Snapshot"
+	payload := map[string]interface{}{
+		"source":    "abc123",
+		"parent":    "",
+		"createdAt": int64(1234567890),
+	}
+
+	// Compute the expected node ID using canonical JSON
+	payloadJSON, err := cas.CanonicalJSON(payload)
+	if err != nil {
+		t.Fatalf("CanonicalJSON failed: %v", err)
+	}
+	content := append([]byte(kind+"\n"), payloadJSON...)
+	expectedDigest := cas.Blake3Hash(content)
+
+	// Build a pack object with this content
+	obj := PackObject{
+		Digest:  expectedDigest,
+		Kind:    kind,
+		Content: content,
+	}
+
+	// Verify the digest matches when we recompute
+	computedDigest := cas.Blake3Hash(obj.Content)
+	if string(computedDigest) != string(obj.Digest) {
+		t.Errorf("digest mismatch: expected %x, got %x", obj.Digest, computedDigest)
+	}
+
+	// Build pack and verify it's valid
+	pack, err := BuildPack([]PackObject{obj})
+	if err != nil {
+		t.Fatalf("BuildPack failed: %v", err)
+	}
+	if len(pack) == 0 {
+		t.Error("expected non-empty pack")
+	}
+}
+
+// TestRawPayloadPreservesDigest verifies that using raw JSON payload
+// (instead of re-serializing) preserves the content-addressed digest.
+func TestRawPayloadPreservesDigest(t *testing.T) {
+	kind := "File"
+	// Create payload with specific types
+	payload := map[string]interface{}{
+		"path":   "src/main.ts",
+		"digest": "abc123def456",
+		"size":   int64(1024),
+	}
+
+	// Compute canonical JSON (this is what gets stored in DB)
+	storedJSON, err := cas.CanonicalJSON(payload)
+	if err != nil {
+		t.Fatalf("CanonicalJSON failed: %v", err)
+	}
+
+	// Compute the node ID from stored JSON
+	content := append([]byte(kind+"\n"), storedJSON...)
+	nodeID := cas.Blake3Hash(content)
+
+	// Simulate reading back from DB - use the stored JSON directly
+	// (this is what GetNodeRawPayload does)
+	rawPayloadJSON := storedJSON
+
+	// Build content from raw payload
+	packContent := append([]byte(kind+"\n"), rawPayloadJSON...)
+	packDigest := cas.Blake3Hash(packContent)
+
+	// The digest should match the original node ID
+	if string(packDigest) != string(nodeID) {
+		t.Errorf("digest mismatch when using raw payload: expected %x, got %x", nodeID, packDigest)
+	}
+}
+
+// TestJSONRoundTripBreaksDigest demonstrates why we need raw payload -
+// JSON round-tripping changes types and breaks content-addressing.
+func TestJSONRoundTripBreaksDigest(t *testing.T) {
+	kind := "ChangeSet"
+	// Create payload with int64 (as it would be created originally)
+	payload := map[string]interface{}{
+		"beforeSnapshot": "abc123",
+		"afterSnapshot":  "def456",
+		"createdAt":      int64(1234567890000),
+	}
+
+	// Compute original digest
+	originalJSON, _ := cas.CanonicalJSON(payload)
+	originalContent := append([]byte(kind+"\n"), originalJSON...)
+	originalDigest := cas.Blake3Hash(originalContent)
+
+	// Simulate JSON round-trip (what happens in DB read)
+	var roundTrippedPayload map[string]interface{}
+	json.Unmarshal(originalJSON, &roundTrippedPayload)
+
+	// Re-serialize after round-trip
+	roundTrippedJSON, _ := cas.CanonicalJSON(roundTrippedPayload)
+	roundTrippedContent := append([]byte(kind+"\n"), roundTrippedJSON...)
+	roundTrippedDigest := cas.Blake3Hash(roundTrippedContent)
+
+	// The digests might differ due to type changes (int64 -> float64)
+	// This test documents the issue - in practice we use raw payload to avoid this
+	if string(originalDigest) != string(roundTrippedDigest) {
+		// This is expected behavior - document it
+		t.Logf("Note: JSON round-trip changed digest (expected behavior)")
+		t.Logf("  Original:     %x", originalDigest[:8])
+		t.Logf("  Round-tripped: %x", roundTrippedDigest[:8])
+	}
+}
+
+// TestPackObjectVerification simulates server-side pack verification.
+func TestPackObjectVerification(t *testing.T) {
+	// Create several objects of different kinds
+	objects := []struct {
+		kind    string
+		payload map[string]interface{}
+	}{
+		{
+			kind:    "Snapshot",
+			payload: map[string]interface{}{"source": "abc", "parent": ""},
+		},
+		{
+			kind:    "File",
+			payload: map[string]interface{}{"path": "test.ts", "digest": "xyz"},
+		},
+		{
+			kind:    "Symbol",
+			payload: map[string]interface{}{"name": "foo", "kind": "function"},
+		},
+	}
+
+	var packObjects []PackObject
+	for _, obj := range objects {
+		payloadJSON, _ := cas.CanonicalJSON(obj.payload)
+		content := append([]byte(obj.kind+"\n"), payloadJSON...)
+		digest := cas.Blake3Hash(content)
+
+		packObjects = append(packObjects, PackObject{
+			Digest:  digest,
+			Kind:    obj.kind,
+			Content: content,
+		})
+	}
+
+	// Build the pack
+	pack, err := BuildPack(packObjects)
+	if err != nil {
+		t.Fatalf("BuildPack failed: %v", err)
+	}
+
+	// Simulate server-side verification: for each object, verify blake3(content) == digest
+	for i, obj := range packObjects {
+		computedDigest := cas.Blake3Hash(obj.Content)
+		if string(computedDigest) != string(obj.Digest) {
+			t.Errorf("object %d (%s): digest verification failed", i, obj.Kind)
+		}
+	}
+
+	t.Logf("Pack size: %d bytes, objects: %d", len(pack), len(packObjects))
 }

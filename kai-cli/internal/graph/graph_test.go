@@ -5,6 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"kai-core/cas"
+)
+
+// Re-export for test convenience
+var (
+	Blake3Hash    = cas.Blake3Hash
+	CanonicalJSON = cas.CanonicalJSON
 )
 
 func setupTestDB(t *testing.T) (*DB, func()) {
@@ -828,5 +836,85 @@ func TestEdgeTypeConstants(t *testing.T) {
 		if e == "" {
 			t.Error("found empty edge type constant")
 		}
+	}
+}
+
+func TestGetNodeRawPayload(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a node with specific payload
+	payload := map[string]interface{}{
+		"path":      "src/main.ts",
+		"digest":    "abc123",
+		"size":      int64(1024),
+		"createdAt": int64(1234567890000),
+	}
+
+	nodeID, err := db.InsertNodeDirect(KindFile, payload)
+	if err != nil {
+		t.Fatalf("inserting node: %v", err)
+	}
+
+	// Get raw payload
+	kind, rawPayloadJSON, err := db.GetNodeRawPayload(nodeID)
+	if err != nil {
+		t.Fatalf("GetNodeRawPayload failed: %v", err)
+	}
+
+	if kind != KindFile {
+		t.Errorf("expected kind File, got %s", kind)
+	}
+
+	if rawPayloadJSON == nil {
+		t.Fatal("expected non-nil raw payload")
+	}
+
+	// Verify the raw payload can be used to compute the same node ID
+	content := append([]byte(string(kind)+"\n"), rawPayloadJSON...)
+	computedID := Blake3Hash(content)
+
+	if !bytes.Equal(computedID, nodeID) {
+		t.Errorf("computed ID mismatch: expected %x, got %x", nodeID, computedID)
+	}
+}
+
+func TestGetNodeRawPayload_NotFound(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Try to get non-existent node
+	kind, rawPayloadJSON, err := db.GetNodeRawPayload([]byte("nonexistent"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if kind != "" {
+		t.Errorf("expected empty kind, got %s", kind)
+	}
+	if rawPayloadJSON != nil {
+		t.Error("expected nil raw payload for non-existent node")
+	}
+}
+
+func TestGetNodeRawPayload_PreservesExactJSON(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create payload and get its canonical JSON
+	payload := map[string]interface{}{
+		"name": "test",
+		"num":  int64(42),
+	}
+
+	// Insert the node
+	nodeID, _ := db.InsertNodeDirect(KindSymbol, payload)
+
+	// Get raw payload
+	_, rawPayloadJSON, _ := db.GetNodeRawPayload(nodeID)
+
+	// The raw payload should be canonical JSON
+	expectedJSON, _ := CanonicalJSON(payload)
+	if string(rawPayloadJSON) != string(expectedJSON) {
+		t.Errorf("raw payload differs from expected:\n  got: %s\n  want: %s", rawPayloadJSON, expectedJSON)
 	}
 }

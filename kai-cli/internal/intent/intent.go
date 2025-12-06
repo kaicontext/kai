@@ -425,18 +425,57 @@ func (g *Generator) GetChangedFilesForChangeSet(changeSetID []byte) ([]string, e
 	return paths, nil
 }
 
-// UpdateChangeSetIntent updates the intent field in a changeset.
+// UpdateChangeSetIntent creates or updates an Intent node linked to the changeset.
+// This creates a separate Intent node to preserve content-addressing of the ChangeSet.
 func (g *Generator) UpdateChangeSetIntent(changeSetID []byte, intent string) error {
-	node, err := g.db.GetNode(changeSetID)
+	// Delete any existing intent edge
+	existingEdges, err := g.db.GetEdges(changeSetID, graph.EdgeHasIntent)
 	if err != nil {
 		return err
 	}
-	if node == nil {
-		return nil
+	for _, edge := range existingEdges {
+		if err := g.db.DeleteEdgeDirect(changeSetID, graph.EdgeHasIntent, edge.Dst); err != nil {
+			return err
+		}
 	}
 
-	node.Payload["intent"] = intent
-	return g.db.UpdateNodePayload(changeSetID, node.Payload)
+	// Create intent node with content-addressed ID
+	intentPayload := map[string]interface{}{
+		"text":        intent,
+		"changeSetID": util.BytesToHex(changeSetID),
+	}
+	intentID, err := g.db.InsertNodeDirect(graph.KindIntent, intentPayload)
+	if err != nil {
+		return err
+	}
+
+	// Create edge from ChangeSet to Intent
+	return g.db.InsertEdgeDirect(changeSetID, graph.EdgeHasIntent, intentID, nil)
+}
+
+// GetChangeSetIntent retrieves the intent for a changeset via the HAS_INTENT edge.
+func (g *Generator) GetChangeSetIntent(changeSetID []byte) (string, error) {
+	edges, err := g.db.GetEdges(changeSetID, graph.EdgeHasIntent)
+	if err != nil {
+		return "", err
+	}
+	if len(edges) == 0 {
+		return "", nil
+	}
+
+	// Get the Intent node
+	intentNode, err := g.db.GetNode(edges[0].Dst)
+	if err != nil {
+		return "", err
+	}
+	if intentNode == nil {
+		return "", nil
+	}
+
+	if text, ok := intentNode.Payload["text"].(string); ok {
+		return text, nil
+	}
+	return "", nil
 }
 
 // RenderIntent renders the intent for a changeset.
@@ -454,14 +493,12 @@ func (g *Generator) RenderIntent(changeSetID []byte, editText string, regenerate
 
 	// Check if there's already a saved intent (unless regenerating)
 	if !regenerate {
-		node, err := g.db.GetNode(changeSetID)
+		existingIntent, err := g.GetChangeSetIntent(changeSetID)
 		if err != nil {
 			return "", err
 		}
-		if node != nil {
-			if existingIntent, ok := node.Payload["intent"].(string); ok && existingIntent != "" {
-				return existingIntent, nil
-			}
+		if existingIntent != "" {
+			return existingIntent, nil
 		}
 	}
 

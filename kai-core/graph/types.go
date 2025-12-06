@@ -14,6 +14,7 @@ const (
 	KindWorkspace     NodeKind = "Workspace"
 	KindReview        NodeKind = "Review"
 	KindReviewComment NodeKind = "ReviewComment"
+	KindIntent        NodeKind = "Intent"
 )
 
 // EdgeType represents the type of relationship between nodes.
@@ -33,6 +34,10 @@ const (
 	EdgeHasComment   EdgeType = "HAS_COMMENT"   // Review -> ReviewComment
 	EdgeAnchorsTo    EdgeType = "ANCHORS_TO"    // ReviewComment -> Symbol/File
 	EdgeSupersedes   EdgeType = "SUPERSEDES"    // ChangeSet -> ChangeSet (iteration)
+	EdgeHasIntent    EdgeType = "HAS_INTENT"    // ChangeSet -> Intent
+	EdgeCalls        EdgeType = "CALLS"         // Symbol -> Symbol (function call)
+	EdgeImports      EdgeType = "IMPORTS"       // File -> File (import dependency)
+	EdgeTests        EdgeType = "TESTS"         // File -> File (test file tests source file)
 )
 
 // Node represents a node in the graph.

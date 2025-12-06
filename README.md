@@ -1381,6 +1381,96 @@ kai prune --aggressive
 
 Code review commands centered on changesets.
 
+#### Code Diffs in Reviews (Semantic First, Text When Needed)
+
+Kai reviews center on ChangeSets. Each ChangeSet renders reviewable code in three layers:
+
+**1. Intent & Impact**
+- Human sentence (intent)
+- Affected modules/symbols
+- Classified change types (e.g., `API_SURFACE_CHANGED`, `CONDITION_CHANGED`)
+
+**2. Semantic Diff (default)**
+- Symbol hunks: before/after of functions, methods, classes, constants
+- Handles moves/renames/formatting automatically (no noise)
+- Highlights signature changes, condition/constant updates, and JSON/YAML/SQL units
+- Comments anchor to symbols (preferred) or file+range
+
+**3. Raw Text Diff (fallback / verify)**
+- Unified or side-by-side for any file (including unsupported language/binary-as-text)
+- Useful for trust-but-verify and copy/paste
+
+**CLI Examples:**
+```bash
+# Open a review for the latest ChangeSet
+kai review open @cs:last --title "Reduce session timeout to 30 min"
+
+# Show a ChangeSet with semantic hunks (default)
+kai review view @cs:last
+
+# Force raw text view (trust-but-verify)
+kai review view @cs:last --view=text
+
+# Mixed view: semantic first, then raw hunks for each touched file
+kai review view @cs:last --view=mixed
+
+# Plain semantic diff (outside the review flow)
+kai diff @snap:prev @snap:last --semantic
+
+# JSON for tooling / UI adapters
+kai diff @snap:prev @snap:last --json
+```
+
+**Example (Semantic Hunk):**
+```
+auth/login.ts
+  function login(user: User, device: string)
+-   returns boolean
++   returns boolean  // unchanged
+-  login(user, device)
++  login(user, device, ip: string)   // API_SURFACE_CHANGED: +ip
+
+auth/constants.ts
+- export const TIMEOUT = 3600
++ export const TIMEOUT = 1800         // CONSTANT_UPDATED
+```
+
+**JSON Shape (Hunks):**
+```json
+{
+  "units": [
+    {
+      "kind": "function",
+      "fqName": "auth.login",
+      "file": "auth/login.ts",
+      "change": "API_SURFACE_CHANGED",
+      "before": {"signature": "login(user: User, device: string)"},
+      "after":  {"signature": "login(user: User, device: string, ip: string)"},
+      "ranges": {"before":[[4,0],[12,1]], "after":[[4,0],[14,1]]}
+    }
+  ],
+  "files": [
+    {
+      "path": "auth/constants.ts",
+      "change": "CONSTANT_UPDATED",
+      "before": "export const TIMEOUT = 3600",
+      "after":  "export const TIMEOUT = 1800"
+    }
+  ]
+}
+```
+
+**Comment Anchoring:**
+- Primary: `ReviewComment` → Symbol (fqName, signature, ranges)
+- Fallback: `ReviewComment` → File + range
+- Comments auto-carry forward when a ChangeSet is `SUPERSEDED`
+
+**Unsupported/Non-Code Files:**
+- Show file-level status + raw diff if textual
+- If binary, show "changed" with size/hash deltas; attach preview if available
+
+---
+
 #### `kai review open`
 
 Open a new review for a changeset or workspace.
@@ -1423,14 +1513,27 @@ d4e5f6a7...   approved  Add billing module           bob       Workspace
 
 #### `kai review view`
 
-View details of a review.
+View details of a review with semantic diff.
 
 ```bash
 kai review view <review-id> [flags]
 ```
 
 **Flags:**
-- `--json` - Output as JSON
+- `--view <mode>` - View mode: `semantic` (default), `text`, or `mixed`
+- `--json` - Output as JSON (includes semantic hunks)
+
+**Examples:**
+```bash
+# Default semantic view
+kai review view a1b2c3d4
+
+# Raw text diff for verification
+kai review view a1b2c3d4 --view=text
+
+# Both semantic and raw hunks
+kai review view a1b2c3d4 --view=mixed
+```
 
 ---
 

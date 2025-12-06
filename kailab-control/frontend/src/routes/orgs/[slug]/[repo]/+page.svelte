@@ -126,7 +126,16 @@ kai push origin snap.latest`;
 	// Filter refs by type
 	let snapshots = $derived(refs.filter(r => r.name.startsWith('snap.')));
 	let changesets = $derived(refs.filter(r => r.name.startsWith('cs.')));
-	let workspaces = $derived(refs.filter(r => r.name.startsWith('ws.')));
+	// Only show main workspace refs (ws.<name>), not helper refs (ws.<name>.base, .head, .cs.*)
+	let workspaces = $derived(refs.filter(r => {
+		if (!r.name.startsWith('ws.')) return false;
+		const wsName = r.name.slice(3); // Remove 'ws.' prefix
+		// Main workspace refs don't have a dot in the name (e.g., 'feat/init')
+		// Helper refs have dots (e.g., 'feat/init.base', 'feat/init.head', 'feat/init.cs.abc123')
+		const isMain = !wsName.includes('.');
+		console.log('workspace filter:', r.name, 'wsName:', wsName, 'isMain:', isMain);
+		return isMain;
+	}));
 	let otherRefs = $derived(refs.filter(r => !r.name.startsWith('snap.') && !r.name.startsWith('cs.') && !r.name.startsWith('ws.')));
 
 	// Compare refs for diff

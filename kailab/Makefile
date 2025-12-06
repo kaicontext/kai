@@ -6,7 +6,7 @@ build:
 
 # Run the server with default settings
 run:
-	go run ./cmd/kailabd --listen=:7447 --data=.kailab --tenant=default --repo=main
+	go run ./cmd/kailabd --listen=:7447 --data=.kailab
 
 # Run tests
 test:
@@ -50,4 +50,4 @@ docker:
 
 # Development: run with auto-reload (requires entr)
 dev:
-	find . -name '*.go' | entr -r go run ./cmd/kailabd --listen=:7447 --data=.kailab --tenant=default --repo=main
+	find . -name '*.go' | entr -r go run ./cmd/kailabd --listen=:7447 --data=.kailab

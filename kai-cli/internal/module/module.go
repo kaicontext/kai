@@ -12,6 +12,7 @@ type Matcher = modulematch.Matcher
 
 // Re-export functions from kai-core/modulematch
 var (
-	LoadRules  = modulematch.LoadRules
-	NewMatcher = modulematch.NewMatcher
+	LoadRules        = modulematch.LoadRules
+	LoadRulesOrEmpty = modulematch.LoadRulesOrEmpty
+	NewMatcher       = modulematch.NewMatcher
 )

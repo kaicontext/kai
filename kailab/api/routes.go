@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -389,13 +390,15 @@ func (h *Handler) UpdateRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ref, _ := store.GetRef(rh.DB, name)
-
-	writeJSON(w, http.StatusOK, proto.RefUpdateResponse{
-		OK:        true,
-		UpdatedAt: ref.UpdatedAt,
-		PushID:    pushID,
-	})
+	ref, err := store.GetRef(rh.DB, name)
+	resp := proto.RefUpdateResponse{
+		OK:     true,
+		PushID: pushID,
+	}
+	if err == nil && ref != nil {
+		resp.UpdatedAt = ref.UpdatedAt
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
@@ -462,12 +465,15 @@ func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		ref, _ := store.GetRef(rh.DB, upd.Name)
-		results[i] = proto.BatchRefResult{
-			Name:      upd.Name,
-			OK:        true,
-			UpdatedAt: ref.UpdatedAt,
+		ref, err := store.GetRef(rh.DB, upd.Name)
+		result := proto.BatchRefResult{
+			Name: upd.Name,
+			OK:   true,
 		}
+		if err == nil && ref != nil {
+			result.UpdatedAt = ref.UpdatedAt
+		}
+		results[i] = result
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -554,6 +560,9 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional: filter by path to get single file
+	pathFilter := r.URL.Query().Get("path")
+
 	// Get ref to find snapshot digest
 	ref, err := store.GetRef(rh.DB, refName)
 	if err != nil {
@@ -589,14 +598,65 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 
 	var snapshotPayload struct {
 		FileDigests []string `json:"fileDigests"`
+		// New: inline file metadata for fast listing
+		Files []struct {
+			Path          string `json:"path"`
+			Lang          string `json:"lang"`
+			Digest        string `json:"digest"`
+			ContentDigest string `json:"contentDigest"`
+		} `json:"files"`
 	}
 	if err := json.Unmarshal(snapshotJSON, &snapshotPayload); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to parse snapshot", err)
 		return
 	}
 
-	// Fetch each file object
 	var files []*proto.FileEntry
+
+	// Debug: log which path we're taking
+	log.Printf("Snapshot has %d inline files, %d file digests", len(snapshotPayload.Files), len(snapshotPayload.FileDigests))
+
+	// Fast path: use inline files metadata if available (new snapshots)
+	if len(snapshotPayload.Files) > 0 {
+		for _, f := range snapshotPayload.Files {
+			// If filtering by path, check if this matches
+			if pathFilter != "" {
+				if f.Path == pathFilter {
+					writeJSON(w, http.StatusOK, proto.FilesListResponse{
+						SnapshotDigest: hex.EncodeToString(ref.Target),
+						Files: []*proto.FileEntry{{
+							Path:          f.Path,
+							Digest:        f.Digest,
+							ContentDigest: f.ContentDigest,
+							Lang:          f.Lang,
+						}},
+					})
+					return
+				}
+				continue
+			}
+
+			files = append(files, &proto.FileEntry{
+				Path:          f.Path,
+				Digest:        f.Digest,
+				ContentDigest: f.ContentDigest,
+				Lang:          f.Lang,
+			})
+		}
+
+		if pathFilter != "" {
+			writeError(w, http.StatusNotFound, "file not found in snapshot", nil)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, proto.FilesListResponse{
+			SnapshotDigest: hex.EncodeToString(ref.Target),
+			Files:          files,
+		})
+		return
+	}
+
+	// Slow path: fetch each file object (old snapshots without inline metadata)
 	for _, fileDigestHex := range snapshotPayload.FileDigests {
 		fileDigest, err := hex.DecodeString(fileDigestHex)
 		if err != nil {
@@ -627,6 +687,25 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// If filtering by path, check if this matches
+		if pathFilter != "" {
+			if filePayload.Path == pathFilter {
+				// Return just this file
+				writeJSON(w, http.StatusOK, proto.FilesListResponse{
+					SnapshotDigest: hex.EncodeToString(ref.Target),
+					Files: []*proto.FileEntry{{
+						Path:          filePayload.Path,
+						Digest:        fileDigestHex,
+						ContentDigest: filePayload.Digest,
+						Lang:          filePayload.Lang,
+						Size:          filePayload.Size,
+					}},
+				})
+				return
+			}
+			continue // Skip non-matching files when filtering
+		}
+
 		files = append(files, &proto.FileEntry{
 			Path:          filePayload.Path,
 			Digest:        fileDigestHex,
@@ -634,6 +713,12 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 			Lang:          filePayload.Lang,
 			Size:          filePayload.Size,
 		})
+	}
+
+	// If filtering by path and we got here, file wasn't found
+	if pathFilter != "" {
+		writeError(w, http.StatusNotFound, "file not found in snapshot", nil)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, proto.FilesListResponse{

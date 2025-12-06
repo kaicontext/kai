@@ -132,18 +132,37 @@ func getTutorials() map[string]*Tutorial {
 			Description: "Define module boundaries for your codebase",
 			Steps: []Step{
 				{
-					Title:       "4.1 — Create module rules",
-					Description: "Define which files belong to which modules in .kai/rules/modules.yaml",
+					Title:       "4.1 — Auto-infer modules",
+					Description: "Let kai detect your project structure and suggest modules automatically.",
 					Commands: []string{
-						"mkdir -p .kai/rules",
-						"cat > .kai/rules/modules.yaml <<'YAML'\nmodules:\n  - name: App\n    include: [\"src/app.js\"]\n  - name: Utils\n    include: [\"src/utils/**\"]\nYAML",
+						"kai init",
+						"kai modules init --infer",
 					},
-					Expected: "",
+					Expected: "Inferred modules",
 				},
 				{
-					Title:       "4.2 — Re-analyze with modules",
-					Description: "Create a new snapshot to apply module rules.",
+					Title:       "4.2 — Add modules manually",
+					Description: "Add specific modules with glob patterns.",
 					Commands: []string{
+						"kai modules add App src/app.js",
+						"kai modules add Utils \"src/utils/**\"",
+						"kai modules list",
+					},
+					Expected: "Added module",
+				},
+				{
+					Title:       "4.3 — Preview module matches",
+					Description: "See which files match each module's patterns.",
+					Commands: []string{
+						"kai modules preview",
+					},
+					Expected: "files",
+				},
+				{
+					Title:       "4.4 — Write and snapshot",
+					Description: "Save modules and create a snapshot with module info.",
+					Commands: []string{
+						"kai modules init --infer --write",
 						"kai snap",
 					},
 					Expected: "Created snapshot",
@@ -210,7 +229,20 @@ func getTutorials() map[string]*Tutorial {
 			Description: "Use the plan to run your test/build commands",
 			Steps: []Step{
 				{
-					Title:       "6.1 — Extract targets from plan",
+					Title:       "6.1 — Generate a plan",
+					Description: "First, create a changeset and generate a CI plan.",
+					Commands: []string{
+						"kai init",
+						"kai snap",
+						"echo '// change' >> src/utils/math.js",
+						"kai snap",
+						"kai changeset create @snap:prev @snap:last",
+						"kai ci plan @cs:last --strategy=auto --out plan.json",
+					},
+					Expected: "Created",
+				},
+				{
+					Title:       "6.2 — Extract targets from plan",
 					Description: "The plan.json contains targets.run - a list of paths.\n\nYour CI extracts these and passes to whatever tool you use.",
 					Commands: []string{
 						"cat plan.json | node -e \"const p=JSON.parse(require('fs').readFileSync(0)); console.log((p.targets.run||[]).join(' '))\"",
@@ -218,7 +250,7 @@ func getTutorials() map[string]*Tutorial {
 					Expected: "",
 				},
 				{
-					Title:       "6.2 — Example: shell script",
+					Title:       "6.3 — Example: shell script",
 					Description: "A simple pattern for any CI system:\n\nRUN=$(jq -r '.targets.run[]?' plan.json | tr '\\n' ' ')\n./your-test-runner $RUN",
 					Commands: []string{
 						"echo 'In your CI, run: ./scripts/run-tests $(jq -r \".targets.run[]\" plan.json)'",
@@ -235,18 +267,29 @@ func getTutorials() map[string]*Tutorial {
 			Description: "Open and manage ChangeSet-centered code reviews",
 			Steps: []Step{
 				{
-					Title:       "7.1 — Open a review",
-					Description: "Open a code review for a changeset.",
+					Title:       "7.1 — Setup a changeset",
+					Description: "First, create a changeset to review.",
+					Commands: []string{
+						"kai init",
+						"kai snap",
+						"echo '// review this' >> src/utils/math.js",
+						"kai snap",
+						"kai changeset create @snap:prev @snap:last",
+					},
+					Expected: "Created changeset",
+				},
+				{
+					Title:       "7.2 — Open a review",
+					Description: "Open a code review for the changeset.",
 					Commands: []string{
 						"kai review open @cs:last --title \"Utils: adjust add()\" --desc \"demo tweak\"",
 						"kai review list",
-						"kai review view <review-id>",
 					},
-					Expected: "Review opened",
+					Expected: "opened",
 				},
 				{
-					Title:       "7.2 — Approve / request changes",
-					Description: "Approve the review or request changes.",
+					Title:       "7.3 — Approve / request changes",
+					Description: "Approve the review or request changes (use the review ID from list).",
 					Commands: []string{
 						"kai review approve <review-id>",
 						"kai review request-changes <review-id>",
@@ -258,35 +301,35 @@ func getTutorials() map[string]*Tutorial {
 
 		// Topic 8 — Push/fetch
 		"remotes": {
-			Title:       "Topic 8: Push & Fetch",
-			Description: "Sync workspaces with a remote kailab server",
+			Title:       "Topic 8: Push & Fetch (Reference Only)",
+			Description: "Sync workspaces with a remote kailab server.\n\nNote: These commands require a running kailab server and cannot be tested in this playground.",
 			Steps: []Step{
 				{
-					Title:       "8.1 — Configure a local remote",
-					Description: "Set up a remote server (requires kailabd running).",
+					Title:       "8.1 — Configure a remote",
+					Description: "Set up a remote kailab server.\n\nThis requires running kailabd on your infrastructure.",
 					Commands: []string{
-						"kai remote set origin http://localhost:7447 --tenant acme --repo demo",
+						"# Example: kai remote set origin https://kailab.example.com --tenant myorg --repo myrepo",
 					},
-					Expected:   "origin",
+					Expected:   "",
 					GitCompare: "git remote add origin <url>",
 				},
 				{
-					Title:       "8.2 — Push the workspace",
+					Title:       "8.2 — Push a workspace",
 					Description: "Push your workspace and review metadata to the remote.",
 					Commands: []string{
-						"kai push origin --ws feat/demo",
+						"# kai push origin --ws feat/demo",
 					},
-					Expected:   "Pushed",
+					Expected:   "",
 					GitCompare: "git push origin feat/demo",
 				},
 				{
-					Title:       "8.3 — Fetch on another machine",
+					Title:       "8.3 — Fetch from remote",
 					Description: "Fetch and checkout the workspace elsewhere.",
 					Commands: []string{
-						"kai fetch origin --ws feat/demo",
-						"kai ws checkout --ws feat/demo --dir .",
+						"# kai fetch origin --ws feat/demo",
+						"# kai ws checkout feat/demo",
 					},
-					Expected:   "Fetched",
+					Expected:   "",
 					GitCompare: "git fetch && git checkout feat/demo",
 				},
 			},
@@ -341,12 +384,23 @@ func getTutorials() map[string]*Tutorial {
 			Description: "Configure test mapping for safer CI",
 			Steps: []Step{
 				{
-					Title:       "Create testmap.yaml",
-					Description: "Map modules to their test files so CI can widen safely if uncertain.",
+					Title:       "Auto-infer with tests",
+					Description: "Infer modules and their associated test files automatically.",
 					Commands: []string{
-						"cat > .kai/rules/testmap.yaml <<'YAML'\nmodules:\n  - name: App\n    includes: [\"src/app.js\"]\n    tests:    [\"tests/app.test.js\"]\n  - name: Utils\n    includes: [\"src/utils/**\"]\n    tests:    [\"tests/math.test.js\"]\nYAML",
+						"kai modules init --infer --tests \"tests/**/*.test.js\" --write",
+						"kai modules list",
 					},
-					Expected: "",
+					Expected: "Saved",
+				},
+				{
+					Title:       "Manual module with tests",
+					Description: "Add modules manually with their test patterns.",
+					Commands: []string{
+						"kai modules add App src/app.js",
+						"kai modules add Utils \"src/utils/**\"",
+						"kai modules preview",
+					},
+					Expected: "Added module",
 				},
 			},
 		},
@@ -418,6 +472,19 @@ func getTutorials() map[string]*Tutorial {
 						"kai diff @snap:prev @snap:last --semantic",
 						"kai intent render @cs:last --edit \"description\"",
 						"kai dump @cs:last --json",
+					},
+					Expected: "",
+				},
+				{
+					Title:       "Modules",
+					Description: "Define module boundaries.",
+					Commands: []string{
+						"kai modules init --infer             # auto-detect modules",
+						"kai modules init --infer --write     # save to modules.yaml",
+						"kai modules add App src/app.js       # add module manually",
+						"kai modules list                     # list all modules",
+						"kai modules preview                  # show file matches",
+						"kai modules rm App                   # remove a module",
 					},
 					Expected: "",
 				},

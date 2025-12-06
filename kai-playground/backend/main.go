@@ -125,14 +125,44 @@ func (sm *SessionManager) cleanupLoop() {
 	}
 }
 
+// parseCommand splits a command string respecting quoted strings.
+func parseCommand(command string) []string {
+	var parts []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+
+	for _, r := range command {
+		switch {
+		case (r == '"' || r == '\'') && !inQuote:
+			inQuote = true
+			quoteChar = r
+		case r == quoteChar && inQuote:
+			inQuote = false
+			quoteChar = 0
+		case r == ' ' && !inQuote:
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts
+}
+
 // RunCommand executes a kai command in the session's sandbox.
 func (sm *SessionManager) RunCommand(session *Session, command string) (string, error) {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	session.LastUsed = time.Now()
 
-	// Parse command
-	parts := strings.Fields(command)
+	// Parse command respecting quotes
+	parts := parseCommand(command)
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command")
 	}

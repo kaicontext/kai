@@ -32,6 +32,7 @@ const (
 	KindWorkspace     = coregraph.KindWorkspace
 	KindReview        = coregraph.KindReview
 	KindReviewComment = coregraph.KindReviewComment
+	KindIntent        = coregraph.KindIntent
 
 	EdgeContains     = coregraph.EdgeContains
 	EdgeDefinesIn    = coregraph.EdgeDefinesIn
@@ -46,6 +47,10 @@ const (
 	EdgeHasComment   = coregraph.EdgeHasComment
 	EdgeAnchorsTo    = coregraph.EdgeAnchorsTo
 	EdgeSupersedes   = coregraph.EdgeSupersedes
+	EdgeHasIntent    = coregraph.EdgeHasIntent
+	EdgeCalls        = coregraph.EdgeCalls
+	EdgeImports      = coregraph.EdgeImports
+	EdgeTests        = coregraph.EdgeTests
 )
 
 // DB wraps the SQLite database connection.
@@ -205,6 +210,26 @@ func (db *DB) GetNode(id []byte) (*Node, error) {
 		Payload:   payload,
 		CreatedAt: createdAt,
 	}, nil
+}
+
+// GetNodeRawPayload retrieves a node's raw JSON payload by ID.
+// This is useful for pushing to remote servers where re-serializing
+// the payload might produce different JSON due to type changes during unmarshaling.
+func (db *DB) GetNodeRawPayload(id []byte) (kind NodeKind, rawPayloadJSON []byte, err error) {
+	var kindStr string
+	var payloadJSON string
+
+	err = db.conn.QueryRow(`
+		SELECT kind, payload FROM nodes WHERE id = ?
+	`, id).Scan(&kindStr, &payloadJSON)
+	if err == sql.ErrNoRows {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("querying node: %w", err)
+	}
+
+	return NodeKind(kindStr), []byte(payloadJSON), nil
 }
 
 // HasNode checks if a node with the given ID exists.
@@ -453,7 +478,7 @@ func (db *DB) GetAllNodesAndEdgesForChangeSet(changeSetID []byte) (map[string]in
 	var relatedEdges []map[string]interface{}
 
 	// Get all edge types from this changeset
-	for _, edgeType := range []EdgeType{EdgeModifies, EdgeHas, EdgeAffects} {
+	for _, edgeType := range []EdgeType{EdgeModifies, EdgeHas, EdgeAffects, EdgeHasIntent} {
 		edges, err := db.GetEdges(changeSetID, edgeType)
 		if err != nil {
 			return nil, err
@@ -574,6 +599,21 @@ func (db *DB) DeleteEdgeAt(tx *sql.Tx, src []byte, edgeType EdgeType, dst []byte
 		DELETE FROM edges WHERE src = ? AND type = ? AND dst = ? AND at = ?
 	`, src, string(edgeType), dst, at)
 	return err
+}
+
+// DeleteEdgeDirect deletes an edge directly without transaction.
+func (db *DB) DeleteEdgeDirect(src []byte, edgeType EdgeType, dst []byte) error {
+	tx, err := db.BeginTx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := db.DeleteEdge(tx, src, edgeType, dst); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // Query executes a query that returns rows.

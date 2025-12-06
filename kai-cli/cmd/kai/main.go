@@ -522,6 +522,88 @@ var refDelCmd = &cobra.Command{
 	RunE:  runRefDel,
 }
 
+// Modules commands
+var modulesCmd = &cobra.Command{
+	Use:   "modules",
+	Short: "Manage module definitions",
+	Long: `Define and manage modules for your codebase.
+
+Modules group related files together, enabling:
+- Semantic diffs at module level
+- Targeted test selection based on module changes
+- Import graph analysis between modules
+
+Examples:
+  kai modules init --infer --write   # Auto-detect and save modules
+  kai modules add App src/app.js     # Add a module
+  kai modules list                   # Show all modules
+  kai modules preview                # Preview file-to-module mapping`,
+}
+
+var modulesInitCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Initialize module configuration",
+	Long: `Initialize module configuration by auto-detecting modules from your codebase.
+
+With --infer, Kai scans your source directories and creates sensible module definitions.
+With --write, the configuration is saved to .kai/rules/modules.yaml.
+
+Examples:
+  kai modules init --infer                    # Preview inferred modules
+  kai modules init --infer --write            # Save inferred modules
+  kai modules init --infer --by dirs          # Group by top-level directories
+  kai modules init --infer --tests "tests/**" # Also detect test modules`,
+	RunE: runModulesInit,
+}
+
+var modulesAddCmd = &cobra.Command{
+	Use:   "add <name> <glob> [glob...]",
+	Short: "Add or update a module",
+	Long: `Add a new module or update an existing module's patterns.
+
+Examples:
+  kai modules add App src/app.js
+  kai modules add Utils "src/utils/**"
+  kai modules add Auth "src/auth/**" "src/middleware/auth*"`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: runModulesAdd,
+}
+
+var modulesListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all modules",
+	RunE:  runModulesList,
+}
+
+var modulesPreviewCmd = &cobra.Command{
+	Use:   "preview [module]",
+	Short: "Preview which files match each module",
+	Long: `Show which files are matched by module patterns.
+
+Without arguments, shows all modules and their matched files.
+With a module name, shows only that module's matches.
+
+Examples:
+  kai modules preview
+  kai modules preview Utils`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runModulesPreview,
+}
+
+var modulesShowCmd = &cobra.Command{
+	Use:   "show <name>",
+	Short: "Show a module's configuration",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runModulesShow,
+}
+
+var modulesRmCmd = &cobra.Command{
+	Use:   "rm <name>",
+	Short: "Remove a module",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runModulesRm,
+}
+
 var pickCmd = &cobra.Command{
 	Use:   "pick <Snapshot|ChangeSet|Workspace>",
 	Short: "Search and select a node interactively",
@@ -912,6 +994,13 @@ var (
 	mergeLang   string
 	mergeOutput string
 	mergeJSON   bool
+
+	// Modules flags
+	modulesInfer     bool
+	modulesWrite     bool
+	modulesBy        string
+	modulesTestsGlob string
+	modulesDryRun    bool
 )
 
 func init() {
@@ -1027,6 +1116,13 @@ func init() {
 	mergeCmd.Flags().StringVarP(&mergeOutput, "output", "o", "", "Output file path (defaults to stdout)")
 	mergeCmd.Flags().BoolVar(&mergeJSON, "json", false, "Output result as JSON (includes conflicts)")
 
+	// Modules init flags
+	modulesInitCmd.Flags().BoolVar(&modulesInfer, "infer", false, "Auto-detect modules from source structure")
+	modulesInitCmd.Flags().BoolVar(&modulesWrite, "write", false, "Write configuration to .kai/rules/modules.yaml")
+	modulesInitCmd.Flags().StringVar(&modulesBy, "by", "dirs", "Grouping strategy: dirs (directories) or globs")
+	modulesInitCmd.Flags().StringVar(&modulesTestsGlob, "tests", "", "Glob pattern for test files (e.g., \"tests/**\")")
+	modulesInitCmd.Flags().BoolVar(&modulesDryRun, "dry-run", false, "Preview changes without writing")
+
 	// Add remote subcommands
 	remoteCmd.AddCommand(remoteSetCmd)
 	remoteCmd.AddCommand(remoteGetCmd)
@@ -1037,6 +1133,14 @@ func init() {
 	refCmd.AddCommand(refListCmd)
 	refCmd.AddCommand(refSetCmd)
 	refCmd.AddCommand(refDelCmd)
+
+	// Add modules subcommands
+	modulesCmd.AddCommand(modulesInitCmd)
+	modulesCmd.AddCommand(modulesAddCmd)
+	modulesCmd.AddCommand(modulesListCmd)
+	modulesCmd.AddCommand(modulesPreviewCmd)
+	modulesCmd.AddCommand(modulesShowCmd)
+	modulesCmd.AddCommand(modulesRmCmd)
 
 	// Set up dynamic completions for commands that accept IDs
 	analyzeSymbolsCmd.ValidArgsFunction = completeSnapshotID
@@ -1101,6 +1205,7 @@ func init() {
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
 	rootCmd.AddCommand(refCmd)
+	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(remoteCmd)
@@ -2564,7 +2669,17 @@ func openDB() (*graph.DB, error) {
 }
 
 func loadMatcher() (*module.Matcher, error) {
-	return module.LoadRules(modulesFile)
+	// Try the new location first (.kai/rules/modules.yaml)
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(matcher.GetAllModules()) > 0 {
+		return matcher, nil
+	}
+
+	// Fall back to legacy location (kai.modules.yaml in project root)
+	return module.LoadRulesOrEmpty(modulesFile)
 }
 
 // getCurrentWorkspace reads the current workspace name from .kai/workspace
@@ -6002,4 +6117,354 @@ func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, w
 	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(wsRef.Target)[:12])
 	fmt.Println("Fetch complete.")
 	return nil
+}
+
+// Modules command implementations
+
+const modulesRulesPath = ".kai/rules/modules.yaml"
+
+func runModulesInit(cmd *cobra.Command, args []string) error {
+	if !modulesInfer {
+		// Just show current config or prompt
+		matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+		if err != nil {
+			return err
+		}
+		modules := matcher.GetAllModules()
+		if len(modules) == 0 {
+			fmt.Println("No modules configured.")
+			fmt.Println()
+			fmt.Println("To auto-detect modules from your codebase:")
+			fmt.Println("  kai modules init --infer --write")
+			fmt.Println()
+			fmt.Println("To add modules manually:")
+			fmt.Println("  kai modules add App src/app.js")
+			fmt.Println("  kai modules add Utils \"src/utils/**\"")
+			return nil
+		}
+		fmt.Printf("Found %d module(s) in %s\n", len(modules), modulesRulesPath)
+		for _, m := range modules {
+			fmt.Printf("  %s: %v\n", m.Name, m.Paths)
+		}
+		return nil
+	}
+
+	// Infer modules from directory structure
+	fmt.Println("Scanning for modules...")
+
+	var modules []module.ModuleRule
+
+	// Look for common source root directories
+	sourceRoots := []string{"src", "lib", "pkg", "internal", "app", "core"}
+	testRoots := []string{"tests", "test", "__tests__", "spec"}
+
+	// Find which source root exists
+	var sourceRoot string
+	for _, dir := range sourceRoots {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			sourceRoot = dir
+			break
+		}
+	}
+
+	if sourceRoot != "" {
+		// Look inside the source root for subdirectories (these become modules)
+		entries, err := os.ReadDir(sourceRoot)
+		if err != nil {
+			return err
+		}
+
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				// Capitalize first letter for module name
+				name := strings.ToUpper(e.Name()[:1]) + e.Name()[1:]
+				modules = append(modules, module.ModuleRule{
+					Name:  name,
+					Paths: []string{filepath.Join(sourceRoot, e.Name()) + "/**"},
+				})
+			}
+		}
+
+		// Also check for top-level files in source root (e.g., src/app.js)
+		for _, e := range entries {
+			if !e.IsDir() {
+				ext := filepath.Ext(e.Name())
+				if ext == ".js" || ext == ".ts" || ext == ".jsx" || ext == ".tsx" || ext == ".go" || ext == ".py" {
+					baseName := strings.TrimSuffix(e.Name(), ext)
+					name := strings.ToUpper(baseName[:1]) + baseName[1:]
+					// Check if module already exists
+					exists := false
+					for _, m := range modules {
+						if m.Name == name {
+							exists = true
+							break
+						}
+					}
+					if !exists {
+						modules = append(modules, module.ModuleRule{
+							Name:  name,
+							Paths: []string{filepath.Join(sourceRoot, e.Name())},
+						})
+					}
+				}
+			}
+		}
+	} else {
+		// No standard source root, look for top-level directories
+		entries, err := os.ReadDir(".")
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") &&
+				e.Name() != "node_modules" && e.Name() != "vendor" &&
+				!contains(testRoots, e.Name()) {
+				name := strings.ToUpper(e.Name()[:1]) + e.Name()[1:]
+				modules = append(modules, module.ModuleRule{
+					Name:  name,
+					Paths: []string{e.Name() + "/**"},
+				})
+			}
+		}
+	}
+
+	// Add tests module if specified or auto-detect
+	if modulesTestsGlob != "" {
+		modules = append(modules, module.ModuleRule{
+			Name:  "Tests",
+			Paths: []string{modulesTestsGlob},
+		})
+	} else {
+		for _, dir := range testRoots {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				modules = append(modules, module.ModuleRule{
+					Name:  "Tests",
+					Paths: []string{dir + "/**"},
+				})
+				break
+			}
+		}
+	}
+
+	if len(modules) == 0 {
+		fmt.Println("No modules detected. Add modules manually:")
+		fmt.Println("  kai modules add App src/app.js")
+		return nil
+	}
+
+	// Print inferred modules
+	fmt.Printf("\nInferred %d module(s):\n", len(modules))
+	for _, m := range modules {
+		fmt.Printf("  %s:\n", m.Name)
+		for _, p := range m.Paths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+
+	if modulesDryRun || !modulesWrite {
+		fmt.Println()
+		if !modulesWrite {
+			fmt.Println("Run with --write to save to", modulesRulesPath)
+		}
+		return nil
+	}
+
+	// Save modules
+	matcher := module.NewMatcher(modules)
+	if err := matcher.SaveRules(modulesRulesPath); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Printf("Saved to %s\n", modulesRulesPath)
+	return nil
+}
+
+func runModulesAdd(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	paths := args[1:]
+
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return err
+	}
+
+	existing := matcher.GetModule(name)
+	if existing != nil {
+		// Update existing module
+		matcher.AddModule(name, paths)
+		fmt.Printf("Updated module: %s\n", name)
+	} else {
+		matcher.AddModule(name, paths)
+		fmt.Printf("Added module: %s\n", name)
+	}
+
+	for _, p := range paths {
+		fmt.Printf("  - %s\n", p)
+	}
+
+	if err := matcher.SaveRules(modulesRulesPath); err != nil {
+		return err
+	}
+	fmt.Printf("Saved to %s\n", modulesRulesPath)
+	return nil
+}
+
+func runModulesList(cmd *cobra.Command, args []string) error {
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return err
+	}
+
+	modules := matcher.GetAllModules()
+	if len(modules) == 0 {
+		fmt.Println("No modules configured.")
+		fmt.Println("Run 'kai modules init --infer --write' or 'kai modules add <name> <glob>'")
+		return nil
+	}
+
+	fmt.Printf("Modules (%d):\n", len(modules))
+	for _, m := range modules {
+		fmt.Printf("  %s\n", m.Name)
+		for _, p := range m.Paths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+	return nil
+}
+
+func runModulesPreview(cmd *cobra.Command, args []string) error {
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return err
+	}
+
+	modules := matcher.GetAllModules()
+	if len(modules) == 0 {
+		fmt.Println("No modules configured.")
+		return nil
+	}
+
+	// Get all files in the current directory
+	var allFiles []string
+	err = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			name := info.Name()
+			// Skip hidden directories (but not "." itself), node_modules, and vendor
+			if (strings.HasPrefix(name, ".") && name != ".") || name == "node_modules" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		allFiles = append(allFiles, path)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Filter by module name if specified
+	var targetModules []module.ModuleRule
+	if len(args) > 0 {
+		moduleName := args[0]
+		for _, m := range modules {
+			if m.Name == moduleName {
+				targetModules = append(targetModules, m)
+				break
+			}
+		}
+		if len(targetModules) == 0 {
+			return fmt.Errorf("module %q not found", moduleName)
+		}
+	} else {
+		targetModules = modules
+	}
+
+	// Match files to modules
+	matchedFiles := matcher.MatchPaths(allFiles)
+
+	for _, m := range targetModules {
+		files := matchedFiles[m.Name]
+		fmt.Printf("%s (%d files):\n", m.Name, len(files))
+		if len(files) == 0 {
+			fmt.Println("  (no files matched)")
+		} else {
+			for _, f := range files {
+				fmt.Printf("  %s\n", f)
+			}
+		}
+		fmt.Println()
+	}
+
+	// Show unmatched files
+	if len(args) == 0 {
+		var unmatched []string
+		for _, f := range allFiles {
+			mods := matcher.MatchPath(f)
+			if len(mods) == 0 {
+				unmatched = append(unmatched, f)
+			}
+		}
+		if len(unmatched) > 0 {
+			fmt.Printf("Unmatched (%d files):\n", len(unmatched))
+			for _, f := range unmatched {
+				fmt.Printf("  %s\n", f)
+			}
+		}
+	}
+
+	return nil
+}
+
+func runModulesShow(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return err
+	}
+
+	mod := matcher.GetModule(name)
+	if mod == nil {
+		return fmt.Errorf("module %q not found", name)
+	}
+
+	fmt.Printf("Module: %s\n", mod.Name)
+	fmt.Println("Patterns:")
+	for _, p := range mod.Paths {
+		fmt.Printf("  - %s\n", p)
+	}
+	return nil
+}
+
+func runModulesRm(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil {
+		return err
+	}
+
+	if !matcher.RemoveModule(name) {
+		return fmt.Errorf("module %q not found", name)
+	}
+
+	if err := matcher.SaveRules(modulesRulesPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("Removed module: %s\n", name)
+	return nil
+}
+
+// contains checks if a string slice contains a value
+func contains(slice []string, val string) bool {
+	for _, s := range slice {
+		if s == val {
+			return true
+		}
+	}
+	return false
 }

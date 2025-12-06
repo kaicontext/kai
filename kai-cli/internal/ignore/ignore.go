@@ -180,14 +180,262 @@ func (m *Matcher) MatchPath(path string) bool {
 // LoadDefaults loads default ignore patterns (common directories to skip).
 func (m *Matcher) LoadDefaults() {
 	defaults := []string{
-		"node_modules/",
+		// ------------------------------
+		// Version control
+		// ------------------------------
 		".git/",
 		".kai/",
 		".ivcs/",
-		"dist/",
-		"build/",
+		".svn/",
+		".hg/",
+
+		// ------------------------------
+		// Universal junk / OS files
+		// ------------------------------
 		".DS_Store",
+		"Thumbs.db",
+		"ehthumbs.db",
+		"Icon?",
+		"Desktop.ini",
+		"*.tmp",
+		"*.temp",
+		"*.swp",
+		"*.swo",
+		"*.bak",
+		"*.orig",
+		"*.lock",
 		"*.log",
+		"*.cache",
+		"*.pid",
+		"*.seed",
+		"*.retry",
+		"*.out",
+		"*.err",
+
+		// ------------------------------
+		// Node / JS / TS
+		// ------------------------------
+		"node_modules/",
+		"npm-debug.log*",
+		"yarn-debug.log*",
+		"yarn-error.log*",
+		"pnpm-debug.log*",
+		"lerna-debug.log*",
+		"jspm_packages/",
+		".bower-cache/",
+		".bower-registry/",
+		".bower-tmp/",
+		"dist/",
+		"dist-ssr/",
+		"build/",
+		"out/",
+		".out/",
+		".next/",
+		".nuxt/",
+		".svelte-kit/",
+		".storybook/",
+		"storybook-static/",
+		"coverage/",
+		".vscode-test/",
+		".eslintcache",
+		".stylelintcache",
+		"parcel-cache/",
+		".next-cache/",
+		".vercel/",
+		".netlify/",
+		".snowpack/",
+		"vendor/bundle/",
+		"temp/",
+		"tmp/",
+
+		// Turbo / Nx
+		".turbo/",
+		".nx/",
+
+		// Vitest / Jest outputs
+		".vitest/",
+		".jest/",
+
+		// ------------------------------
+		// Python
+		// ------------------------------
+		"__pycache__/",
+		"*.py[cod]",
+		"*.so",
+		"*.pyd",
+		"*.pyo",
+		"*.pdb",
+		"*.egg",
+		"*.egg-info/",
+		".eggs/",
+		"env/",
+		"venv/",
+		".venv/",
+		"pip-wheel-metadata/",
+		"pip-cache/",
+		"pytest_cache/",
+		".pytest_cache/",
+		".mypy_cache/",
+		".dmypy.json",
+		"ruff_cache/",
+		".ruff_cache/",
+		".tox/",
+		".nox/",
+		"site-packages/",
+
+		// ------------------------------
+		// Go
+		// ------------------------------
+		"bin/",
+		"pkg/",
+		"*.test",
+		"*.prof",
+		"*.cover",
+		".go-cache/",
+		"go.work.sum",
+
+		// ------------------------------
+		// Rust / Cargo
+		// ------------------------------
+		"target/",
+		"cargo-cache/",
+		".cargo/",
+		"rustfmt-backup/",
+
+		// ------------------------------
+		// Java / Kotlin / Scala
+		// ------------------------------
+		"*.class",
+		"*.jar",
+		"*.war",
+		"*.ear",
+		"*.iml",
+		"*.iws",
+		"*.ipr",
+		".gradle/",
+		"dependency-reduced-pom.xml",
+		".mvn/",
+		"jars/",
+
+		// ------------------------------
+		// C / C++
+		// ------------------------------
+		"*.o",
+		"*.a",
+		"*.dll",
+		"*.exe",
+		"*.dSYM/",
+		"*.obj",
+		"*.pch",
+		"*.manifest",
+		"Build/",
+		"build*/",
+		"cmake-build*/",
+		".coverage/",
+
+		// ------------------------------
+		// Swift / iOS / Xcode
+		// ------------------------------
+		"DerivedData/",
+		"*.xcworkspace/",
+		"*.xcodeproj/",
+		"*.xcuserstate",
+		"*.xcuserdata/",
+		"*.swiftpm/",
+
+		// ------------------------------
+		// Android
+		// ------------------------------
+		"captures/",
+		"outputs/",
+		"*.apk",
+		"*.aar",
+
+		// ------------------------------
+		// PHP / Composer
+		// ------------------------------
+		"vendor/",
+		"composer.lock",
+		"composer.phar",
+
+		// ------------------------------
+		// Ruby / Rails
+		// ------------------------------
+		".bundle/",
+		"log/",
+		".sass-cache/",
+		".ruby-version",
+		".ruby-gemset",
+
+		// ------------------------------
+		// Haskell
+		// ------------------------------
+		"dist-newstyle/",
+		".stack-work/",
+
+		// ------------------------------
+		// Terraform / Infra / Cloud
+		// ------------------------------
+		".terraform/",
+		".terraform.lock.hcl",
+		"*.tfstate",
+		"*.tfstate.backup",
+		"tfplan*",
+		"cdk.out/",
+		".sam-cache/",
+		".aws-sam/",
+		"serverless/.serverless/",
+		"serverless/outputs/",
+		"pulumi.log",
+		".pulumi/",
+
+		// ------------------------------
+		// Docker / containers
+		// ------------------------------
+		".docker/",
+		"docker-data/",
+		"docker-compose.override.yml",
+
+		// ------------------------------
+		// VSCode / JetBrains / Editors
+		// ------------------------------
+		".vscode/",
+		".idea/",
+		"*.sublime-workspace",
+
+		// ------------------------------
+		// Framework-specific
+		// ------------------------------
+		".angular/",
+		".public/",
+		".cache/",
+		".build/",
+		".astro/",
+
+		// ------------------------------
+		// Misc runtime
+		// ------------------------------
+		"logs/",
+		"cache/",
+		"*.sqlite-journal",
+		"*.db-shm",
+		"*.db-wal",
+		"*.sqlite*",
+		"*~backup*",
+		"debug/",
+		"data/",
+		"dump/",
+
+		// ------------------------------
+		// Lock files (large, not useful for analysis)
+		// ------------------------------
+		"package-lock.json",
+		"yarn.lock",
+		"pnpm-lock.yaml",
+		"Pipfile.lock",
+		"poetry.lock",
+		"Cargo.lock",
+		"go.sum",
 	}
 	m.AddPatterns(defaults)
 }

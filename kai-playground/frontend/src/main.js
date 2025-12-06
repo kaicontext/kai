@@ -429,11 +429,16 @@ function showTutorialStep() {
         });
     }
 
-    // Update navigation
-    document.getElementById('step-indicator').textContent =
-        `Step ${currentStep + 1} of ${currentTutorial.steps.length}`;
-    document.getElementById('prev-step').disabled = currentStep === 0;
-    document.getElementById('next-step').disabled = currentStep === currentTutorial.steps.length - 1;
+    // Update navigation (both top and bottom)
+    document.querySelectorAll('.step-indicator').forEach(el => {
+        el.textContent = `Step ${currentStep + 1} of ${currentTutorial.steps.length}`;
+    });
+    document.querySelectorAll('.prev-step').forEach(el => {
+        el.disabled = currentStep === 0;
+    });
+    document.querySelectorAll('.next-step').forEach(el => {
+        el.disabled = currentStep === currentTutorial.steps.length - 1;
+    });
 }
 
 // Helper to escape HTML
@@ -476,19 +481,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    // Step navigation
-    document.getElementById('prev-step').addEventListener('click', () => {
-        if (currentStep > 0) {
-            currentStep--;
-            showTutorialStep();
-        }
+    // Step navigation (both top and bottom)
+    document.querySelectorAll('.prev-step').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (currentStep > 0) {
+                currentStep--;
+                showTutorialStep();
+            }
+        });
     });
 
-    document.getElementById('next-step').addEventListener('click', () => {
-        if (currentTutorial && currentStep < currentTutorial.steps.length - 1) {
-            currentStep++;
-            showTutorialStep();
-        }
+    document.querySelectorAll('.next-step').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (currentTutorial && currentStep < currentTutorial.steps.length - 1) {
+                currentStep++;
+                showTutorialStep();
+            }
+        });
     });
 
     // Clear terminal

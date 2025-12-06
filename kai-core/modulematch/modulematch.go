@@ -100,3 +100,75 @@ func (m *Matcher) GetModulePayload(name string) map[string]interface{} {
 	}
 	return nil
 }
+
+// GetModule returns a module by name.
+func (m *Matcher) GetModule(name string) *ModuleRule {
+	for i := range m.modules {
+		if m.modules[i].Name == name {
+			return &m.modules[i]
+		}
+	}
+	return nil
+}
+
+// AddModule adds or updates a module.
+func (m *Matcher) AddModule(name string, paths []string) {
+	for i := range m.modules {
+		if m.modules[i].Name == name {
+			m.modules[i].Paths = paths
+			return
+		}
+	}
+	m.modules = append(m.modules, ModuleRule{Name: name, Paths: paths})
+}
+
+// RemoveModule removes a module by name.
+func (m *Matcher) RemoveModule(name string) bool {
+	for i := range m.modules {
+		if m.modules[i].Name == name {
+			m.modules = append(m.modules[:i], m.modules[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// SaveRules saves module rules to a YAML file.
+func (m *Matcher) SaveRules(path string) error {
+	config := ModulesConfig{Modules: m.modules}
+	data, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("marshaling modules: %w", err)
+	}
+
+	// Ensure directory exists
+	dir := path[:len(path)-len("/modules.yaml")]
+	if dir != path {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("creating directory: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("writing modules file: %w", err)
+	}
+	return nil
+}
+
+// LoadRulesOrEmpty loads rules from file, or returns empty matcher if file doesn't exist.
+func LoadRulesOrEmpty(path string) (*Matcher, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Matcher{modules: []ModuleRule{}}, nil
+		}
+		return nil, fmt.Errorf("reading modules file: %w", err)
+	}
+
+	var config ModulesConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parsing modules file: %w", err)
+	}
+
+	return &Matcher{modules: config.Modules}, nil
+}
