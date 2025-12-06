@@ -23,6 +23,7 @@ import (
 	"kai/internal/graph"
 	"kai/internal/intent"
 	"kai/internal/module"
+	"kai/internal/parse"
 	"kai/internal/ref"
 	"kai/internal/remote"
 	"kai/internal/review"
@@ -33,11 +34,12 @@ import (
 )
 
 const (
-	kaiDir      = ".kai"
-	dbFile      = "db.sqlite"
-	objectsDir  = "objects"
-	schemaDir   = "schema"
-	modulesFile = "kai.modules.yaml"
+	kaiDir        = ".kai"
+	dbFile        = "db.sqlite"
+	objectsDir    = "objects"
+	schemaDir     = "schema"
+	modulesFile   = "kai.modules.yaml"
+	workspaceFile = "workspace" // stores current workspace name
 )
 
 // Version is the current kai CLI version
@@ -61,10 +63,40 @@ var snapshotCmd = &cobra.Command{
 	Short: "Create a snapshot from a Git ref or directory",
 	Long: `Create a snapshot from a Git ref or directory.
 
-Examples:
-  kai snapshot main --repo .     # Snapshot from Git ref
-  kai snapshot --dir ./src       # Snapshot from directory (no Git required)`,
+Git Snapshot (explicit Git ref):
+  kai snapshot main --repo .        # Snapshot from Git commit
+  kai snapshot feature/login        # Snapshot from branch
+  kai snapshot abc123def            # Snapshot from commit hash
+
+Directory Snapshot (no Git):
+  kai snapshot --dir .              # Snapshot current directory
+  kai snapshot --dir ./src          # Snapshot specific path
+
+For a quick directory snapshot, use 'kai snap' instead.`,
 	RunE: runSnapshot,
+}
+
+var snapCmd = &cobra.Command{
+	Use:   "snap [path]",
+	Short: "Quick directory snapshot (no Git)",
+	Long: `Create a snapshot from a directory, ignoring Git entirely.
+
+This is the recommended shortcut for the common case of snapshotting
+your current working directory.
+
+Examples:
+  kai snap                # Snapshot current directory
+  kai snap src/           # Snapshot specific path
+  kai snap ./build        # Snapshot build output
+
+Equivalent to 'kai snapshot --dir <path>'.
+
+This command:
+  - Never reads Git
+  - Includes uncommitted changes
+  - Works without a Git repository
+  - Is ideal for workspaces, CI, and local development`,
+	RunE: runSnap,
 }
 
 var analyzeCmd = &cobra.Command{
@@ -78,6 +110,128 @@ var analyzeSymbolsCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAnalyzeSymbols,
 }
+
+var analyzeCallsCmd = &cobra.Command{
+	Use:   "calls <snapshot-id>",
+	Short: "Extract function calls and imports from a snapshot (JS/TS)",
+	Long: `Analyzes JavaScript and TypeScript files to build a call graph.
+
+Creates the following relationships:
+  - File --IMPORTS--> File (import dependencies)
+  - File --CALLS--> File (function call relationships)
+  - File --TESTS--> File (test file to source file mapping)
+
+This enables features like:
+  - Finding all callers of a function
+  - Determining which tests cover a file
+  - Running only affected tests after changes`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAnalyzeCalls,
+}
+
+var analyzeDepsCmd = &cobra.Command{
+	Use:   "deps <snapshot-id>",
+	Short: "Build the import/dependency graph for a snapshot (alias for 'calls')",
+	Long: `Analyzes JavaScript and TypeScript files to build the import dependency graph.
+
+This is an alias for 'kai analyze calls'. It creates the following relationships:
+  - File --IMPORTS--> File (import dependencies)
+  - File --CALLS--> File (function call relationships)
+  - File --TESTS--> File (test file to source file mapping)
+
+Use this to enable selective CI testing based on which files changed.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAnalyzeCalls,
+}
+
+var testCmd = &cobra.Command{
+	Use:   "test",
+	Short: "Test-related commands",
+}
+
+var testAffectedCmd = &cobra.Command{
+	Use:   "affected <base-snap> <head-snap>",
+	Short: "List test files affected by changes between two snapshots",
+	Long: `Analyzes the call graph to find test files that should be run based on changes.
+
+Compares two snapshots and identifies which test files are affected by the changes.
+This command requires running 'kai analyze calls' first to build the call graph.
+
+Example:
+  # Find affected tests between two snapshots
+  kai test affected @snap:prev @snap:last
+
+  # Using explicit snapshot IDs
+  kai test affected abc123 def456`,
+	Args: cobra.ExactArgs(2),
+	RunE: runTestAffected,
+}
+
+// CI commands - runner-agnostic selective CI
+var ciCmd = &cobra.Command{
+	Use:   "ci",
+	Short: "CI/CD commands for selective test/build execution",
+	Long: `Runner-agnostic CI commands that produce deterministic plans.
+
+Kai CI computes what targets (tests, builds, etc.) are affected by changes,
+outputting a neutral JSON plan that any CI system can consume.
+
+The CLI never runs tests or builds - it just determines what to run.`,
+}
+
+var ciPlanCmd = &cobra.Command{
+	Use:   "plan <changeset|selector>",
+	Short: "Compute a selection plan for affected targets",
+	Long: `Analyzes changes and computes which targets should run.
+
+Produces a deterministic JSON plan listing affected paths/globs that
+any CI system can consume. The CLI is tool-neutral - it never runs
+tests or builds directly.
+
+Strategies:
+  symbols   - Use symbol-level dependency graph (most precise)
+  imports   - Use file-level import graph
+  coverage  - Use learned test↔file mappings
+  auto      - Try symbols → imports → coverage (default)
+
+Risk policies:
+  expand    - Widen selection when uncertain (safe default)
+  warn      - Keep minimal plan but mark risk higher
+  fail      - Exit non-zero on uncertainty
+
+Examples:
+  kai ci plan @cs:last --out plan.json
+  kai ci plan @cs:last --strategy=imports --risk-policy=expand
+  kai ci plan @ws:feature/auth --out plan.json --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCIPlan,
+}
+
+var ciPrintCmd = &cobra.Command{
+	Use:   "print",
+	Short: "Print a selection plan for humans or CI logs",
+	Long: `Displays the contents of a plan file in a human-readable format.
+
+Use --section to show specific parts:
+  targets   - What to run/skip
+  impact    - What changed
+  summary   - Overview (default)
+
+Examples:
+  kai ci print --plan plan.json
+  kai ci print --plan plan.json --section targets
+  kai ci print --plan plan.json --json`,
+	RunE: runCIPrint,
+}
+
+// CI command flags
+var (
+	ciStrategy   string
+	ciRiskPolicy string
+	ciOutFile    string
+	ciPlanFile   string
+	ciSection    string
+)
 
 var changesetCmd = &cobra.Command{
 	Use:   "changeset",
@@ -127,6 +281,20 @@ var listChangesetsCmd = &cobra.Command{
 	RunE:  runListChangesets,
 }
 
+var listSymbolsCmd = &cobra.Command{
+	Use:   "symbols <snapshot-id>",
+	Short: "List symbols extracted from a snapshot",
+	Long: `List all symbols (functions, classes, methods, etc.) extracted from a snapshot.
+
+Symbols are extracted by 'kai analyze symbols'. This command shows what was found,
+grouped by file.
+
+Example:
+  kai list symbols @snap:last`,
+	Args: cobra.ExactArgs(1),
+	RunE: runListSymbols,
+}
+
 var logCmd = &cobra.Command{
 	Use:   "log",
 	Short: "Show chronological log of snapshots and changesets",
@@ -161,9 +329,21 @@ var wsCmd = &cobra.Command{
 }
 
 var wsCreateCmd = &cobra.Command{
-	Use:   "create",
+	Use:   "create [name]",
 	Short: "Create a new workspace",
-	RunE:  runWsCreate,
+	Long: `Create a new workspace for parallel development.
+
+If --base is not provided, Kai automatically snapshots the current directory
+and uses that as the base. This is the recommended workflow.
+
+Examples:
+  kai ws create feat/demo              # Auto-snapshot current dir as base
+  kai ws create --name feat/demo       # Same, using --name flag
+  kai ws create feat/demo --base @snap:last  # Explicit base snapshot
+
+The workspace name can be provided as a positional argument or via --name.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runWsCreate,
 }
 
 var wsListCmd = &cobra.Command{
@@ -173,9 +353,24 @@ var wsListCmd = &cobra.Command{
 }
 
 var wsStageCmd = &cobra.Command{
-	Use:   "stage",
+	Use:   "stage [workspace]",
 	Short: "Stage changes into a workspace",
-	RunE:  runWsStage,
+	Long: `Stage changes from the current directory into a workspace.
+
+The workspace can be specified as:
+  1. Positional argument: kai ws stage feat/demo
+  2. Flag: kai ws stage --ws feat/demo
+  3. Implicit (if checked out): kai ws stage
+
+If no workspace is specified and you're checked out on a workspace,
+that workspace is used automatically.
+
+Examples:
+  kai ws stage feat/demo     # Stage into feat/demo
+  kai ws stage               # Stage into current workspace (if checked out)
+  kai ws stage --ws feat/demo --dir src/  # Stage specific directory`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runWsStage,
 }
 
 var wsLogCmd = &cobra.Command{
@@ -218,17 +413,28 @@ Examples:
 }
 
 var wsCheckoutCmd = &cobra.Command{
-	Use:   "checkout",
-	Short: "Checkout workspace head snapshot to filesystem",
-	Long: `Restore the filesystem to match the workspace's head snapshot.
+	Use:   "checkout [workspace]",
+	Short: "Checkout workspace and set as current",
+	Long: `Checkout a workspace's head snapshot and set it as the current workspace.
 
-This writes files from the workspace's current state to a directory.
+This writes files from the workspace's current state to a directory and
+sets .kai/workspace so subsequent commands use this workspace by default.
 
 Examples:
-  kai ws checkout --ws feature/auth                # Checkout to current directory
-  kai ws checkout --ws feature/auth --dir ./src   # Checkout to specific directory
-  kai ws checkout --ws feature/auth --clean       # Remove files not in snapshot`,
+  kai ws checkout feat/demo              # Checkout and set as current
+  kai ws checkout feat/demo --dir ./src  # Checkout to specific directory
+  kai ws checkout feat/demo --clean      # Remove files not in snapshot`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runWsCheckout,
+}
+
+var wsCurrentCmd = &cobra.Command{
+	Use:   "current",
+	Short: "Show current workspace",
+	Long: `Show the currently checked-out workspace.
+
+This reads from .kai/workspace which is set by 'kai ws checkout'.`,
+	RunE: runWsCurrent,
 }
 
 var integrateCmd = &cobra.Command{
@@ -649,6 +855,7 @@ var (
 	reviewExportMD    bool
 	reviewExportHTML  bool
 	reviewJSON        bool
+	reviewViewMode    string
 
 	statusDir      string
 	statusAgainst  string
@@ -731,16 +938,13 @@ func init() {
 	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Output diff as JSON (implies --semantic)")
 
 	// Workspace command flags
-	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (required)")
-	wsCreateCmd.Flags().StringVar(&wsBase, "base", "", "Base snapshot ID (required)")
+	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (or pass as positional arg)")
+	wsCreateCmd.Flags().StringVar(&wsBase, "base", "", "Base snapshot (default: auto-snapshot current dir)")
 	wsCreateCmd.Flags().StringVar(&wsDescription, "desc", "", "Workspace description")
-	wsCreateCmd.MarkFlagRequired("name")
-	wsCreateCmd.MarkFlagRequired("base")
 
-	wsStageCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
+	wsStageCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name (or pass as positional arg)")
 	wsStageCmd.Flags().StringVar(&wsDir, "dir", ".", "Directory to stage from")
 	wsStageCmd.Flags().StringVarP(&wsStageMessage, "message", "m", "", "Message describing the staged changes")
-	wsStageCmd.MarkFlagRequired("ws")
 
 	wsLogCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	wsLogCmd.MarkFlagRequired("ws")
@@ -759,10 +963,9 @@ func init() {
 	wsDeleteCmd.Flags().BoolVar(&wsDeleteDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
 	wsDeleteCmd.MarkFlagRequired("ws")
 
-	wsCheckoutCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
+	wsCheckoutCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name (or pass as positional arg)")
 	wsCheckoutCmd.Flags().StringVar(&wsDir, "dir", ".", "Target directory to write files to")
 	wsCheckoutCmd.Flags().BoolVar(&wsCheckoutClean, "clean", false, "Delete files not in snapshot")
-	wsCheckoutCmd.MarkFlagRequired("ws")
 
 	integrateCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	integrateCmd.Flags().StringVar(&wsTarget, "into", "", "Target snapshot ID (required)")
@@ -811,6 +1014,7 @@ func init() {
 	reviewOpenCmd.MarkFlagRequired("title")
 
 	reviewViewCmd.Flags().BoolVar(&reviewJSON, "json", false, "Output as JSON")
+	reviewViewCmd.Flags().StringVar(&reviewViewMode, "view", "semantic", "View mode: semantic, text, or mixed")
 
 	reviewCloseCmd.Flags().StringVar(&reviewCloseState, "state", "", "Close state: merged or abandoned (required)")
 	reviewCloseCmd.MarkFlagRequired("state")
@@ -836,6 +1040,8 @@ func init() {
 
 	// Set up dynamic completions for commands that accept IDs
 	analyzeSymbolsCmd.ValidArgsFunction = completeSnapshotID
+	analyzeCallsCmd.ValidArgsFunction = completeSnapshotID
+	listSymbolsCmd.ValidArgsFunction = completeSnapshotID
 	changesetCreateCmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// Both args are snapshot IDs
 		return completeSnapshotID(cmd, args, toComplete)
@@ -855,16 +1061,34 @@ func init() {
 	wsCmd.AddCommand(wsCloseCmd)
 	wsCmd.AddCommand(wsDeleteCmd)
 	wsCmd.AddCommand(wsCheckoutCmd)
+	wsCmd.AddCommand(wsCurrentCmd)
 
 	analyzeCmd.AddCommand(analyzeSymbolsCmd)
+	analyzeCmd.AddCommand(analyzeCallsCmd)
+	analyzeCmd.AddCommand(analyzeDepsCmd)
 	changesetCmd.AddCommand(changesetCreateCmd)
 	intentCmd.AddCommand(intentRenderCmd)
 	listCmd.AddCommand(listSnapshotsCmd)
 	listCmd.AddCommand(listChangesetsCmd)
+	listCmd.AddCommand(listSymbolsCmd)
+
+	testCmd.AddCommand(testAffectedCmd)
+
+	// CI commands
+	ciCmd.AddCommand(ciPlanCmd)
+	ciCmd.AddCommand(ciPrintCmd)
+	ciPlanCmd.Flags().StringVar(&ciStrategy, "strategy", "auto", "Selection strategy: auto, symbols, imports, coverage")
+	ciPlanCmd.Flags().StringVar(&ciRiskPolicy, "risk-policy", "expand", "Risk policy: expand, warn, fail")
+	ciPlanCmd.Flags().StringVar(&ciOutFile, "out", "", "Output file for plan JSON")
+	ciPrintCmd.Flags().StringVar(&ciPlanFile, "plan", "plan.json", "Path to plan file")
+	ciPrintCmd.Flags().StringVar(&ciSection, "section", "summary", "Section to display: targets, impact, summary")
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(snapshotCmd)
+	rootCmd.AddCommand(snapCmd)
 	rootCmd.AddCommand(analyzeCmd)
+	rootCmd.AddCommand(testCmd)
+	rootCmd.AddCommand(ciCmd)
 	rootCmd.AddCommand(changesetCmd)
 	rootCmd.AddCommand(intentCmd)
 	rootCmd.AddCommand(dumpCmd)
@@ -1225,6 +1449,84 @@ CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
 	return nil
 }
 
+func runSnap(cmd *cobra.Command, args []string) error {
+	// Set dirPath from argument or default to current directory
+	if len(args) > 0 {
+		dirPath = args[0]
+	} else {
+		dirPath = "."
+	}
+	// Delegate to runSnapshot which handles dirPath mode
+	return runSnapshot(cmd, args)
+}
+
+// createSnapshotFromDir creates a snapshot from the given directory and returns its ID.
+// This is a helper used by commands that need to auto-snapshot (e.g., ws create).
+func createSnapshotFromDir(db *graph.DB, dir string) ([]byte, error) {
+	fmt.Print("Loading module configuration... ")
+	matcher, err := loadMatcher()
+	if err != nil {
+		fmt.Println("failed")
+		return nil, err
+	}
+	fmt.Printf("found %d modules\n", len(matcher.GetAllModules()))
+
+	fmt.Printf("Scanning directory: %s\n", dir)
+	source, err := dirio.OpenDirectory(dir)
+	if err != nil {
+		return nil, fmt.Errorf("opening directory: %w", err)
+	}
+
+	fmt.Print("Reading files... ")
+	files, err := source.GetFiles()
+	if err != nil {
+		fmt.Println("failed")
+		return nil, fmt.Errorf("getting files: %w", err)
+	}
+	fmt.Printf("found %d files\n", len(files))
+
+	fmt.Print("Creating snapshot... ")
+	creator := snapshot.NewCreator(db, matcher)
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		fmt.Println("failed")
+		return nil, fmt.Errorf("creating snapshot: %w", err)
+	}
+	fmt.Println("done")
+
+	// Auto-analyze symbols
+	fmt.Printf("Analyzing symbols... ")
+	progress := func(current, total int, filename string) {
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rAnalyzing symbols... %d/%d %s", current, total, display)
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
+		fmt.Println(" failed")
+		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed: %v\n", err)
+	} else {
+		fmt.Print("\rAnalyzing symbols... done")
+		fmt.Print("\033[K")
+		fmt.Println()
+	}
+
+	// Update auto-refs
+	fmt.Print("Updating refs... ")
+	autoRefMgr := ref.NewAutoRefManager(db)
+	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+		fmt.Println("failed")
+		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
+	} else {
+		fmt.Println("done")
+	}
+
+	fmt.Printf("Created snapshot: %s\n", util.BytesToHex(snapshotID))
+	return snapshotID, nil
+}
+
 func runSnapshot(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -1364,6 +1666,621 @@ func runAnalyzeSymbols(cmd *cobra.Command, args []string) error {
 	fmt.Print("\033[K")
 	fmt.Println()
 	return nil
+}
+
+func runAnalyzeCalls(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	snapshotID, err := resolveSnapshotID(db, args[0])
+	if err != nil {
+		return fmt.Errorf("resolving snapshot ID: %w", err)
+	}
+
+	matcher, err := loadMatcher()
+	if err != nil {
+		return err
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+	fmt.Printf("Analyzing calls... ")
+	progress := func(current, total int, filename string) {
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rAnalyzing calls... %d/%d %s", current, total, display)
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeCalls(snapshotID, progress); err != nil {
+		return fmt.Errorf("analyzing calls: %w", err)
+	}
+
+	fmt.Print("\rAnalyzing calls... done")
+	fmt.Print("\033[K")
+	fmt.Println()
+	return nil
+}
+
+func runTestAffected(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	matcher, err := loadMatcher()
+	if err != nil {
+		return err
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+
+	// Resolve both snapshot IDs
+	baseSnapshotID, err := resolveSnapshotID(db, args[0])
+	if err != nil {
+		return fmt.Errorf("resolving base snapshot ID: %w", err)
+	}
+
+	headSnapshotID, err := resolveSnapshotID(db, args[1])
+	if err != nil {
+		return fmt.Errorf("resolving head snapshot ID: %w", err)
+	}
+
+	// Get files that changed
+	changedFiles, err := getChangedFiles(db, creator, baseSnapshotID, headSnapshotID)
+	if err != nil {
+		return fmt.Errorf("getting changed files: %w", err)
+	}
+
+	if len(changedFiles) == 0 {
+		fmt.Println("No changed files found")
+		return nil
+	}
+
+	// Build a set of changed file paths
+	changedPaths := make(map[string]bool)
+	for _, f := range changedFiles {
+		changedPaths[f] = true
+	}
+
+	// Get all files in the snapshot to build the graph context
+	files, err := creator.GetSnapshotFiles(headSnapshotID)
+	if err != nil {
+		return fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	// Build file ID -> path map
+	filePathByID := make(map[string]string)
+	fileIDByPath := make(map[string][]byte)
+	for _, f := range files {
+		path, _ := f.Payload["path"].(string)
+		idHex := util.BytesToHex(f.ID)
+		filePathByID[idHex] = path
+		fileIDByPath[path] = f.ID
+	}
+
+	// Find all files that depend on the changed files (reverse call graph)
+	// and all test files that test the changed files
+	affectedTests := make(map[string]bool)
+
+	// First: direct test files for changed files
+	for changedPath := range changedPaths {
+		changedID, ok := fileIDByPath[changedPath]
+		if !ok {
+			continue
+		}
+
+		// Find TESTS edges pointing to this file
+		// Query: File --TESTS--> changedFile
+		// We need reverse lookup, so get all edges where dst=changedID
+		testsEdges, err := db.GetEdgesTo(changedID, graph.EdgeTests)
+		if err != nil {
+			continue
+		}
+		for _, e := range testsEdges {
+			srcHex := util.BytesToHex(e.Src)
+			if path, ok := filePathByID[srcHex]; ok {
+				affectedTests[path] = true
+			}
+		}
+
+		// Also find files that import/call into the changed file
+		importsEdges, err := db.GetEdgesTo(changedID, graph.EdgeImports)
+		if err != nil {
+			continue
+		}
+		for _, e := range importsEdges {
+			srcHex := util.BytesToHex(e.Src)
+			if path, ok := filePathByID[srcHex]; ok {
+				// If this importer is a test file, add it
+				if parse.IsTestFile(path) {
+					affectedTests[path] = true
+				}
+			}
+		}
+
+		callsEdges, err := db.GetEdgesTo(changedID, graph.EdgeCalls)
+		if err != nil {
+			continue
+		}
+		for _, e := range callsEdges {
+			srcHex := util.BytesToHex(e.Src)
+			if path, ok := filePathByID[srcHex]; ok {
+				if parse.IsTestFile(path) {
+					affectedTests[path] = true
+				}
+			}
+		}
+	}
+
+	// Output results
+	if len(affectedTests) == 0 {
+		fmt.Println("No affected test files found")
+		fmt.Println("(Make sure you've run 'kai analyze calls @snap:last' to build the call graph)")
+		return nil
+	}
+
+	// Sort for consistent output
+	var tests []string
+	for t := range affectedTests {
+		tests = append(tests, t)
+	}
+	sort.Strings(tests)
+
+	fmt.Printf("Affected test files (%d):\n", len(tests))
+	for _, t := range tests {
+		fmt.Println(t)
+	}
+
+	return nil
+}
+
+// CIPlan represents a runner-agnostic selection plan
+type CIPlan struct {
+	Version int        `json:"version"`
+	Mode    string     `json:"mode"`
+	Risk    string     `json:"risk"`
+	Targets CITargets  `json:"targets"`
+	Impact  CIImpact   `json:"impact"`
+	Policy  CIPolicy   `json:"policy"`
+}
+
+type CITargets struct {
+	Run  []string          `json:"run"`
+	Skip []string          `json:"skip"`
+	Tags map[string][]string `json:"tags,omitempty"`
+}
+
+type CIImpact struct {
+	FilesChanged    []string           `json:"filesChanged"`
+	SymbolsChanged  []CISymbolChange   `json:"symbolsChanged,omitempty"`
+	ModulesAffected []string           `json:"modulesAffected,omitempty"`
+	Uncertainty     []string           `json:"uncertainty,omitempty"`
+}
+
+type CISymbolChange struct {
+	FQ     string `json:"fq"`
+	Change string `json:"change"`
+}
+
+type CIPolicy struct {
+	Strategy     string `json:"strategy"`
+	Expanded     bool   `json:"expanded"`
+	FallbackUsed string `json:"fallbackUsed,omitempty"`
+}
+
+func runCIPlan(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	matcher, err := loadMatcher()
+	if err != nil {
+		return err
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+
+	// Resolve the selector - could be changeset, workspace, or snapshot pair
+	selector := args[0]
+
+	var baseSnapshotID, headSnapshotID []byte
+	var changedFiles []string
+
+	// Try to resolve as changeset first
+	if strings.HasPrefix(selector, "@cs:") {
+		csID, err := resolveChangeSetID(db, selector)
+		if err != nil {
+			return fmt.Errorf("resolving changeset: %w", err)
+		}
+
+		// Get the changeset's base and head snapshots
+		cs, err := db.GetNode(csID)
+		if err != nil {
+			return fmt.Errorf("getting changeset: %w", err)
+		}
+
+		// Get base and head from changeset edges
+		baseEdges, _ := db.GetEdges(csID, graph.EdgeBasedOn)
+		if len(baseEdges) > 0 {
+			baseSnapshotID = baseEdges[0].Dst
+		}
+
+		headEdges, _ := db.GetEdges(csID, graph.EdgeHas)
+		if len(headEdges) > 0 {
+			headSnapshotID = headEdges[0].Dst
+		}
+
+		// If no edges, try payload (uses "head" and "base" keys)
+		if headSnapshotID == nil {
+			if headHex, ok := cs.Payload["head"].(string); ok {
+				headSnapshotID, _ = util.HexToBytes(headHex)
+			}
+		}
+		if baseSnapshotID == nil {
+			if baseHex, ok := cs.Payload["base"].(string); ok {
+				baseSnapshotID, _ = util.HexToBytes(baseHex)
+			}
+		}
+	}
+
+	// If we couldn't resolve snapshots from changeset, try workspace
+	if headSnapshotID == nil && strings.HasPrefix(selector, "@ws:") {
+		wsName := strings.TrimPrefix(selector, "@ws:")
+		mgr := workspace.NewManager(db)
+		ws, err := mgr.Get(wsName)
+		if err != nil {
+			return fmt.Errorf("resolving workspace: %w", err)
+		}
+		baseSnapshotID = ws.BaseSnapshot
+		headSnapshotID = ws.HeadSnapshot
+	}
+
+	// Fallback: try as snapshot selector (use with @snap:prev)
+	if headSnapshotID == nil {
+		headSnapshotID, err = resolveSnapshotID(db, selector)
+		if err != nil {
+			return fmt.Errorf("could not resolve selector '%s' as changeset, workspace, or snapshot", selector)
+		}
+		// Try to get previous snapshot as base
+		baseSnapshotID, _ = resolveSnapshotID(db, "@snap:prev")
+	}
+
+	if headSnapshotID == nil {
+		return fmt.Errorf("could not determine head snapshot from selector")
+	}
+
+	// Get changed files
+	changedFiles, err = getChangedFiles(db, creator, baseSnapshotID, headSnapshotID)
+	if err != nil {
+		return fmt.Errorf("getting changed files: %w", err)
+	}
+
+	// Build the plan
+	plan := CIPlan{
+		Version: 1,
+		Mode:    "selective",
+		Risk:    "low",
+		Targets: CITargets{
+			Run:  []string{},
+			Skip: []string{},
+			Tags: make(map[string][]string),
+		},
+		Impact: CIImpact{
+			FilesChanged:    changedFiles,
+			SymbolsChanged:  []CISymbolChange{},
+			ModulesAffected: []string{},
+			Uncertainty:     []string{},
+		},
+		Policy: CIPolicy{
+			Strategy:     ciStrategy,
+			Expanded:     false,
+			FallbackUsed: "",
+		},
+	}
+
+	// No changes = nothing to do
+	if len(changedFiles) == 0 {
+		plan.Mode = "skip"
+		plan.Risk = "low"
+	} else {
+		// Find affected targets based on strategy
+		affectedTargets := make(map[string]bool)
+		fallbackUsed := ""
+
+		// Get all files in the snapshot for graph context
+		files, err := creator.GetSnapshotFiles(headSnapshotID)
+		if err != nil {
+			return fmt.Errorf("getting snapshot files: %w", err)
+		}
+
+		filePathByID := make(map[string]string)
+		fileIDByPath := make(map[string][]byte)
+		for _, f := range files {
+			path, _ := f.Payload["path"].(string)
+			idHex := util.BytesToHex(f.ID)
+			filePathByID[idHex] = path
+			fileIDByPath[path] = f.ID
+		}
+
+		// Try strategies in order: symbols -> imports -> coverage
+		strategies := []string{ciStrategy}
+		if ciStrategy == "auto" {
+			strategies = []string{"symbols", "imports", "coverage"}
+		}
+
+		for _, strat := range strategies {
+			switch strat {
+			case "symbols":
+				// Try symbol-level analysis
+				// For now, fall through to imports
+				continue
+
+			case "imports":
+				// Use file-level import graph
+				for _, changedPath := range changedFiles {
+					changedID, ok := fileIDByPath[changedPath]
+					if !ok {
+						continue
+					}
+
+					// Find test files that test this file
+					testsEdges, _ := db.GetEdgesTo(changedID, graph.EdgeTests)
+					for _, e := range testsEdges {
+						srcHex := util.BytesToHex(e.Src)
+						if path, ok := filePathByID[srcHex]; ok {
+							affectedTargets[path] = true
+						}
+					}
+
+					// Find files that import this file and are tests
+					importsEdges, _ := db.GetEdgesTo(changedID, graph.EdgeImports)
+					for _, e := range importsEdges {
+						srcHex := util.BytesToHex(e.Src)
+						if path, ok := filePathByID[srcHex]; ok {
+							if parse.IsTestFile(path) {
+								affectedTargets[path] = true
+							}
+						}
+					}
+				}
+
+				if len(affectedTargets) > 0 {
+					fallbackUsed = "imports"
+					break
+				}
+
+			case "coverage":
+				// Would use learned test mappings - not implemented yet
+				continue
+			}
+
+			if len(affectedTargets) > 0 {
+				break
+			}
+		}
+
+		plan.Policy.FallbackUsed = fallbackUsed
+
+		// Convert affected targets to sorted list
+		for t := range affectedTargets {
+			plan.Targets.Run = append(plan.Targets.Run, t)
+		}
+		sort.Strings(plan.Targets.Run)
+
+		// If no targets found but there are changes, we have uncertainty
+		if len(plan.Targets.Run) == 0 && len(changedFiles) > 0 {
+			plan.Risk = "medium"
+			plan.Impact.Uncertainty = append(plan.Impact.Uncertainty,
+				"No test files found for changed files - dependency graph may be incomplete")
+
+			// Apply risk policy
+			switch ciRiskPolicy {
+			case "expand":
+				// Add all test files as targets
+				for _, f := range files {
+					path, _ := f.Payload["path"].(string)
+					if parse.IsTestFile(path) {
+						plan.Targets.Run = append(plan.Targets.Run, path)
+					}
+				}
+				sort.Strings(plan.Targets.Run)
+				plan.Policy.Expanded = true
+				plan.Risk = "low" // Expanded to be safe
+
+			case "warn":
+				plan.Risk = "high"
+
+			case "fail":
+				return fmt.Errorf("uncertainty detected and risk-policy is 'fail': no test mappings found for changed files")
+			}
+		}
+	}
+
+	// Output the plan
+	planJSON, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling plan: %w", err)
+	}
+
+	// Write to file if specified
+	if ciOutFile != "" {
+		if err := os.WriteFile(ciOutFile, planJSON, 0644); err != nil {
+			return fmt.Errorf("writing plan file: %w", err)
+		}
+		fmt.Printf("Plan written to %s\n", ciOutFile)
+	}
+
+	// Also print if --json flag or no output file
+	if jsonFlag || ciOutFile == "" {
+		fmt.Println(string(planJSON))
+	} else {
+		// Print summary
+		fmt.Printf("\nCI Plan Summary:\n")
+		fmt.Printf("  Mode: %s\n", plan.Mode)
+		fmt.Printf("  Risk: %s\n", plan.Risk)
+		fmt.Printf("  Strategy: %s", plan.Policy.Strategy)
+		if plan.Policy.FallbackUsed != "" {
+			fmt.Printf(" (used: %s)", plan.Policy.FallbackUsed)
+		}
+		fmt.Println()
+		fmt.Printf("  Files changed: %d\n", len(plan.Impact.FilesChanged))
+		fmt.Printf("  Targets to run: %d\n", len(plan.Targets.Run))
+		if plan.Policy.Expanded {
+			fmt.Printf("  (Expanded due to uncertainty)\n")
+		}
+	}
+
+	return nil
+}
+
+func runCIPrint(cmd *cobra.Command, args []string) error {
+	// Read plan file
+	data, err := os.ReadFile(ciPlanFile)
+	if err != nil {
+		return fmt.Errorf("reading plan file: %w", err)
+	}
+
+	var plan CIPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return fmt.Errorf("parsing plan file: %w", err)
+	}
+
+	if jsonFlag {
+		// Output as JSON
+		output, _ := json.MarshalIndent(plan, "", "  ")
+		fmt.Println(string(output))
+		return nil
+	}
+
+	switch ciSection {
+	case "targets":
+		fmt.Println("Targets to run:")
+		if len(plan.Targets.Run) == 0 {
+			fmt.Println("  (none)")
+		} else {
+			for _, t := range plan.Targets.Run {
+				fmt.Printf("  %s\n", t)
+			}
+		}
+		if len(plan.Targets.Skip) > 0 {
+			fmt.Println("\nTargets to skip:")
+			for _, t := range plan.Targets.Skip {
+				fmt.Printf("  %s\n", t)
+			}
+		}
+
+	case "impact":
+		fmt.Println("Impact:")
+		fmt.Printf("  Files changed: %d\n", len(plan.Impact.FilesChanged))
+		for _, f := range plan.Impact.FilesChanged {
+			fmt.Printf("    %s\n", f)
+		}
+		if len(plan.Impact.SymbolsChanged) > 0 {
+			fmt.Printf("\n  Symbols changed: %d\n", len(plan.Impact.SymbolsChanged))
+			for _, s := range plan.Impact.SymbolsChanged {
+				fmt.Printf("    %s (%s)\n", s.FQ, s.Change)
+			}
+		}
+		if len(plan.Impact.Uncertainty) > 0 {
+			fmt.Println("\n  Uncertainty:")
+			for _, u := range plan.Impact.Uncertainty {
+				fmt.Printf("    - %s\n", u)
+			}
+		}
+
+	case "summary":
+		fallthrough
+	default:
+		fmt.Println("CI Plan Summary")
+		fmt.Println(strings.Repeat("-", 40))
+		fmt.Printf("Mode:     %s\n", plan.Mode)
+		fmt.Printf("Risk:     %s\n", plan.Risk)
+		fmt.Printf("Strategy: %s\n", plan.Policy.Strategy)
+		if plan.Policy.FallbackUsed != "" {
+			fmt.Printf("Used:     %s\n", plan.Policy.FallbackUsed)
+		}
+		if plan.Policy.Expanded {
+			fmt.Printf("Expanded: yes (widened due to uncertainty)\n")
+		}
+		fmt.Println()
+		fmt.Printf("Changed:  %d files\n", len(plan.Impact.FilesChanged))
+		fmt.Printf("Run:      %d targets\n", len(plan.Targets.Run))
+		fmt.Printf("Skip:     %d targets\n", len(plan.Targets.Skip))
+
+		if len(plan.Impact.Uncertainty) > 0 {
+			fmt.Printf("\nWarnings: %d\n", len(plan.Impact.Uncertainty))
+			for _, u := range plan.Impact.Uncertainty {
+				fmt.Printf("  - %s\n", u)
+			}
+		}
+	}
+
+	return nil
+}
+
+// getChangedFiles returns paths of files that changed between two snapshots.
+func getChangedFiles(db *graph.DB, creator *snapshot.Creator, baseID, headID []byte) ([]string, error) {
+	// Get head files
+	headFiles, err := creator.GetSnapshotFiles(headID)
+	if err != nil {
+		return nil, err
+	}
+
+	headMap := make(map[string]string) // path -> digest
+	for _, f := range headFiles {
+		path, _ := f.Payload["path"].(string)
+		digest, _ := f.Payload["digest"].(string)
+		headMap[path] = digest
+	}
+
+	// If no base, all head files are "changed"
+	if baseID == nil {
+		var paths []string
+		for p := range headMap {
+			paths = append(paths, p)
+		}
+		return paths, nil
+	}
+
+	// Get base files
+	baseFiles, err := creator.GetSnapshotFiles(baseID)
+	if err != nil {
+		return nil, err
+	}
+
+	baseMap := make(map[string]string) // path -> digest
+	for _, f := range baseFiles {
+		path, _ := f.Payload["path"].(string)
+		digest, _ := f.Payload["digest"].(string)
+		baseMap[path] = digest
+	}
+
+	// Find changed files
+	var changed []string
+
+	// New or modified files
+	for path, headDigest := range headMap {
+		baseDigest, exists := baseMap[path]
+		if !exists || baseDigest != headDigest {
+			changed = append(changed, path)
+		}
+	}
+
+	// Deleted files (these could affect tests too)
+	for path := range baseMap {
+		if _, exists := headMap[path]; !exists {
+			changed = append(changed, path)
+		}
+	}
+
+	return changed, nil
 }
 
 func runChangesetCreate(cmd *cobra.Command, args []string) error {
@@ -1650,6 +2567,30 @@ func loadMatcher() (*module.Matcher, error) {
 	return module.LoadRules(modulesFile)
 }
 
+// getCurrentWorkspace reads the current workspace name from .kai/workspace
+func getCurrentWorkspace() (string, error) {
+	path := filepath.Join(kaiDir, workspaceFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // No current workspace
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// setCurrentWorkspace writes the current workspace name to .kai/workspace
+func setCurrentWorkspace(name string) error {
+	path := filepath.Join(kaiDir, workspaceFile)
+	if name == "" {
+		// Clear current workspace
+		os.Remove(path)
+		return nil
+	}
+	return os.WriteFile(path, []byte(name+"\n"), 0644)
+}
+
 func runListSnapshots(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -1725,6 +2666,118 @@ func runListChangesets(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-64s  %s\n", util.BytesToHex(node.ID), intent)
 	}
 
+	return nil
+}
+
+func runListSymbols(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	snapshotID, err := resolveSnapshotID(db, args[0])
+	if err != nil {
+		return fmt.Errorf("resolving snapshot ID: %w", err)
+	}
+
+	// Get all files in the snapshot
+	edges, err := db.GetEdges(snapshotID, graph.EdgeHasFile)
+	if err != nil {
+		return fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	if len(edges) == 0 {
+		fmt.Println("No files in snapshot.")
+		return nil
+	}
+
+	// Build a map of file ID -> path
+	fileIDToPath := make(map[string]string)
+	for _, edge := range edges {
+		node, err := db.GetNode(edge.Dst)
+		if err != nil {
+			continue
+		}
+		if node != nil {
+			if path, ok := node.Payload["path"].(string); ok {
+				fileIDToPath[util.BytesToHex(node.ID)] = path
+			}
+		}
+	}
+
+	// Get symbols for each file, grouped by file path
+	type symbolInfo struct {
+		Kind      string
+		Name      string
+		Signature string
+	}
+	fileSymbols := make(map[string][]symbolInfo)
+	totalSymbols := 0
+
+	matcher, err := loadMatcher()
+	if err != nil {
+		return err
+	}
+	creator := snapshot.NewCreator(db, matcher)
+
+	for _, edge := range edges {
+		symbols, err := creator.GetSymbolsInFile(edge.Dst, snapshotID)
+		if err != nil {
+			continue
+		}
+		if len(symbols) == 0 {
+			continue
+		}
+
+		fileID := util.BytesToHex(edge.Dst)
+		path := fileIDToPath[fileID]
+		if path == "" {
+			path = fileID[:16] + "..."
+		}
+
+		for _, sym := range symbols {
+			kind, _ := sym.Payload["kind"].(string)
+			fqName, _ := sym.Payload["fqName"].(string)
+			signature, _ := sym.Payload["signature"].(string)
+
+			fileSymbols[path] = append(fileSymbols[path], symbolInfo{
+				Kind:      kind,
+				Name:      fqName,
+				Signature: signature,
+			})
+			totalSymbols++
+		}
+	}
+
+	if totalSymbols == 0 {
+		fmt.Println("No symbols found. Run 'kai analyze symbols <snapshot-id>' first.")
+		return nil
+	}
+
+	// Sort file paths for consistent output
+	var paths []string
+	for path := range fileSymbols {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	// Print symbols grouped by file
+	for _, path := range paths {
+		fmt.Printf("\n%s\n", path)
+		for _, sym := range fileSymbols[path] {
+			if sym.Kind == "function" && sym.Signature != "" {
+				// For functions, signature already includes "function" keyword
+				fmt.Printf("  %s\n", sym.Signature)
+			} else if sym.Signature != "" {
+				fmt.Printf("  %s %s\n", sym.Kind, sym.Signature)
+			} else {
+				fmt.Printf("  %s %s\n", sym.Kind, sym.Name)
+			}
+		}
+	}
+
+	fmt.Printf("\n%d symbols in %d files\n", totalSymbols, len(paths))
 	return nil
 }
 
@@ -2184,30 +3237,53 @@ func runDiff(cmd *cobra.Command, args []string) error {
 // Workspace command implementations
 
 func runWsCreate(cmd *cobra.Command, args []string) error {
+	// Get workspace name from positional arg or --name flag
+	name := wsName
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if name == "" {
+		return fmt.Errorf("workspace name required (pass as argument or use --name)")
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	baseID, err := resolveSnapshotID(db, wsBase)
-	if err != nil {
-		return fmt.Errorf("resolving base snapshot: %w", err)
+	var baseID []byte
+
+	if wsBase != "" {
+		// Explicit base snapshot provided
+		baseID, err = resolveSnapshotID(db, wsBase)
+		if err != nil {
+			return fmt.Errorf("resolving base snapshot: %w", err)
+		}
+	} else {
+		// Auto-snapshot current directory
+		fmt.Println("No --base provided, auto-snapshotting current directory...")
+		fmt.Println()
+		baseID, err = createSnapshotFromDir(db, ".")
+		if err != nil {
+			return fmt.Errorf("auto-snapshot failed: %w", err)
+		}
+		fmt.Println()
 	}
 
 	mgr := workspace.NewManager(db)
-	ws, err := mgr.Create(wsName, baseID, wsDescription)
+	ws, err := mgr.Create(name, baseID, wsDescription)
 	if err != nil {
 		return fmt.Errorf("creating workspace: %w", err)
 	}
 
 	// Update auto-refs
 	autoRefMgr := ref.NewAutoRefManager(db)
-	if err := autoRefMgr.OnWorkspaceCreated(wsName, baseID); err != nil {
+	if err := autoRefMgr.OnWorkspaceCreated(name, baseID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
 	}
 
-	fmt.Printf("Created workspace: %s\n", wsName)
+	fmt.Printf("Created workspace: %s\n", name)
 	fmt.Printf("ID: %s\n", util.BytesToHex(ws.ID))
 	fmt.Printf("Base snapshot: %s\n", util.BytesToHex(ws.BaseSnapshot)[:12])
 	return nil
@@ -2250,6 +3326,24 @@ func runWsList(cmd *cobra.Command, args []string) error {
 }
 
 func runWsStage(cmd *cobra.Command, args []string) error {
+	// Resolve workspace name: positional arg > --ws flag > current workspace
+	name := wsName
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if name == "" {
+		// Try current workspace
+		current, err := getCurrentWorkspace()
+		if err != nil {
+			return fmt.Errorf("reading current workspace: %w", err)
+		}
+		if current == "" {
+			return fmt.Errorf("no workspace specified. Use 'kai ws stage <name>' or 'kai ws checkout <name>' first")
+		}
+		name = current
+		fmt.Printf("Using current workspace: %s\n", name)
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -2268,7 +3362,7 @@ func runWsStage(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := workspace.NewManager(db)
-	result, err := mgr.Stage(wsName, source, matcher, wsStageMessage)
+	result, err := mgr.Stage(name, source, matcher, wsStageMessage)
 	if err != nil {
 		return fmt.Errorf("staging changes: %w", err)
 	}
@@ -2288,7 +3382,7 @@ func runWsStage(cmd *cobra.Command, args []string) error {
 
 	// Update auto-refs
 	autoRefMgr := ref.NewAutoRefManager(db)
-	if err := autoRefMgr.OnWorkspaceHeadChanged(wsName, result.HeadSnapshot); err != nil {
+	if err := autoRefMgr.OnWorkspaceHeadChanged(name, result.HeadSnapshot); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
 	}
 	if err := autoRefMgr.OnChangeSetCreated(result.ChangeSetID); err != nil {
@@ -2443,6 +3537,15 @@ func runWsDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runWsCheckout(cmd *cobra.Command, args []string) error {
+	// Get workspace name from positional arg or --ws flag
+	name := wsName
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if name == "" {
+		return fmt.Errorf("workspace name required (pass as argument or use --ws)")
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -2451,12 +3554,12 @@ func runWsCheckout(cmd *cobra.Command, args []string) error {
 
 	// Get the workspace
 	mgr := workspace.NewManager(db)
-	ws, err := mgr.Get(wsName)
+	ws, err := mgr.Get(name)
 	if err != nil {
 		return fmt.Errorf("getting workspace: %w", err)
 	}
 	if ws == nil {
-		return fmt.Errorf("workspace %q not found", wsName)
+		return fmt.Errorf("workspace %q not found", name)
 	}
 
 	// Resolve target directory to absolute path
@@ -2477,6 +3580,11 @@ func runWsCheckout(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checkout failed: %w", err)
 	}
 
+	// Set as current workspace
+	if err := setCurrentWorkspace(name); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to set current workspace: %v\n", err)
+	}
+
 	fmt.Printf("Checkout complete!\n")
 	fmt.Printf("  Workspace: %s\n", ws.Name)
 	fmt.Printf("  Snapshot:  %s\n", util.BytesToHex(ws.HeadSnapshot)[:12])
@@ -2488,7 +3596,22 @@ func runWsCheckout(cmd *cobra.Command, args []string) error {
 	if result.FilesSkipped > 0 {
 		fmt.Printf("  Skipped:   %d file(s)\n", result.FilesSkipped)
 	}
+	fmt.Printf("\nNow on workspace: %s\n", name)
 
+	return nil
+}
+
+func runWsCurrent(cmd *cobra.Command, args []string) error {
+	current, err := getCurrentWorkspace()
+	if err != nil {
+		return fmt.Errorf("reading current workspace: %w", err)
+	}
+	if current == "" {
+		fmt.Println("No workspace checked out.")
+		fmt.Println("Use 'kai ws checkout <name>' to switch to a workspace.")
+		return nil
+	}
+	fmt.Println(current)
 	return nil
 }
 
@@ -3212,14 +4335,46 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Track pre-computed pack objects for UUID-based nodes (workspace, review)
+	// Key: content-addressed digest hex, Value: pre-built PackObject
+	precomputedPackObjects := make(map[string]remote.PackObject)
+
 	// If pushing a workspace, collect its changesets and snapshots
 	if workspaceToPush != nil {
 		fmt.Printf("Pushing workspace '%s'...\n", workspaceToPush.Name)
 
+		// Get workspace node to compute content-addressed digest
+		wsNode, err := db.GetNode(workspaceToPush.ID)
+		if err != nil || wsNode == nil {
+			return fmt.Errorf("getting workspace node: %w", err)
+		}
+
+		// Compute content-addressed digest for workspace
+		// Include UUID in payload so it can be reconstructed on fetch
+		wsPayload := make(map[string]interface{})
+		for k, v := range wsNode.Payload {
+			wsPayload[k] = v
+		}
+		wsPayload["_uuid"] = hex.EncodeToString(workspaceToPush.ID)
+		wsPayloadJSON, err := util.CanonicalJSON(wsPayload)
+		if err != nil {
+			return fmt.Errorf("serializing workspace payload: %w", err)
+		}
+		wsContent := append([]byte(string(graph.KindWorkspace)+"\n"), wsPayloadJSON...)
+		wsContentDigest := util.Blake3Hash(wsContent)
+
+		// Store pre-computed pack object for workspace
+		precomputedPackObjects[hex.EncodeToString(wsContentDigest)] = remote.PackObject{
+			Digest:  wsContentDigest,
+			Kind:    string(graph.KindWorkspace),
+			Content: wsContent,
+		}
+
 		// Add workspace node ref (for fetch --ws to work)
+		// Uses content-addressed digest so server can verify
 		wsNodeRef := &ref.Ref{
 			Name:       fmt.Sprintf("ws.%s", workspaceToPush.Name),
-			TargetID:   workspaceToPush.ID,
+			TargetID:   wsContentDigest,
 			TargetKind: ref.KindWorkspace,
 		}
 		// Add workspace snapshot refs
@@ -3300,6 +4455,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			graph.EdgeBasedOn,
 			graph.EdgeHeadAt,
 			graph.EdgeHasChangeSet,
+			graph.EdgeHasIntent,
 		} {
 			edges, err := db.GetEdges(r.TargetID, edgeType)
 			if err != nil {
@@ -3353,32 +4509,64 @@ func runPush(cmd *cobra.Command, args []string) error {
 		contentDigestSet := make(map[string]bool)
 
 		for _, digest := range missing {
-			node, err := db.GetNode(digest)
-			if err != nil {
-				continue
-			}
-			if node == nil {
+			digestHex := hex.EncodeToString(digest)
+
+			// Check if we have a precomputed pack object (for UUID-based nodes like Workspace)
+			if precomputed, ok := precomputedPackObjects[digestHex]; ok {
+				packObjects = append(packObjects, precomputed)
 				continue
 			}
 
-			// Content must match how the digest was computed:
-			// digest = blake3(kind + "\n" + canonicalJSON(payload))
-			payloadJSON, err := util.CanonicalJSON(node.Payload)
+			// Get the raw payload JSON to avoid serialization differences
+			// (JSON round-tripping can change types like int64 to float64)
+			nodeKind, rawPayloadJSON, err := db.GetNodeRawPayload(digest)
 			if err != nil {
 				continue
 			}
-			content := append([]byte(string(node.Kind)+"\n"), payloadJSON...)
+			if rawPayloadJSON == nil {
+				continue
+			}
+
+			// Content = kind + "\n" + rawPayloadJSON
+			// For content-addressed nodes, digest = blake3(content) = nodeID
+			content := append([]byte(string(nodeKind)+"\n"), rawPayloadJSON...)
+			packDigest := digest
+
+			// UUID-based nodes (Workspace, Review) should have been precomputed
+			// but handle them here as a fallback
+			if nodeKind == graph.KindWorkspace || nodeKind == graph.KindReview {
+				// Need to add _uuid to payload and recompute content
+				node, err := db.GetNode(digest)
+				if err != nil || node == nil {
+					continue
+				}
+				payload := make(map[string]interface{})
+				for k, v := range node.Payload {
+					payload[k] = v
+				}
+				payload["_uuid"] = hex.EncodeToString(node.ID)
+				payloadJSON, err := util.CanonicalJSON(payload)
+				if err != nil {
+					continue
+				}
+				content = append([]byte(string(nodeKind)+"\n"), payloadJSON...)
+				packDigest = util.Blake3Hash(content)
+			}
 
 			packObjects = append(packObjects, remote.PackObject{
-				Digest:  digest,
-				Kind:    string(node.Kind),
+				Digest:  packDigest,
+				Kind:    string(nodeKind),
 				Content: content,
 			})
 
 			// For File nodes, also collect the content blob digest
-			if node.Kind == graph.KindFile {
-				if contentDigest, ok := node.Payload["digest"].(string); ok {
-					contentDigestSet[contentDigest] = true
+			if nodeKind == graph.KindFile {
+				// Parse the raw payload to get the digest field
+				var filePayload map[string]interface{}
+				if err := json.Unmarshal(rawPayloadJSON, &filePayload); err == nil {
+					if contentDigest, ok := filePayload["digest"].(string); ok {
+						contentDigestSet[contentDigest] = true
+					}
 				}
 			}
 		}
@@ -4108,6 +5296,64 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Get changeset data if target is a changeset
+	var csNode *graph.Node
+	var baseSnapID, headSnapID []byte
+	var fileChanges []fileChangeInfo
+	var symbolChanges []symbolChangeInfo
+	var changeTypes []string
+
+	if rev.TargetKind == graph.KindChangeSet {
+		csNode, _ = db.GetNode(rev.TargetID)
+		if csNode != nil {
+			// Extract base and head snapshot IDs
+			if baseHex, ok := csNode.Payload["base"].(string); ok {
+				baseSnapID, _ = util.HexToBytes(baseHex)
+			}
+			if headHex, ok := csNode.Payload["head"].(string); ok {
+				headSnapID, _ = util.HexToBytes(headHex)
+			}
+
+			// Collect file and symbol changes
+			csData, err := db.GetAllNodesAndEdgesForChangeSet(rev.TargetID)
+			if err == nil {
+				if nodes, ok := csData["nodes"].([]map[string]interface{}); ok {
+					for _, node := range nodes {
+						kind, _ := node["kind"].(string)
+						payload, _ := node["payload"].(map[string]interface{})
+						nodeID, _ := node["id"].(string)
+
+						switch kind {
+						case "File":
+							path, _ := payload["path"].(string)
+							digest, _ := payload["digest"].(string)
+							fileChanges = append(fileChanges, fileChangeInfo{
+								ID:     nodeID,
+								Path:   path,
+								Digest: digest,
+							})
+						case "Symbol":
+							fqName, _ := payload["fqName"].(string)
+							symKind, _ := payload["kind"].(string)
+							sig, _ := payload["signature"].(string)
+							symbolChanges = append(symbolChanges, symbolChangeInfo{
+								ID:        nodeID,
+								FQName:    fqName,
+								Kind:      symKind,
+								Signature: sig,
+							})
+						case "ChangeType":
+							if category, ok := payload["category"].(string); ok {
+								changeTypes = append(changeTypes, category)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// JSON output
 	if reviewJSON {
 		data := map[string]interface{}{
 			"id":          review.IDToHex(rev.ID),
@@ -4121,11 +5367,47 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 			"createdAt":   rev.CreatedAt,
 			"updatedAt":   rev.UpdatedAt,
 		}
+
+		if csNode != nil {
+			// Build semantic hunks for JSON
+			var units []map[string]interface{}
+			for _, sym := range symbolChanges {
+				units = append(units, map[string]interface{}{
+					"kind":   sym.Kind,
+					"fqName": sym.FQName,
+					"after":  map[string]interface{}{"signature": sym.Signature},
+				})
+			}
+
+			var files []map[string]interface{}
+			for _, f := range fileChanges {
+				// Get file content if available
+				var afterContent string
+				if f.Digest != "" {
+					if content, err := db.ReadObject(f.Digest); err == nil {
+						afterContent = string(content)
+					}
+				}
+				files = append(files, map[string]interface{}{
+					"path":  f.Path,
+					"after": afterContent,
+				})
+			}
+
+			data["units"] = units
+			data["files"] = files
+			data["changeTypes"] = changeTypes
+			if csNode.Payload["intent"] != nil {
+				data["intent"] = csNode.Payload["intent"]
+			}
+		}
+
 		output, _ := json.MarshalIndent(data, "", "  ")
 		fmt.Println(string(output))
 		return nil
 	}
 
+	// Text output - header
 	fmt.Printf("Review: %s\n", review.IDToHex(rev.ID)[:12])
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("Title:       %s\n", rev.Title)
@@ -4141,19 +5423,164 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Created:     %s\n", time.UnixMilli(rev.CreatedAt).Format(time.RFC3339))
 	fmt.Printf("Updated:     %s\n", time.UnixMilli(rev.UpdatedAt).Format(time.RFC3339))
 
-	// If target is a changeset, show the intent
-	if rev.TargetKind == graph.KindChangeSet {
-		target, _ := db.GetNode(rev.TargetID)
-		if target != nil {
-			if intentStr, ok := target.Payload["intent"].(string); ok && intentStr != "" {
-				fmt.Println()
-				fmt.Println("Intent:")
-				fmt.Printf("  %s\n", intentStr)
+	// Show intent
+	if csNode != nil {
+		if intentStr, ok := csNode.Payload["intent"].(string); ok && intentStr != "" {
+			fmt.Println()
+			fmt.Println("Intent:")
+			fmt.Printf("  %s\n", intentStr)
+		}
+	}
+
+	// Show change types
+	if len(changeTypes) > 0 {
+		fmt.Println()
+		fmt.Println("Change Types:")
+		for _, ct := range changeTypes {
+			fmt.Printf("  • %s\n", ct)
+		}
+	}
+
+	// Show diffs based on view mode
+	showSemantic := reviewViewMode == "semantic" || reviewViewMode == "mixed"
+	showText := reviewViewMode == "text" || reviewViewMode == "mixed"
+
+	if showSemantic && len(symbolChanges) > 0 {
+		fmt.Println()
+		fmt.Println("Semantic Diff:")
+		fmt.Println(strings.Repeat("-", 60))
+
+		// Group symbols by file path (approximate from fqName)
+		for _, sym := range symbolChanges {
+			fmt.Printf("\n  %s %s\n", sym.Kind, sym.FQName)
+			if sym.Signature != "" {
+				fmt.Printf("    + %s\n", sym.Signature)
+			}
+		}
+	}
+
+	if showText && len(fileChanges) > 0 {
+		fmt.Println()
+		fmt.Println("File Contents:")
+		fmt.Println(strings.Repeat("-", 60))
+
+		snapshotCreator := snapshot.NewCreator(db, nil)
+
+		for _, f := range fileChanges {
+			fmt.Printf("\n--- %s\n", f.Path)
+
+			// Get before content from base snapshot
+			var beforeContent, afterContent string
+
+			if baseSnapID != nil {
+				beforeContent = getFileContentFromSnapshot(db, snapshotCreator, baseSnapID, f.Path)
+			}
+			if headSnapID != nil {
+				afterContent = getFileContentFromSnapshot(db, snapshotCreator, headSnapID, f.Path)
+			}
+
+			// Show unified diff
+			if beforeContent == "" && afterContent != "" {
+				// New file
+				fmt.Println("+++ (new file)")
+				lines := strings.Split(afterContent, "\n")
+				for i, line := range lines {
+					if i < 20 { // Limit preview
+						fmt.Printf("+ %s\n", line)
+					}
+				}
+				if len(lines) > 20 {
+					fmt.Printf("  ... (%d more lines)\n", len(lines)-20)
+				}
+			} else if beforeContent != "" && afterContent == "" {
+				// Deleted file
+				fmt.Println("--- (deleted)")
+			} else if beforeContent != afterContent {
+				// Modified - show simple diff
+				fmt.Println("+++ (modified)")
+				showSimpleDiff(beforeContent, afterContent)
+			} else {
+				fmt.Println("  (unchanged)")
 			}
 		}
 	}
 
 	return nil
+}
+
+// Helper types for review view
+type fileChangeInfo struct {
+	ID     string
+	Path   string
+	Digest string
+}
+
+type symbolChangeInfo struct {
+	ID        string
+	FQName    string
+	Kind      string
+	Signature string
+}
+
+// getFileContentFromSnapshot retrieves file content from a snapshot by path
+func getFileContentFromSnapshot(db *graph.DB, sc *snapshot.Creator, snapID []byte, path string) string {
+	files, err := sc.GetSnapshotFiles(snapID)
+	if err != nil {
+		return ""
+	}
+
+	for _, f := range files {
+		if fPath, ok := f.Payload["path"].(string); ok && fPath == path {
+			if digest, ok := f.Payload["digest"].(string); ok {
+				content, err := db.ReadObject(digest)
+				if err == nil {
+					return string(content)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// showSimpleDiff displays a simple line-by-line diff
+func showSimpleDiff(before, after string) {
+	beforeLines := strings.Split(before, "\n")
+	afterLines := strings.Split(after, "\n")
+
+	// Simple diff: show first few changed lines
+	maxLines := 30
+	shown := 0
+
+	// Find differences
+	maxLen := len(beforeLines)
+	if len(afterLines) > maxLen {
+		maxLen = len(afterLines)
+	}
+
+	for i := 0; i < maxLen && shown < maxLines; i++ {
+		var beforeLine, afterLine string
+		if i < len(beforeLines) {
+			beforeLine = beforeLines[i]
+		}
+		if i < len(afterLines) {
+			afterLine = afterLines[i]
+		}
+
+		if beforeLine != afterLine {
+			if beforeLine != "" {
+				fmt.Printf("- %s\n", beforeLine)
+				shown++
+			}
+			if afterLine != "" {
+				fmt.Printf("+ %s\n", afterLine)
+				shown++
+			}
+		}
+	}
+
+	if shown >= maxLines {
+		fmt.Println("  ... (diff truncated)")
+	}
 }
 
 func runReviewStatus(cmd *cobra.Command, args []string) error {
@@ -4504,15 +5931,30 @@ func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, w
 	}
 	defer tx.Rollback()
 
-	// Insert workspace node with the same ID as remote
-	if err := db.InsertWorkspace(tx, wsRef.Target, wsPayload); err != nil {
+	// Extract the original UUID from the payload (added during push for transport)
+	// If not present (legacy), fall back to using the content-addressed ref target
+	var wsID []byte
+	if uuidHex, ok := wsPayload["_uuid"].(string); ok && uuidHex != "" {
+		wsID, err = util.HexToBytes(uuidHex)
+		if err != nil {
+			return fmt.Errorf("parsing workspace UUID: %w", err)
+		}
+		// Remove _uuid from payload - it was only for transport
+		delete(wsPayload, "_uuid")
+	} else {
+		// Legacy fallback: use content-addressed ref target
+		wsID = wsRef.Target
+	}
+
+	// Insert workspace node with the original UUID
+	if err := db.InsertWorkspace(tx, wsID, wsPayload); err != nil {
 		return fmt.Errorf("inserting workspace: %w", err)
 	}
 
 	// Create BASED_ON edge
 	if baseHex, ok := wsPayload["baseSnapshot"].(string); ok && baseHex != "" {
 		if baseID, err := util.HexToBytes(baseHex); err == nil {
-			if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeBasedOn, baseID, nil); err != nil {
+			if err := db.InsertEdge(tx, wsID, graph.EdgeBasedOn, baseID, nil); err != nil {
 				return fmt.Errorf("inserting BASED_ON edge: %w", err)
 			}
 		}
@@ -4521,7 +5963,7 @@ func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, w
 	// Create HEAD_AT edge
 	if headHex, ok := wsPayload["headSnapshot"].(string); ok && headHex != "" {
 		if headID, err := util.HexToBytes(headHex); err == nil {
-			if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeHeadAt, headID, nil); err != nil {
+			if err := db.InsertEdge(tx, wsID, graph.EdgeHeadAt, headID, nil); err != nil {
 				return fmt.Errorf("inserting HEAD_AT edge: %w", err)
 			}
 		}
@@ -4532,7 +5974,7 @@ func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, w
 		for _, csHex := range csArr {
 			if hexStr, ok := csHex.(string); ok {
 				if csID, err := util.HexToBytes(hexStr); err == nil {
-					if err := db.InsertEdge(tx, wsRef.Target, graph.EdgeHasChangeSet, csID, nil); err != nil {
+					if err := db.InsertEdge(tx, wsID, graph.EdgeHasChangeSet, csID, nil); err != nil {
 						fmt.Printf("  Warning: failed to insert HAS_CHANGESET edge: %v\n", err)
 					}
 				}

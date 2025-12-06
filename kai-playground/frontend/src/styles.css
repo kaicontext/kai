@@ -1,0 +1,412 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+:root {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f6f8fa;
+    --bg-tertiary: #f0f2f4;
+    --text-primary: #1f2328;
+    --text-secondary: #656d76;
+    --accent: #0969da;
+    --accent-dim: #218bff;
+    --border: #d0d7de;
+    --border-light: #e8eaed;
+    --code-bg: #f6f8fa;
+    --success: #1a7f37;
+    --warning: #9a6700;
+    --error: #cf222e;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+header {
+    background: var(--bg-secondary);
+    padding: 1rem 2rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+header h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+header p {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+nav#tutorial-nav {
+    background: var(--bg-primary);
+    padding: 0.75rem 2rem;
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+}
+
+.tutorial-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.375rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+
+.tutorial-btn:hover {
+    background: var(--bg-secondary);
+    border-color: var(--border);
+}
+
+.tutorial-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+}
+
+main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    background: var(--bg-primary);
+}
+
+#tutorial-panel {
+    background: var(--bg-primary);
+    padding: 1.5rem;
+    overflow-y: auto;
+    max-height: calc(100vh - 130px);
+    border-right: 1px solid var(--border);
+}
+
+#tutorial-content h2 {
+    color: var(--text-primary);
+    margin-bottom: 1rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+#tutorial-content h3 {
+    color: var(--text-primary);
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+#tutorial-content p {
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 0.75rem;
+}
+
+#tutorial-content ul,
+#tutorial-content ol {
+    margin-left: 1.5rem;
+    color: var(--text-secondary);
+    line-height: 1.8;
+}
+
+#tutorial-content li {
+    margin-bottom: 0.375rem;
+}
+
+#tutorial-content strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+#tutorial-content pre {
+    background: var(--code-bg);
+    padding: 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+}
+
+#tutorial-content code {
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    color: var(--text-primary);
+}
+
+#tutorial-steps {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+#step-content {
+    flex: 1;
+    overflow-y: auto;
+}
+
+#step-content h3 {
+    color: var(--text-primary);
+    margin-bottom: 1rem;
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+#step-content p {
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 1rem;
+}
+
+.step-commands {
+    background: var(--code-bg);
+    padding: 1rem;
+    border-radius: 6px;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+}
+
+.step-commands h4 {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    margin-bottom: 0.75rem;
+}
+
+.step-commands code {
+    display: block;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    color: var(--text-primary);
+    padding: 0.375rem 0;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    border-radius: 3px;
+}
+
+.step-commands code:hover {
+    background: var(--bg-tertiary);
+    margin: 0 -0.5rem;
+    padding: 0.375rem 0.5rem;
+}
+
+.git-compare {
+    background: #fff8c5;
+    border-left: 3px solid var(--warning);
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 6px 6px 0;
+}
+
+.git-compare h4 {
+    color: var(--warning);
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-bottom: 0.375rem;
+}
+
+.git-compare p {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    margin: 0;
+}
+
+#step-navigation {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    margin-top: 1rem;
+}
+
+#step-navigation button {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+
+#step-navigation button:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--border);
+}
+
+#step-navigation button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#step-indicator {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+#workspace {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+}
+
+#terminal-container {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--border);
+}
+
+#terminal-header,
+#graph-header {
+    background: var(--bg-secondary);
+    padding: 0.5rem 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border);
+}
+
+#terminal-header button,
+#graph-header button {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.6875rem;
+    font-weight: 500;
+}
+
+#terminal-header button:hover,
+#graph-header button:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+#terminal {
+    flex: 1;
+    background: #24292f;
+}
+
+#graph-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 200px;
+}
+
+#graph {
+    flex: 1;
+    background: var(--bg-secondary);
+}
+
+#graph-legend {
+    background: var(--bg-primary);
+    padding: 0.5rem 1rem;
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+
+.node-snapshot,
+.node-file,
+.node-symbol {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.node-snapshot {
+    background: var(--accent);
+}
+
+.node-file {
+    background: var(--success);
+}
+
+.node-symbol {
+    background: var(--warning);
+}
+
+footer {
+    background: var(--bg-secondary);
+    padding: 0.75rem 2rem;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+}
+
+footer a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+footer a:hover {
+    text-decoration: underline;
+}
+
+/* xterm.js overrides */
+.xterm {
+    padding: 0.5rem;
+}
+
+.xterm-viewport {
+    overflow-y: auto !important;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+    main {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+    }
+
+    #tutorial-panel {
+        max-height: 40vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+    }
+
+    #workspace {
+        min-height: 50vh;
+    }
+}

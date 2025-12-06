@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kai Playground - Intent-Preserving Version Control</title>
+    <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>Kai Playground</h1>
+            <p>Learn intent-preserving version control</p>
+        </header>
+
+        <nav id="tutorial-nav">
+            <button class="tutorial-btn active" data-tutorial="intro">Intro</button>
+            <button class="tutorial-btn" data-tutorial="quickstart">1. Quickstart</button>
+            <button class="tutorial-btn" data-tutorial="workspaces">2. Workspaces</button>
+            <button class="tutorial-btn" data-tutorial="semantic">3. Semantic</button>
+            <button class="tutorial-btn" data-tutorial="modules">4. Modules</button>
+            <button class="tutorial-btn" data-tutorial="ci">5. CI Plan</button>
+            <button class="tutorial-btn" data-tutorial="mocha">6. Run Targets</button>
+            <button class="tutorial-btn" data-tutorial="reviews">7. Reviews</button>
+            <button class="tutorial-btn" data-tutorial="remotes">8. Push/Fetch</button>
+            <button class="tutorial-btn" data-tutorial="merge">9. Merge</button>
+            <button class="tutorial-btn" data-tutorial="gc">10. GC</button>
+            <button class="tutorial-btn" data-tutorial="pipeline">CI Pipeline</button>
+            <button class="tutorial-btn" data-tutorial="cheatsheet">Cheat Sheet</button>
+        </nav>
+
+        <main>
+            <div id="tutorial-panel">
+                <div id="tutorial-content">
+                    <h2>Welcome to Kai</h2>
+                    <p>Kai is an <strong>intent-preserving version control system</strong> that understands your code semantically.</p>
+
+                    <h3>What makes Kai different?</h3>
+                    <ul>
+                        <li><strong>Semantic understanding</strong> - Kai knows about functions, classes, and variables</li>
+                        <li><strong>Import graph analysis</strong> - Track which files import which</li>
+                        <li><strong>Selective CI</strong> - Run only the tests affected by your changes</li>
+                        <li><strong>Workspaces</strong> - Like branches, with intent tracking</li>
+                        <li><strong>ChangeSets</strong> - Semantic deltas between snapshots</li>
+                    </ul>
+
+                    <h3>10 Topics</h3>
+                    <ol>
+                        <li><strong>Quickstart</strong> - init, snapshot, refs</li>
+                        <li><strong>Workspaces</strong> - staging & intent</li>
+                        <li><strong>Semantic Diffs</strong> - AST-aware comparison</li>
+                        <li><strong>Modules</strong> - define boundaries</li>
+                        <li><strong>CI Plan</strong> - import graph & test selection</li>
+                        <li><strong>Run Targets</strong> - execute from plan</li>
+                        <li><strong>Reviews</strong> - ChangeSet-centered reviews</li>
+                        <li><strong>Push/Fetch</strong> - remote sync</li>
+                        <li><strong>Merge</strong> - integrate workspaces</li>
+                        <li><strong>GC</strong> - idempotency & prune</li>
+                    </ol>
+
+                    <p>Select a topic above to follow guided lessons.</p>
+                </div>
+
+                <div id="tutorial-steps" style="display: none;">
+                    <div id="step-content"></div>
+                    <div id="step-navigation">
+                        <button id="prev-step" disabled>Previous</button>
+                        <span id="step-indicator">Step 1 of 1</span>
+                        <button id="next-step">Next</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="workspace">
+                <div id="terminal-container">
+                    <div id="terminal-header">
+                        <span>Terminal</span>
+                        <button id="clear-terminal">Clear</button>
+                    </div>
+                    <div id="terminal"></div>
+                </div>
+
+                <div id="graph-container">
+                    <div id="graph-header">
+                        <span>Graph Explorer</span>
+                        <button id="refresh-graph">Refresh</button>
+                    </div>
+                    <div id="graph"></div>
+                    <div id="graph-legend">
+                        <span class="legend-item"><span class="node-snapshot"></span> Snapshot</span>
+                        <span class="legend-item"><span class="node-file"></span> File</span>
+                        <span class="legend-item"><span class="node-symbol"></span> Symbol</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Kai - Intent-Preserving Version Control | <a href="https://github.com/jschatz1/kai" target="_blank">GitHub</a></p>
+        </footer>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
