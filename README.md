@@ -47,6 +47,7 @@ Kai is designed to be fast enough that you never wait. Content-addressed storage
 - [Workspace Workflow](#workspace-workflow)
 - [Complete Workflow Tutorial](#complete-workflow-tutorial)
 - [Command Reference](#command-reference)
+- [CI & Test Selection](#ci--test-selection)
 - [Configuration](#configuration)
 - [Understanding the Output](#understanding-the-output)
 - [Architecture Deep Dive](#architecture-deep-dive)
@@ -1374,6 +1375,774 @@ kai prune --aggressive
 4. Deletes orphaned object files from `.kai/objects/`
 
 **Note:** Run this after `kai ws delete` to reclaim storage.
+
+---
+
+## CI & Test Selection
+
+Kai provides intelligent test selection for CI pipelines. Instead of running all tests on every change, Kai analyzes which tests are affected by your changes and generates a targeted test plan.
+
+### Safe Skipping Philosophy
+
+The key concern with selective testing is: "If selective CI ever skips a test that should've run, users will disable Kai the next day."
+
+Kai addresses this with **progressive hardening** through three safety modes:
+
+1. **Shadow Mode** - Learn and validate before trusting
+2. **Guarded Mode** - Safe by construction with automatic fallback
+3. **Strict Mode** - Full selective after building confidence
+
+This allows teams to start safely, build confidence, and gradually increase selectivity.
+
+---
+
+### `kai ci plan`
+
+Generate a CI test selection plan from a changeset.
+
+```bash
+kai ci plan <changeset|selector> [flags]
+```
+
+**Arguments:**
+- `<changeset|selector>` - ChangeSet ID, workspace selector, or snapshot selector
+
+**Flags:**
+- `--strategy <strategy>` - Selection strategy: `auto`, `symbols`, `imports`, `coverage` (default: `auto`)
+- `--risk-policy <policy>` - Risk policy: `expand`, `warn`, `fail` (default: `expand`)
+- `--safety-mode <mode>` - Safety mode: `shadow`, `guarded`, `strict` (default: `guarded`)
+- `--explain` - Output human-readable explanation table instead of JSON
+- `--out <file>` - Output file for plan JSON
+
+**Safety Modes:**
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `shadow` | Compute selective plan but CI runs full suite. Logs predictions for comparison. | Learning phase, validating test selection |
+| `guarded` | Run selective plan with automatic fallback. Auto-expands on structural risks. | Default production mode, safe by construction |
+| `strict` | Run selective plan only. No auto-expansion. Use panic switch for full suite. | Mature setups with high confidence |
+
+**Examples:**
+```bash
+# Generate plan with default guarded mode
+kai ci plan @cs:last --strategy=auto --out plan.json
+
+# Shadow mode: learn and compare
+kai ci plan @cs:last --safety-mode=shadow --out plan.json
+
+# Strict mode: selective only
+kai ci plan @cs:last --safety-mode=strict --out plan.json
+
+# Human-readable explanation table
+kai ci plan @cs:last --explain
+
+# Force full suite via panic switch (any mode)
+KAI_FORCE_FULL=1 kai ci plan @cs:last --out plan.json
+```
+
+**Plan Output:**
+
+The plan JSON includes:
+- `mode` - Plan mode: `selective`, `expanded`, `shadow`, `full`, `skip`
+- `safetyMode` - The safety mode used
+- `confidence` - Top-level confidence score (0.0-1.0)
+- `targets.run` - Test files to run
+- `targets.full` - Full test suite (shadow mode only)
+- `targets.fallback` - Whether fallback is enabled (guarded mode)
+- `safety.confidence` - Confidence score (0.0-1.0)
+- `safety.structuralRisks` - Detected risk patterns
+- `safety.autoExpanded` - Whether plan was auto-expanded
+- `uncertainty.score` - Uncertainty score (0-100)
+- `uncertainty.sources` - What contributed to uncertainty
+- `expansionLog` - Array of reasons why plan was expanded
+- `provenance.changeset` - Changeset ID used
+- `provenance.base` / `provenance.head` - Snapshot IDs
+- `provenance.kaiVersion` - Kai CLI version
+- `provenance.detectorVersion` - Dynamic import detector version (for cache invalidation)
+- `provenance.generatedAt` - ISO8601 timestamp
+- `provenance.analyzers` - Which analyzers ran (e.g., `symbols@1`, `imports@1`)
+- `provenance.policyHash` - Hash of ci-policy.yaml if used
+- `prediction` - Shadow mode prediction data
+
+**Structural Risks:**
+
+Kai detects patterns that indicate higher risk of missed tests:
+
+| Risk Type | Severity | Description |
+|-----------|----------|-------------|
+| `config_change` | High | Config file changed (package.json, tsconfig, jest.config, etc.) |
+| `test_infra` | High | Test infrastructure changed (fixtures, mocks, setup files) |
+| `dynamic_import` | High | Dynamic require/import detected - static analysis unreliable |
+| `no_test_mapping` | Medium | Changed files have no test coverage |
+| `many_files_changed` | Medium | More than 20 files changed |
+| `cross_module_change` | Medium | Changes span 3+ modules |
+
+**Panic Switch:**
+
+Set `KAI_FORCE_FULL=1` or `KAI_PANIC=1` to force full suite in any mode:
+```bash
+KAI_FORCE_FULL=1 kai ci plan @cs:last --safety-mode=strict --out plan.json
+```
+
+**CI Policy Configuration:**
+
+Create a `.kai/rules/ci-policy.yaml` file in your repo to customize risk thresholds and behavior (legacy path `kai.ci-policy.yaml` is also supported):
+
+```yaml
+version: 1
+
+thresholds:
+  minConfidence: 0.40    # Expand if confidence below 40%
+  maxUncertainty: 70     # Expand if uncertainty above 70
+  maxFilesChanged: 50    # Expand if more than 50 files changed
+  maxTestsSkipped: 0.90  # Expand if skipping >90% of tests
+
+paranoia:
+  alwaysFullPatterns:
+    - "*.lock"
+    - "go.mod"
+    - "package.json"
+    - ".github/workflows/*"
+  expandOnPatterns:
+    - "**/config/**"
+    - "**/setup.*"
+    - "**/__mocks__/**"
+  riskMultipliers:
+    "src/core/**": 1.5
+    "lib/**": 1.3
+
+behavior:
+  onHighRisk: expand      # expand, warn, fail
+  onLowConfidence: expand
+  onNoTests: warn         # expand, warn, pass
+  failOnExpansion: false  # Exit non-zero if expansion occurred
+
+dynamicImports:
+  expansion: nearest_module  # nearest_module, package, owners, full_suite
+  ownersFallback: true       # Use union model: nearest_module → owners → full_suite
+  maxFilesThreshold: 200     # If >N files in expansion, widen further
+  boundedRiskThreshold: 100  # Bounded imports matching >N files are treated as risky
+  allowlist:                 # Paths to ignore dynamic imports (glob patterns)
+    - "src/vendor/**"
+    - "**/*.generated.js"
+  boundGlobs:                # Known-bounded dynamic imports by pattern
+    "src/widgets/**": ["src/widgets/**/*.test.js"]
+```
+
+**Dynamic Import Expansion Strategies:**
+
+| Strategy | Description |
+|----------|-------------|
+| `nearest_module` | Expand to tests in the same module as the dynamic import |
+| `package` | Expand to tests in the same directory/package |
+| `owners` | Expand to tests owned by the same team (via CODEOWNERS) |
+| `full_suite` | Expand to all tests (most conservative) |
+
+**Union Model (ownersFallback: true):**
+
+When `ownersFallback` is enabled, Kai uses a cascading fallback strategy:
+
+1. **nearest_module** → Try to find tests in the same module
+2. **package** → Fall back to tests in the same directory
+3. **owners** → Fall back to parent directory (team ownership proxy)
+4. **full_suite** → Nuclear fallback if nothing else matches
+
+This prevents edge cases where `modules.yaml` is incomplete from causing selection misses.
+
+**Bounded-but-Risky Detection:**
+
+Some dynamic imports are "bounded" by webpack/vite comments but have huge footprints:
+
+```javascript
+/* webpackInclude: /plugins/ */  // Might match 500+ files!
+const plugin = await import(`./plugins/${name}`);
+```
+
+Set `boundedRiskThreshold` to treat bounded imports matching more than N files as risky (triggering expansion).
+
+The policy hash is included in the plan's provenance for audit trail.
+
+**Dynamic Import Detection:**
+
+The plan includes detailed dynamic import analysis:
+
+```json
+{
+  "dynamicImport": {
+    "detected": true,
+    "files": [
+      {
+        "path": "src/loader.js",
+        "kind": "import(variable)",
+        "line": 42,
+        "bounded": false,
+        "allowlisted": false,
+        "confidence": 0.9
+      }
+    ],
+    "policy": {
+      "expansion": "nearest_module",
+      "expandedTo": ["src/loader.test.js"],
+      "ownersFallback": true
+    },
+    "telemetry": {
+      "totalDetected": 3,
+      "bounded": 1,
+      "unbounded": 2,
+      "allowlisted": 0,
+      "widenedTests": 5,
+      "cacheHits": 2,
+      "cacheMisses": 1
+    }
+  }
+}
+```
+
+**Bounding Dynamic Imports:**
+
+Use webpack/vite magic comments to bound dynamic imports and prevent unnecessary test expansion:
+
+```javascript
+// Bounded - kai knows the scope
+const widget = await import(
+  /* webpackInclude: /\.widget\.js$/ */
+  `./widgets/${name}.widget.js`
+);
+
+// Unbounded - triggers expansion
+const mod = await import(modulePath);
+```
+
+**False Positive Reduction:**
+
+Kai automatically filters out false positives:
+- Constant-foldable cases: `require("foo/" + "bar")`
+- Literal `require.resolve()`: `require.resolve("lodash")`
+- Template literals with known paths: `` require(`./locales/${lang}.json`) `` with `webpackInclude`
+
+---
+
+### `kai ci print`
+
+Print a human-readable summary of a CI plan.
+
+```bash
+kai ci print --plan <file> [flags]
+```
+
+**Flags:**
+- `--plan <file>` - Plan JSON file to print (required)
+- `--section <section>` - Section to print: `summary`, `targets`, `impact`, `causes`, `safety`
+- `--json` - Output as JSON
+
+**Sections:**
+
+| Section | Description |
+|---------|-------------|
+| `summary` | Overview of plan (default) |
+| `targets` | What to run/skip |
+| `impact` | What changed |
+| `causes` | Why each test was selected (root cause analysis) |
+| `safety` | Safety analysis details |
+
+**Examples:**
+```bash
+# Print summary
+kai ci print --plan plan.json
+
+# Print only targets
+kai ci print --plan plan.json --section targets
+
+# Print safety analysis
+kai ci print --plan plan.json --section safety
+
+# Print root cause analysis (why each test was selected)
+kai ci print --plan plan.json --section causes
+```
+
+---
+
+### `kai ci detect-runtime-risk`
+
+Analyze test output for runtime signals that indicate a possible selection miss.
+
+```bash
+kai ci detect-runtime-risk --logs <file> [--plan <file>] [flags]
+```
+
+**Flags:**
+- `--logs <file>` - Path to test output JSON (Jest, Mocha, pytest, Go)
+- `--stderr <file>` - Path to stderr/text log file
+- `--plan <file>` - Path to plan file (for cross-reference)
+- `--format <fmt>` - Log format: auto, jest, mocha, pytest, go, text
+
+**Detected Signals:**
+
+| Signal | Severity | Description |
+|--------|----------|-------------|
+| `module_not_found` | Critical | Cannot find module/package errors (Node.js, Python, Go) |
+| `import_error` | Critical | Import/require failures, missing exports |
+| `type_error` | High | TypeScript/type checking errors |
+| `setup_crash` | Critical | Test setup hook failures, fixture errors |
+| `unexpected_failure` | Low | Other runtime errors |
+
+**Languages Supported:**
+- **Node.js/JavaScript**: `Cannot find module`, webpack errors, Jest failures
+- **TypeScript**: TS2307, TS2305, TS2339, type error bursts
+- **Python**: `ModuleNotFoundError`, `ImportError`, importlib errors, pytest fixtures
+- **Go**: Package not found, plugin load failures, build failures
+
+**Exit Codes:**
+- `0` - No risks detected, selection was safe
+- `1` - Error running the command
+- `75` - TRIPWIRE: Rerun full suite recommended (with `--tripwire`)
+
+**Examples:**
+```bash
+# Analyze Jest test output
+kai ci detect-runtime-risk --logs jest-results.json --plan plan.json
+
+# Analyze stderr from test run
+kai ci detect-runtime-risk --stderr test.log
+
+# Tripwire mode for CI (exit 75 if rerun needed)
+kai ci detect-runtime-risk --stderr test.log --tripwire
+
+# Treat any failure as tripwire trigger
+kai ci detect-runtime-risk --stderr test.log --tripwire --rerun-on-fail
+```
+
+**Tripwire Mode (`--tripwire`):**
+
+In tripwire mode, outputs only `RERUN` or `OK` and exits with code 75 or 0. This makes it easy to integrate into CI pipelines:
+
+```bash
+# Run selective tests, then check for runtime risks
+npm run test:selective 2>&1 | tee test.log
+kai ci detect-runtime-risk --stderr test.log --tripwire || npm run test:full
+```
+
+**GitHub Actions Integration:**
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate test plan
+        run: kai ci plan @cs:last --out plan.json
+
+      - name: Run selective tests
+        id: selective
+        continue-on-error: true
+        run: |
+          npm run test -- $(jq -r '.targets.run[]' plan.json) 2>&1 | tee test.log
+
+      - name: Check for runtime tripwire
+        id: tripwire
+        run: kai ci detect-runtime-risk --stderr test.log --tripwire
+        continue-on-error: true
+
+      - name: Rerun full suite if tripwire triggered
+        if: steps.tripwire.outcome == 'failure'
+        run: |
+          echo "Tripwire triggered - running full suite"
+          npm run test:full
+```
+
+**GitLab CI Integration:**
+
+```yaml
+test:
+  script:
+    - kai ci plan @cs:last --out plan.json
+    - npm run test:selective 2>&1 | tee test.log || true
+    - |
+      if ! kai ci detect-runtime-risk --stderr test.log --tripwire; then
+        echo "Tripwire triggered - running full suite"
+        npm run test:full
+      fi
+```
+
+---
+
+### `kai ci explain-dynamic-imports`
+
+Analyze files for dynamic imports and explain how they would affect test selection.
+
+```bash
+kai ci explain-dynamic-imports [path] [--json]
+```
+
+**Arguments:**
+- `[path]` - File or directory to scan (defaults to current directory)
+
+**Flags:**
+- `--json` - Output as JSON instead of human-readable format
+
+**Examples:**
+```bash
+# Scan current directory
+kai ci explain-dynamic-imports
+
+# Scan specific directory
+kai ci explain-dynamic-imports src/
+
+# Scan single file
+kai ci explain-dynamic-imports src/plugins/loader.js
+
+# Output as JSON
+kai ci explain-dynamic-imports src/ --json
+```
+
+**Output:**
+```
+Dynamic Import Analysis
+============================================================
+Files scanned: 42
+Dynamic imports found: 5
+Expansion strategy: nearest_module
+Owners fallback: true
+Bounded risk threshold: 100 files
+
+⚠️  UNBOUNDED (2) - Will trigger expansion:
+   src/plugins/index.ts:42
+      Type: import(variable) (confidence: 90%)
+      Action: Expand to nearest_module
+
+✓  BOUNDED (2) - Safe, will not expand:
+   src/i18n/load.js:5 → webpackInclude: /locales\/.*\.json$/
+
+○  ALLOWLISTED (1) - Ignored by policy:
+   src/vendor/legacy.js:12
+
+Recommendations:
+  • Add webpackInclude/webpackExclude comments to bound dynamic imports
+  • Add paths to dynamicImports.allowlist in kai.ci-policy.yaml
+  • Use explicit imports where possible
+```
+
+Use this command before committing to understand how dynamic imports affect CI test selection.
+
+---
+
+### `kai ci record-miss`
+
+Record a test selection miss for shadow mode learning and analysis.
+
+```bash
+kai ci record-miss --plan <file> [--evidence <file> | --failed <tests>]
+```
+
+**Flags:**
+- `--plan <file>` - Path to plan file (required)
+- `--evidence <file>` - Path to test results JSON (Jest, pytest, Go test -json)
+- `--failed <tests>` - Comma-separated list of failed test files
+
+**Examples:**
+```bash
+# Record miss from test results JSON
+kai ci record-miss --plan plan.json --evidence jest-results.json
+
+# Record miss with explicit failed tests
+kai ci record-miss --plan plan.json --failed "tests/auth.test.js,tests/api.test.js"
+```
+
+Miss records are appended to `.kai/ci-misses.jsonl` for aggregation and analysis.
+
+---
+
+### `kai ci ingest-coverage`
+
+Ingest coverage reports to build file→test mappings for coverage-based test selection.
+
+```bash
+kai ci ingest-coverage --from <file> [flags]
+```
+
+**Flags:**
+- `--from <file>` - Path to coverage report (required)
+- `--format <fmt>` - Format: `auto`, `nyc`, `coveragepy`, `jacoco` (default: `auto`)
+- `--branch <name>` - Branch name to associate with coverage data
+- `--tag <name>` - Tag to associate with coverage data (e.g., commit hash)
+
+**Supported Formats:**
+
+| Format | Tool | Report File |
+|--------|------|-------------|
+| `nyc` | NYC/Istanbul | `coverage-final.json` |
+| `coveragepy` | coverage.py | `coverage.json` (with `--format json`) |
+| `jacoco` | JaCoCo | `jacoco.xml` |
+
+**Examples:**
+```bash
+# Ingest NYC coverage (auto-detected)
+kai ci ingest-coverage --from coverage/coverage-final.json
+
+# Ingest Python coverage.py report
+kai ci ingest-coverage --from coverage.json --format coveragepy
+
+# Ingest JaCoCo XML report
+kai ci ingest-coverage --from target/site/jacoco/jacoco.xml --format jacoco
+
+# Associate with branch and commit
+kai ci ingest-coverage --from coverage-final.json --branch main --tag abc123
+```
+
+**How Coverage Selection Works:**
+
+1. **Ingest Phase**: After tests run, ingest coverage to build `file→test` mappings
+2. **Planning Phase**: When `--strategy=coverage` or `--strategy=auto`, Kai looks up which tests covered the changed files
+3. **Selection**: Tests that recently covered any changed file are included in the plan
+
+Coverage data is stored in `.kai/coverage-map.json` and accumulates over time.
+
+**Policy Configuration:**
+
+```yaml
+coverage:
+  enabled: true        # Use coverage data in test selection
+  lookbackDays: 30     # How far back to consider coverage data
+  minHits: 1           # Minimum hit count to trust a mapping
+  onNoCoverage: warn   # expand, warn, ignore - action for files without coverage
+```
+
+---
+
+### `kai ci ingest-contracts`
+
+Register contract schemas (OpenAPI, Protobuf, GraphQL) and their associated tests.
+
+```bash
+kai ci ingest-contracts --type <type> --path <path> --tests <tests> [flags]
+```
+
+**Flags:**
+- `--type <type>` - Contract type: `openapi`, `protobuf`, `graphql` (required)
+- `--path <path>` - Path to schema file (required)
+- `--tests <tests>` - Comma-separated test files to run when schema changes (required)
+- `--service <name>` - Service/module name this schema belongs to
+- `--generated <paths>` - Comma-separated paths to generated files from this schema
+
+**Examples:**
+```bash
+# Register OpenAPI schema
+kai ci ingest-contracts --type openapi --path api/openapi.yaml \
+  --tests "tests/api/users.test.js,tests/api/auth.test.js" \
+  --service users
+
+# Register Protobuf schema with generated files
+kai ci ingest-contracts --type protobuf --path proto/user.proto \
+  --tests "tests/grpc/user.test.go" \
+  --service users \
+  --generated "gen/user.pb.go,gen/user_grpc.pb.go"
+
+# Register GraphQL schema
+kai ci ingest-contracts --type graphql --path schema.graphql \
+  --tests "tests/graphql/resolvers.test.ts" \
+  --service api
+```
+
+**How Contract Detection Works:**
+
+1. **Registration**: Register each contract schema with its associated tests
+2. **Fingerprinting**: Kai computes a hash (digest) of each schema file
+3. **Change Detection**: When planning, if a schema's digest changed, its registered tests are added to the plan
+4. **Generated Files**: If generated files from a schema change, the schema's tests are also added
+
+Contract registrations are stored in `.kai/contracts.json`.
+
+**Policy Configuration:**
+
+```yaml
+contracts:
+  enabled: true                    # Enable contract change detection
+  onChange: add_tests              # add_tests, expand, warn
+  types:                           # Which contract types to detect
+    - openapi
+    - protobuf
+    - graphql
+```
+
+---
+
+### `kai ci annotate-plan`
+
+Annotate a plan with fallback/tripwire information for auditability.
+
+```bash
+kai ci annotate-plan <plan-file> [flags]
+```
+
+**Flags:**
+- `--fallback-used` - Mark that fallback was triggered
+- `--fallback-reason <reason>` - Reason for fallback: `runtime_tripwire`, `planner_over_threshold`, `panic_switch`
+- `--fallback-trigger <text>` - The specific error/condition that triggered fallback
+- `--fallback-exit-code <code>` - Exit code from tripwire (e.g., 75)
+
+**Examples:**
+```bash
+# Annotate plan after tripwire triggered
+kai ci annotate-plan plan.json \
+  --fallback-used \
+  --fallback-reason runtime_tripwire \
+  --fallback-trigger "ModuleNotFoundError: No module named 'missing'" \
+  --fallback-exit-code 75
+
+# Annotate after planner expanded due to high uncertainty
+kai ci annotate-plan plan.json \
+  --fallback-used \
+  --fallback-reason planner_over_threshold
+```
+
+**Plan Fallback Field:**
+
+After annotation, the plan includes a `fallback` field:
+
+```json
+{
+  "fallback": {
+    "used": true,
+    "reason": "runtime_tripwire",
+    "trigger": "ModuleNotFoundError: No module named 'missing'",
+    "exitCode": 75
+  }
+}
+```
+
+**Use in CI:**
+
+```yaml
+- name: Run selective tests
+  id: selective
+  continue-on-error: true
+  run: npm run test:selective 2>&1 | tee test.log
+
+- name: Check tripwire
+  id: tripwire
+  run: kai ci detect-runtime-risk --stderr test.log --tripwire
+  continue-on-error: true
+
+- name: Rerun and annotate if tripwire triggered
+  if: steps.tripwire.outcome == 'failure'
+  run: |
+    npm run test:full
+    kai ci annotate-plan plan.json \
+      --fallback-used \
+      --fallback-reason runtime_tripwire \
+      --fallback-exit-code 75
+
+- name: Upload plan for audit
+  uses: actions/upload-artifact@v4
+  with:
+    name: test-plan
+    path: plan.json
+```
+
+This creates an audit trail showing when and why fallback occurred.
+
+---
+
+### `kai ci validate-plan`
+
+Validate that a plan.json file has all required fields with correct types.
+
+```bash
+kai ci validate-plan <plan-file> [--strict]
+```
+
+**Flags:**
+- `--strict` - Also validate optional fields like policyHash and analyzers
+
+**Validated Fields:**
+- Required: `mode`, `risk`, `safetyMode`, `provenance.kaiVersion`, `provenance.detectorVersion`, `provenance.generatedAt`
+- Strict mode: `provenance.policyHash`, `provenance.analyzers`
+- Value validation: `mode` ∈ {selective, expanded, full, shadow, skip}, `risk` ∈ {low, medium, high}
+
+**Exit Codes:**
+- `0` - Plan is valid
+- `1` - Plan is invalid or error reading file
+
+**Examples:**
+```bash
+# Basic validation
+kai ci validate-plan plan.json
+
+# Strict validation (includes optional fields)
+kai ci validate-plan plan.json --strict
+```
+
+---
+
+### Nightly Shadow Validation Job
+
+Use shadow mode with a nightly job to validate test selection accuracy before trusting it in production:
+
+```yaml
+# .github/workflows/nightly-validation.yml
+name: Nightly Test Selection Validation
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 3 AM UTC daily
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate comparison
+
+      - name: Generate shadow plan
+        run: |
+          kai ci plan @snap:last --safety-mode=shadow --out plan.json
+          kai ci validate-plan plan.json
+
+      - name: Run full test suite
+        id: full
+        run: npm run test:full 2>&1 | tee test.log
+
+      - name: Compare prediction to reality
+        run: |
+          # Extract which tests failed
+          FAILED=$(jq -r '.failures[].file' jest-results.json 2>/dev/null || echo "")
+          PREDICTED=$(jq -r '.targets.run[]' plan.json)
+
+          # Check if any failures were in skipped tests
+          for fail in $FAILED; do
+            if ! echo "$PREDICTED" | grep -q "$fail"; then
+              echo "MISS: $fail was not in predicted targets"
+              kai ci record-miss --plan plan.json --failed "$fail"
+            fi
+          done
+
+      - name: Annotate and upload plan
+        run: |
+          kai ci annotate-plan plan.json \
+            --fallback.used=false \
+            --fallback.reason=nightly_validation
+
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-validation-${{ github.run_number }}
+          path: |
+            plan.json
+            test.log
+            jest-results.json
+```
+
+This creates a feedback loop that:
+1. Generates a shadow plan (what *would* run selectively)
+2. Runs the full suite (ground truth)
+3. Compares predictions to actual failures
+4. Records any misses for analysis
+5. Archives the plan for dashboarding
+
+Over time, this builds confidence in test selection before enabling guarded or strict mode.
 
 ---
 

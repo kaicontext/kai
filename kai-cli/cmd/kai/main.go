@@ -2,17 +2,22 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"kai-core/diff"
 	"kai-core/merge"
@@ -34,12 +39,14 @@ import (
 )
 
 const (
-	kaiDir        = ".kai"
-	dbFile        = "db.sqlite"
-	objectsDir    = "objects"
-	schemaDir     = "schema"
-	modulesFile   = "kai.modules.yaml"
-	workspaceFile = "workspace" // stores current workspace name
+	kaiDir         = ".kai"
+	dbFile         = "db.sqlite"
+	objectsDir     = "objects"
+	schemaDir            = "schema"
+	modulesFile          = "kai.modules.yaml"
+	ciPolicyFile         = ".kai/rules/ci-policy.yaml" // Primary location
+	ciPolicyFileFallback = "kai.ci-policy.yaml"        // Legacy location for backwards compat
+	workspaceFile        = "workspace"                 // stores current workspace name
 )
 
 // Version is the current kai CLI version
@@ -215,13 +222,200 @@ var ciPrintCmd = &cobra.Command{
 Use --section to show specific parts:
   targets   - What to run/skip
   impact    - What changed
+  causes    - Why each test was selected (root cause analysis)
+  safety    - Safety analysis details
   summary   - Overview (default)
 
 Examples:
   kai ci print --plan plan.json
   kai ci print --plan plan.json --section targets
+  kai ci print --plan plan.json --section causes
   kai ci print --plan plan.json --json`,
 	RunE: runCIPrint,
+}
+
+var ciDetectRuntimeRiskCmd = &cobra.Command{
+	Use:   "detect-runtime-risk",
+	Short: "Analyze test logs for runtime risk signals (tripwire)",
+	Long: `Analyzes test output/logs to detect runtime signals that indicate
+the selective test plan may have missed dependencies. This is the RUNTIME
+SAFETY NET that catches selection misses after tests run.
+
+Detects:
+  - Cannot find module / Module not found (Node.js)
+  - ImportError / ModuleNotFoundError (Python)
+  - Go plugin load failures
+  - TypeScript type error bursts
+  - Jest/Mocha/pytest setup/fixture failures
+  - importlib errors (Python dynamic imports)
+  - Any dependency resolution errors
+
+Exit Codes:
+  0   - No risks detected, selection was safe
+  1   - Error running the command
+  75  - TRIPWIRE: Rerun full suite recommended (--tripwire mode)
+
+Tripwire Mode (--tripwire):
+  In tripwire mode, outputs only RERUN or OK and exits with code 75 or 0.
+  Use this in CI to conditionally trigger a full suite rerun:
+
+    kai ci detect-runtime-risk --stderr test.log --tripwire || npm run test:full
+
+Examples:
+  # Analyze Jest output
+  kai ci detect-runtime-risk --logs ./jest-results.json
+
+  # With plan cross-reference
+  kai ci detect-runtime-risk --logs ./jest-results.json --plan plan.json
+
+  # Tripwire mode for CI
+  kai ci detect-runtime-risk --stderr ./test.log --tripwire
+
+  # Treat any failure as tripwire
+  kai ci detect-runtime-risk --stderr ./test.log --tripwire --rerun-on-fail`,
+	RunE: runCIDetectRuntimeRisk,
+}
+
+var ciRecordMissCmd = &cobra.Command{
+	Use:   "record-miss",
+	Short: "Record a test selection miss for shadow mode learning",
+	Long: `Records information about tests that failed but were not selected,
+allowing Kai to learn and improve its selection accuracy over time.
+
+Used in shadow mode to compare what was predicted vs what actually failed.
+This data is used to identify missing dependency edges and improve the
+test selection algorithm.
+
+Examples:
+  kai ci record-miss --plan plan.json --evidence ./test-results.json
+  kai ci record-miss --plan plan.json --failed "tests/auth.test.js,tests/api.test.js"`,
+	RunE: runCIRecordMiss,
+}
+
+var ciExplainDynamicImportsCmd = &cobra.Command{
+	Use:   "explain-dynamic-imports [path]",
+	Short: "Analyze and explain dynamic imports in a file or directory",
+	Long: `Scans files for dynamic imports and shows how they would affect test selection.
+
+This helps developers understand before committing:
+- What dynamic imports exist in their code
+- Whether they are bounded or unbounded
+- What expansion strategy would be used
+- What tests would be affected
+
+Examples:
+  kai ci explain-dynamic-imports src/
+  kai ci explain-dynamic-imports src/plugins/loader.js
+  kai ci explain-dynamic-imports . --json`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runCIExplainDynamicImports,
+}
+
+var ciIngestCoverageCmd = &cobra.Command{
+	Use:   "ingest-coverage",
+	Short: "Ingest coverage reports to build file→test mappings",
+	Long: `Ingests test coverage reports to build a mapping of which tests
+exercise which source files. This data is used during plan generation
+to select tests that recently covered changed files.
+
+Supported formats:
+  - NYC/Istanbul JSON (coverage-final.json)
+  - coverage.py JSON
+  - JaCoCo XML
+
+The coverage map is stored in .kai/coverage-map.json and used during
+plan generation when coverage.enabled=true in ci-policy.yaml.
+
+Examples:
+  # Ingest NYC/Istanbul coverage
+  kai ci ingest-coverage --from coverage/coverage-final.json --format nyc
+
+  # Ingest Python coverage.py
+  kai ci ingest-coverage --from .coverage.json --format coveragepy
+
+  # Ingest JaCoCo XML
+  kai ci ingest-coverage --from build/reports/jacoco.xml --format jacoco
+
+  # Tag with branch and run ID
+  kai ci ingest-coverage --from coverage.json --branch main --tag nightly-2025-12-06`,
+	RunE: runCIIngestCoverage,
+}
+
+var ciIngestContractsCmd = &cobra.Command{
+	Use:   "ingest-contracts",
+	Short: "Register contract schemas and their associated tests",
+	Long: `Registers API contracts/schemas and links them to their contract tests.
+When a registered schema changes, the linked tests are automatically selected.
+
+Supported schema types:
+  - OpenAPI (YAML/JSON)
+  - Protobuf (.proto)
+  - GraphQL (.graphql/SDL)
+
+The contract registry is stored in .kai/contracts.json.
+
+Examples:
+  # Register an OpenAPI schema
+  kai ci ingest-contracts --type openapi --path api/openapi.yaml \
+    --service billing --tests "tests/contract/billing/**"
+
+  # Register a protobuf schema
+  kai ci ingest-contracts --type protobuf --path proto/user.proto \
+    --service users --tests "tests/contract/users/**"
+
+  # Register with generated file tracking
+  kai ci ingest-contracts --type openapi --path api/openapi.yaml \
+    --service billing --tests "tests/contract/**" \
+    --generated "src/clients/billing/**"`,
+	RunE: runCIIngestContracts,
+}
+
+var ciAnnotatePlanCmd = &cobra.Command{
+	Use:   "annotate-plan <plan-file>",
+	Short: "Annotate a plan with fallback/tripwire information",
+	Long: `Updates a plan.json file with fallback status after a CI run.
+Used to record when tripwire fallback was triggered for auditability.
+
+This creates an audit trail showing why full suite was run:
+- runtime_tripwire: Tests failed with import/module errors
+- planner_over_threshold: Confidence too low at planning time
+- panic_switch: Manual override via KAI_FORCE_FULL
+
+Examples:
+  # Record tripwire fallback
+  kai ci annotate-plan plan.json \
+    --fallback.used=true \
+    --fallback.reason=runtime_tripwire \
+    --fallback.trigger="Cannot find module" \
+    --fallback.exitCode=75
+
+  # Record panic switch
+  kai ci annotate-plan plan.json \
+    --fallback.used=true \
+    --fallback.reason=panic_switch`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCIAnnotatePlan,
+}
+
+var ciValidatePlanCmd = &cobra.Command{
+	Use:   "validate-plan <plan-file>",
+	Short: "Validate plan JSON schema and required fields",
+	Long: `Validates that a plan.json file has all required fields with correct types.
+
+Checks:
+- Required fields: mode, risk, confidence, uncertainty.score, fallback.used
+- Provenance fields: kaiVersion, detectorVersion, generatedAt
+- Type validation for all fields
+
+Exit codes:
+  0 - Plan is valid
+  1 - Plan is invalid or error reading file
+
+Examples:
+  kai ci validate-plan plan.json
+  kai ci validate-plan plan.json --strict  # Also validate optional fields`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCIValidatePlan,
 }
 
 // CI command flags
@@ -229,8 +423,37 @@ var (
 	ciStrategy   string
 	ciRiskPolicy string
 	ciOutFile    string
+	ciSafetyMode string // "shadow", "guarded", "strict"
+	ciExplain    bool   // Output human-readable explanation
 	ciPlanFile   string
 	ciSection    string
+	// detect-runtime-risk flags
+	ciLogsFile    string
+	ciStderrFile  string
+	ciLogFormat   string
+	ciTripwire    bool // Just output tripwire status and exit code
+	ciRerunOnFail bool // Recommend rerun on any failure
+	// record-miss flags
+	ciEvidenceFile string
+	ciFailedTests  string
+	// ingest-coverage flags
+	ciCoverageFrom   string
+	ciCoverageFormat string
+	ciCoverageBranch string
+	ciCoverageTag    string
+	// ingest-contracts flags
+	ciContractType      string
+	ciContractPath      string
+	ciContractService   string
+	ciContractTests     string
+	ciContractGenerated string
+	// annotate-plan flags
+	ciFallbackUsed     bool
+	ciFallbackReason   string
+	ciFallbackTrigger  string
+	ciFallbackExitCode int
+	// validate-plan flags
+	ciValidateStrict bool
 )
 
 var changesetCmd = &cobra.Command{
@@ -1181,11 +1404,52 @@ func init() {
 	// CI commands
 	ciCmd.AddCommand(ciPlanCmd)
 	ciCmd.AddCommand(ciPrintCmd)
+	ciCmd.AddCommand(ciDetectRuntimeRiskCmd)
+	ciCmd.AddCommand(ciRecordMissCmd)
+	ciCmd.AddCommand(ciExplainDynamicImportsCmd)
+	ciCmd.AddCommand(ciIngestCoverageCmd)
+	ciCmd.AddCommand(ciIngestContractsCmd)
+	ciCmd.AddCommand(ciAnnotatePlanCmd)
+	ciCmd.AddCommand(ciValidatePlanCmd)
+	ciValidatePlanCmd.Flags().BoolVar(&ciValidateStrict, "strict", false, "Validate optional fields as well")
 	ciPlanCmd.Flags().StringVar(&ciStrategy, "strategy", "auto", "Selection strategy: auto, symbols, imports, coverage")
 	ciPlanCmd.Flags().StringVar(&ciRiskPolicy, "risk-policy", "expand", "Risk policy: expand, warn, fail")
 	ciPlanCmd.Flags().StringVar(&ciOutFile, "out", "", "Output file for plan JSON")
+	ciPlanCmd.Flags().StringVar(&ciSafetyMode, "safety-mode", "guarded", "Safety mode: shadow (learn-only), guarded (safe fallback), strict (no fallback)")
+	ciPlanCmd.Flags().BoolVar(&ciExplain, "explain", false, "Output human-readable explanation table instead of JSON")
 	ciPrintCmd.Flags().StringVar(&ciPlanFile, "plan", "plan.json", "Path to plan file")
 	ciPrintCmd.Flags().StringVar(&ciSection, "section", "summary", "Section to display: targets, impact, summary")
+	// detect-runtime-risk flags
+	ciDetectRuntimeRiskCmd.Flags().StringVar(&ciLogsFile, "logs", "", "Path to test output JSON (Jest, Mocha, pytest, etc.)")
+	ciDetectRuntimeRiskCmd.Flags().StringVar(&ciStderrFile, "stderr", "", "Path to stderr/text log file")
+	ciDetectRuntimeRiskCmd.Flags().StringVar(&ciLogFormat, "format", "auto", "Log format: auto, jest, mocha, pytest, go, text")
+	ciDetectRuntimeRiskCmd.Flags().StringVar(&ciPlanFile, "plan", "", "Path to plan file (for cross-reference)")
+	ciDetectRuntimeRiskCmd.Flags().BoolVar(&ciTripwire, "tripwire", false, "Tripwire mode: exit 75 if rerun needed, 0 otherwise")
+	ciDetectRuntimeRiskCmd.Flags().BoolVar(&ciRerunOnFail, "rerun-on-fail", false, "Treat any test failure as a tripwire trigger")
+	// record-miss flags
+	ciRecordMissCmd.Flags().StringVar(&ciPlanFile, "plan", "", "Path to plan file (required)")
+	ciRecordMissCmd.Flags().StringVar(&ciEvidenceFile, "evidence", "", "Path to test results JSON")
+	ciRecordMissCmd.Flags().StringVar(&ciFailedTests, "failed", "", "Comma-separated list of failed test files")
+	// ingest-coverage flags
+	ciIngestCoverageCmd.Flags().StringVar(&ciCoverageFrom, "from", "", "Path to coverage report file(s)")
+	ciIngestCoverageCmd.Flags().StringVar(&ciCoverageFormat, "format", "auto", "Coverage format: auto, nyc, coveragepy, jacoco")
+	ciIngestCoverageCmd.Flags().StringVar(&ciCoverageBranch, "branch", "", "Branch name for tagging")
+	ciIngestCoverageCmd.Flags().StringVar(&ciCoverageTag, "tag", "", "Tag/identifier for this coverage run")
+	ciIngestCoverageCmd.MarkFlagRequired("from")
+	// ingest-contracts flags
+	ciIngestContractsCmd.Flags().StringVar(&ciContractType, "type", "", "Contract type: openapi, protobuf, graphql")
+	ciIngestContractsCmd.Flags().StringVar(&ciContractPath, "path", "", "Path to schema file")
+	ciIngestContractsCmd.Flags().StringVar(&ciContractService, "service", "", "Service/module name")
+	ciIngestContractsCmd.Flags().StringVar(&ciContractTests, "tests", "", "Glob pattern for contract tests")
+	ciIngestContractsCmd.Flags().StringVar(&ciContractGenerated, "generated", "", "Glob pattern for generated files")
+	ciIngestContractsCmd.MarkFlagRequired("type")
+	ciIngestContractsCmd.MarkFlagRequired("path")
+	ciIngestContractsCmd.MarkFlagRequired("tests")
+	// annotate-plan flags
+	ciAnnotatePlanCmd.Flags().BoolVar(&ciFallbackUsed, "fallback.used", false, "Whether fallback was triggered")
+	ciAnnotatePlanCmd.Flags().StringVar(&ciFallbackReason, "fallback.reason", "", "Reason: runtime_tripwire, planner_over_threshold, panic_switch")
+	ciAnnotatePlanCmd.Flags().StringVar(&ciFallbackTrigger, "fallback.trigger", "", "What triggered fallback (e.g., 'Cannot find module')")
+	ciAnnotatePlanCmd.Flags().IntVar(&ciFallbackExitCode, "fallback.exitCode", 0, "Exit code that triggered fallback")
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(snapshotCmd)
@@ -1946,25 +2210,232 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 
 // CIPlan represents a runner-agnostic selection plan
 type CIPlan struct {
-	Version int        `json:"version"`
-	Mode    string     `json:"mode"`
-	Risk    string     `json:"risk"`
-	Targets CITargets  `json:"targets"`
-	Impact  CIImpact   `json:"impact"`
-	Policy  CIPolicy   `json:"policy"`
+	Version       int                `json:"version"`
+	Mode          string             `json:"mode"`                          // "selective", "expanded", "shadow", "full", "skip"
+	Risk          string             `json:"risk"`                          // "low", "medium", "high"
+	SafetyMode    string             `json:"safetyMode"`                    // "shadow", "guarded", "strict"
+	Confidence    float64            `json:"confidence"`                    // 0.0-1.0 confidence score
+	Targets       CITargets          `json:"targets"`
+	Impact        CIImpact           `json:"impact"`
+	Policy        CIPolicy           `json:"policy"`
+	Safety        CISafety           `json:"safety"`
+	Uncertainty   CIUncertainty      `json:"uncertainty"`                   // Structured uncertainty info
+	ExpansionLog  []string           `json:"expansionLog,omitempty"`        // Why expansions happened
+	DynamicImport *DynamicImportInfo `json:"dynamicImport,omitempty"`       // Dynamic import analysis
+	Coverage      *CoverageInfo      `json:"coverage,omitempty"`            // Coverage-based selection info
+	Contracts     *ContractInfo      `json:"contracts,omitempty"`           // Contract/schema change info
+	Fallback      CIFallback         `json:"fallback"`                      // Fallback/tripwire status
+	Provenance    CIProvenance       `json:"provenance"`                    // Audit trail
+	Prediction    CIPrediction       `json:"prediction,omitempty"`          // For shadow mode comparison
 }
 
+// DynamicImportInfo captures dynamic import detection details
+type DynamicImportInfo struct {
+	Detected   bool                    `json:"detected"`
+	Files      []DynamicImportFile     `json:"files,omitempty"`
+	Policy     DynamicImportPolicyUsed `json:"policy"`
+	Telemetry  DynamicImportTelemetry  `json:"telemetry"`
+}
+
+// DynamicImportFile represents a detected dynamic import in a file
+type DynamicImportFile struct {
+	Path          string  `json:"path"`
+	Kind          string  `json:"kind"`                    // e.g., "import(variable)", "require(variable)", "__import__()"
+	Line          int     `json:"line"`                    // Line number if available
+	Bounded       bool    `json:"bounded"`                 // True if bounded by webpackInclude or similar
+	BoundedBy     string  `json:"boundedBy,omitempty"`     // What bounded it (e.g., "webpackInclude: /\\.widget\\.js$/")
+	BoundedRisky  bool    `json:"boundedRisky,omitempty"`  // True if bounded but footprint exceeds threshold
+	Allowlisted   bool    `json:"allowlisted"`             // True if in allowlist
+	Confidence    float64 `json:"confidence"`              // 0.0-1.0 confidence this is truly dynamic
+	ExpandedTo    string  `json:"expandedTo,omitempty"`    // What module/package it expanded to
+}
+
+// DynamicImportPolicyUsed shows what policy was applied
+type DynamicImportPolicyUsed struct {
+	Expansion      string   `json:"expansion"`      // nearest_module, package, owners, full_suite
+	ExpandedTo     []string `json:"expandedTo,omitempty"` // What modules/tests were added
+	OwnersFallback bool     `json:"ownersFallback"`
+}
+
+// DynamicImportTelemetry provides counters for visibility
+type DynamicImportTelemetry struct {
+	TotalDetected int    `json:"totalDetected"`
+	Bounded       int    `json:"bounded"`
+	BoundedRisky  int    `json:"boundedRisky,omitempty"` // Bounded but exceeds footprint threshold
+	Unbounded     int    `json:"unbounded"`
+	Allowlisted   int    `json:"allowlisted"`
+	WidenedTests  int    `json:"widenedTests"`           // How many tests were added due to dynamic imports
+	StrategyUsed  string `json:"strategyUsed,omitempty"` // Actual strategy that was applied
+	CacheHits     int    `json:"cacheHits,omitempty"`    // Files served from cache
+	CacheMisses   int    `json:"cacheMisses,omitempty"`  // Files that needed scanning
+}
+
+// DynamicImportCache caches detection results by file digest
+type DynamicImportCache struct {
+	mu      sync.RWMutex
+	entries map[string]DynamicImportCacheEntry
+}
+
+// DynamicImportCacheEntry is a cached detection result
+type DynamicImportCacheEntry struct {
+	DetectorVersion string
+	Imports         []DynamicImportFile
+}
+
+// Global cache instance
+var dynamicImportCache = &DynamicImportCache{
+	entries: make(map[string]DynamicImportCacheEntry),
+}
+
+// Get retrieves cached results for a file digest
+func (c *DynamicImportCache) Get(digest string) ([]DynamicImportFile, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[digest]
+	if !ok || entry.DetectorVersion != DetectorVersion {
+		return nil, false
+	}
+	return entry.Imports, true
+}
+
+// Set stores detection results for a file digest
+func (c *DynamicImportCache) Set(digest string, imports []DynamicImportFile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[digest] = DynamicImportCacheEntry{
+		DetectorVersion: DetectorVersion,
+		Imports:         imports,
+	}
+}
+
+// CIUncertainty captures structured uncertainty information
+type CIUncertainty struct {
+	Score   int                    `json:"score"`             // 0-100 uncertainty score (higher = more uncertain)
+	Sources []string               `json:"sources"`           // What contributed to uncertainty
+	Details *CIUncertaintyDetails  `json:"details,omitempty"` // Detailed breakdown
+}
+
+// CIUncertaintyDetails provides granular uncertainty info
+type CIUncertaintyDetails struct {
+	Coverage      *CoverageUncertainty      `json:"coverage,omitempty"`
+	DynamicImport *DynamicImportUncertainty `json:"dynamicImport,omitempty"`
+}
+
+// CoverageUncertainty captures coverage-related uncertainty
+type CoverageUncertainty struct {
+	FilesWithoutCoverage int `json:"filesWithoutCoverage"`
+	LookbackDays         int `json:"lookbackDays"`
+}
+
+// DynamicImportUncertainty captures dynamic import uncertainty
+type DynamicImportUncertainty struct {
+	Detected  bool `json:"detected"`
+	Bounded   int  `json:"bounded"`
+	Unbounded int  `json:"unbounded"`
+}
+
+// CIFallback captures fallback/tripwire status for auditability
+type CIFallback struct {
+	Used     bool   `json:"used"`               // Whether fallback was triggered
+	Reason   string `json:"reason,omitempty"`   // Why: runtime_tripwire, planner_over_threshold, panic_switch
+	Trigger  string `json:"trigger,omitempty"`  // What triggered it: "Cannot find module", "low_confidence", etc.
+	ExitCode int    `json:"exitCode,omitempty"` // Exit code that triggered fallback (e.g., 75)
+}
+
+// CoverageInfo captures coverage-based test selection info
+type CoverageInfo struct {
+	Enabled              bool     `json:"enabled"`
+	LookbackDays         int      `json:"lookbackDays"`
+	FilesWithCoverage    int      `json:"filesWithCoverage"`
+	FilesWithoutCoverage int      `json:"filesWithoutCoverage"`
+	TestsFromCoverage    []string `json:"testsFromCoverage,omitempty"` // Tests selected via coverage
+	CoverageMapAge       string   `json:"coverageMapAge,omitempty"`    // When coverage was last ingested
+}
+
+// ContractInfo captures contract/schema change detection
+type ContractInfo struct {
+	Changed          bool                `json:"changed"`
+	SchemasChanged   []ContractChange    `json:"schemasChanged,omitempty"`
+	TestsFromSchema  []string            `json:"testsFromSchema,omitempty"`  // Tests selected due to schema changes
+	GeneratedChanged []string            `json:"generatedChanged,omitempty"` // Generated files that changed
+}
+
+// ContractChange represents a changed contract/schema
+type ContractChange struct {
+	Path         string   `json:"path"`
+	Type         string   `json:"type"`                   // openapi, protobuf, graphql
+	Service      string   `json:"service,omitempty"`      // Service/module this schema belongs to
+	DigestBefore string   `json:"digestBefore,omitempty"` // Hash before change
+	DigestAfter  string   `json:"digestAfter,omitempty"`  // Hash after change
+	Tests        []string `json:"tests,omitempty"`        // Tests registered for this schema
+}
+
+// ========== Coverage Parsing Types ==========
+
+// CoverageMap stores file -> test mappings from coverage reports
+type CoverageMap struct {
+	Version    int                        `json:"version"`
+	RepoID     string                     `json:"repoId,omitempty"`
+	Branch     string                     `json:"branch,omitempty"`
+	Tag        string                     `json:"tag,omitempty"`
+	IngestedAt string                     `json:"ingestedAt"`
+	Entries    map[string][]CoverageEntry `json:"entries"` // file_path -> test entries
+}
+
+// CoverageEntry represents a single file -> test coverage record
+type CoverageEntry struct {
+	TestID      string `json:"testId"`      // Test file/name that covers this file
+	LastSeenAt  string `json:"lastSeenAt"`  // ISO8601 timestamp
+	HitCount    int    `json:"hitCount"`    // How many times this test hit this file
+	LinesCovered []int `json:"linesCovered,omitempty"` // Specific lines if available
+}
+
+// ========== Contract Registry Types ==========
+
+// ContractRegistry stores registered contracts/schemas
+type ContractRegistry struct {
+	Version   int                `json:"version"`
+	Contracts []ContractBinding  `json:"contracts"`
+}
+
+// ContractBinding links a schema to its tests
+type ContractBinding struct {
+	Type       string   `json:"type"`                 // openapi, protobuf, graphql
+	Path       string   `json:"path"`                 // Path to schema file
+	Service    string   `json:"service,omitempty"`    // Service/module name
+	Tests      []string `json:"tests"`                // Glob patterns for contract tests
+	Digest     string   `json:"digest,omitempty"`     // Current fingerprint
+	Generated  []string `json:"generated,omitempty"`  // Generated output paths
+}
+
+// CIProvenance captures audit information for the plan
+type CIProvenance struct {
+	Changeset       string   `json:"changeset,omitempty"`       // Changeset ID used
+	Base            string   `json:"base,omitempty"`            // Base snapshot ID
+	Head            string   `json:"head,omitempty"`            // Head snapshot ID
+	KaiVersion      string   `json:"kaiVersion"`                // Kai CLI version
+	DetectorVersion string   `json:"detectorVersion"`           // Dynamic import detector version
+	GeneratedAt     string   `json:"generatedAt"`               // ISO8601 timestamp
+	Analyzers       []string `json:"analyzers"`                 // Which analyzers ran
+	PolicyHash      string   `json:"policyHash,omitempty"`      // Hash of ci-policy.yaml if used
+}
+
+// DetectorVersion is the current version of the dynamic import detector
+const DetectorVersion = "1.0.0"
+
 type CITargets struct {
-	Run  []string          `json:"run"`
-	Skip []string          `json:"skip"`
-	Tags map[string][]string `json:"tags,omitempty"`
+	Run      []string            `json:"run"`
+	Skip     []string            `json:"skip"`
+	Full     []string            `json:"full,omitempty"` // All tests (for shadow mode comparison)
+	Tags     map[string][]string `json:"tags,omitempty"`
+	Fallback bool                `json:"fallback"` // If true, runner should fallback to full on failure
 }
 
 type CIImpact struct {
-	FilesChanged    []string           `json:"filesChanged"`
-	SymbolsChanged  []CISymbolChange   `json:"symbolsChanged,omitempty"`
-	ModulesAffected []string           `json:"modulesAffected,omitempty"`
-	Uncertainty     []string           `json:"uncertainty,omitempty"`
+	FilesChanged    []string         `json:"filesChanged"`
+	SymbolsChanged  []CISymbolChange `json:"symbolsChanged,omitempty"`
+	ModulesAffected []string         `json:"modulesAffected,omitempty"`
+	Uncertainty     []string         `json:"uncertainty,omitempty"`
 }
 
 type CISymbolChange struct {
@@ -1976,6 +2447,929 @@ type CIPolicy struct {
 	Strategy     string `json:"strategy"`
 	Expanded     bool   `json:"expanded"`
 	FallbackUsed string `json:"fallbackUsed,omitempty"`
+}
+
+// CISafety contains safety-related flags and risk signals
+type CISafety struct {
+	StructuralRisks  []StructuralRisk `json:"structuralRisks,omitempty"`
+	Confidence       float64          `json:"confidence"`       // 0.0-1.0 confidence in selection
+	RecommendFull    bool             `json:"recommendFull"`    // True if full run recommended
+	RecommendReason  string           `json:"recommendReason,omitempty"`
+	PanicSwitch      bool             `json:"panicSwitch"`      // Force full run (env/label override)
+	AutoExpanded     bool             `json:"autoExpanded"`     // Was selection auto-expanded due to risk?
+	ExpansionReasons []string         `json:"expansionReasons,omitempty"`
+}
+
+// StructuralRisk represents a detected risk pattern
+type StructuralRisk struct {
+	Type        string `json:"type"`        // Risk type identifier
+	Description string `json:"description"` // Human-readable description
+	Severity    string `json:"severity"`    // "low", "medium", "high", "critical"
+	FilePath    string `json:"filePath,omitempty"`
+	Triggered   bool   `json:"triggered"`   // Did this risk trigger expansion?
+}
+
+// CIPrediction contains shadow mode prediction data for comparison
+type CIPrediction struct {
+	SelectiveTests   int     `json:"selectiveTests"`   // Number of tests in selective plan
+	FullTests        int     `json:"fullTests"`        // Number of tests in full suite
+	PredictedSavings float64 `json:"predictedSavings"` // Percentage of tests saved
+	// After running full suite, these get populated for comparison
+	MissedFailures []string `json:"missedFailures,omitempty"` // Tests that failed but weren't selected
+	FalsePositives []string `json:"falsePositives,omitempty"` // Tests selected but didn't need to run
+}
+
+// CIPolicyConfig defines risk thresholds and behavior for CI test selection
+// Loaded from kai.ci-policy.yaml in repo root
+type CIPolicyConfig struct {
+	// Version for schema evolution
+	Version int `yaml:"version" json:"version"`
+
+	// Thresholds control when to expand or fail
+	Thresholds CIPolicyThresholds `yaml:"thresholds" json:"thresholds"`
+
+	// Paranoia rules define additional patterns that trigger expansion
+	Paranoia CIPolicyParanoia `yaml:"paranoia" json:"paranoia"`
+
+	// Behavior defines how to handle different risk levels
+	Behavior CIPolicyBehavior `yaml:"behavior" json:"behavior"`
+
+	// DynamicImports configures how to handle dynamic import detection
+	DynamicImports CIPolicyDynamicImports `yaml:"dynamicImports" json:"dynamicImports"`
+
+	// Coverage configures coverage-based test selection
+	Coverage CIPolicyCoverage `yaml:"coverage" json:"coverage"`
+
+	// Contracts configures contract/schema change detection
+	Contracts CIPolicyContracts `yaml:"contracts" json:"contracts"`
+}
+
+// CIPolicyDynamicImports configures dynamic import handling
+type CIPolicyDynamicImports struct {
+	// Expansion strategy: nearest_module, package, owners, full_suite
+	Expansion string `yaml:"expansion" json:"expansion"`
+	// OwnersFallback: if module unknown, widen to code owners' suites
+	OwnersFallback bool `yaml:"ownersFallback" json:"ownersFallback"`
+	// MaxFilesThreshold: if >N files in module, widen by owners instead
+	MaxFilesThreshold int `yaml:"maxFilesThreshold" json:"maxFilesThreshold"`
+	// BoundedRiskThreshold: bounded imports matching >N files are treated as risky
+	BoundedRiskThreshold int `yaml:"boundedRiskThreshold" json:"boundedRiskThreshold"`
+	// Allowlist: paths where dynamic imports are known-safe (won't trigger expansion)
+	Allowlist []string `yaml:"allowlist" json:"allowlist"`
+	// BoundGlobs: map pattern -> test globs for bounded expansion
+	BoundGlobs map[string][]string `yaml:"boundGlobs" json:"boundGlobs"`
+}
+
+// CIPolicyThresholds defines numeric thresholds for risk handling
+type CIPolicyThresholds struct {
+	// MinConfidence: expand to full if confidence below this (0.0-1.0)
+	MinConfidence float64 `yaml:"minConfidence" json:"minConfidence"`
+	// MaxUncertainty: expand if uncertainty score exceeds this (0-100)
+	MaxUncertainty int `yaml:"maxUncertainty" json:"maxUncertainty"`
+	// MaxFilesChanged: expand if more than N files changed
+	MaxFilesChanged int `yaml:"maxFilesChanged" json:"maxFilesChanged"`
+	// MaxTestsSkipped: expand if more than N% of tests would be skipped
+	MaxTestsSkipped float64 `yaml:"maxTestsSkipped" json:"maxTestsSkipped"`
+}
+
+// CIPolicyParanoia defines patterns that trigger extra caution
+type CIPolicyParanoia struct {
+	// AlwaysFullPatterns: globs that trigger full run when matched
+	AlwaysFullPatterns []string `yaml:"alwaysFullPatterns" json:"alwaysFullPatterns"`
+	// ExpandOnPatterns: globs that trigger expansion (but not full)
+	ExpandOnPatterns []string `yaml:"expandOnPatterns" json:"expandOnPatterns"`
+	// RiskMultipliers: boost risk score for certain paths
+	RiskMultipliers map[string]float64 `yaml:"riskMultipliers" json:"riskMultipliers"`
+}
+
+// CIPolicyBehavior defines how to respond to different conditions
+type CIPolicyBehavior struct {
+	// OnHighRisk: "expand", "warn", "fail"
+	OnHighRisk string `yaml:"onHighRisk" json:"onHighRisk"`
+	// OnLowConfidence: "expand", "warn", "fail"
+	OnLowConfidence string `yaml:"onLowConfidence" json:"onLowConfidence"`
+	// OnNoTests: "expand", "warn", "pass" - what to do when no tests selected
+	OnNoTests string `yaml:"onNoTests" json:"onNoTests"`
+	// FailOnExpansion: if true, exit non-zero when expansion happens
+	FailOnExpansion bool `yaml:"failOnExpansion" json:"failOnExpansion"`
+}
+
+// CIPolicyCoverage configures coverage-based test selection
+type CIPolicyCoverage struct {
+	// Enabled: whether to use coverage data for test selection
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// LookbackDays: how far back to look for coverage data (default 30)
+	LookbackDays int `yaml:"lookbackDays" json:"lookbackDays"`
+	// MinHits: minimum hit count to trust a file→test mapping
+	MinHits int `yaml:"minHits" json:"minHits"`
+	// OnNoCoverage: "expand", "warn", "ignore" - what to do for files without coverage
+	OnNoCoverage string `yaml:"onNoCoverage" json:"onNoCoverage"`
+	// RetentionDays: prune coverage entries older than this (default 90)
+	RetentionDays int `yaml:"retentionDays" json:"retentionDays"`
+}
+
+// CIPolicyContracts configures contract/schema change detection
+type CIPolicyContracts struct {
+	// Enabled: whether to detect contract/schema changes
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// OnChange: "add_tests", "expand", "warn" - action when contract changes
+	OnChange string `yaml:"onChange" json:"onChange"`
+	// Types: which contract types to detect (openapi, protobuf, graphql)
+	Types []string `yaml:"types" json:"types"`
+	// RetentionRevisions: keep last N revisions of each contract (default 50)
+	RetentionRevisions int `yaml:"retentionRevisions" json:"retentionRevisions"`
+	// Generated: map of schema input→output globs for generated file tracking
+	Generated []CIPolicyGeneratedMapping `yaml:"generated" json:"generated"`
+}
+
+// CIPolicyGeneratedMapping maps a schema to its generated outputs
+type CIPolicyGeneratedMapping struct {
+	Input   string   `yaml:"input" json:"input"`     // Schema file path
+	Outputs []string `yaml:"outputs" json:"outputs"` // Generated file globs
+}
+
+// DefaultCIPolicy returns a sensible default policy
+func DefaultCIPolicy() CIPolicyConfig {
+	return CIPolicyConfig{
+		Version: 1,
+		Thresholds: CIPolicyThresholds{
+			MinConfidence:   0.40, // Below 40% = low confidence
+			MaxUncertainty:  70,   // Above 70 = high uncertainty
+			MaxFilesChanged: 50,   // More than 50 files is suspicious
+			MaxTestsSkipped: 0.90, // Skipping >90% of tests is suspicious
+		},
+		Paranoia: CIPolicyParanoia{
+			AlwaysFullPatterns: []string{
+				"*.lock",
+				"go.mod",
+				"go.sum",
+				"package.json",
+				"Dockerfile",
+				".github/workflows/*",
+			},
+			ExpandOnPatterns: []string{
+				"**/config/**",
+				"**/setup.*",
+				"**/__mocks__/**",
+			},
+			RiskMultipliers: map[string]float64{
+				"src/core/**": 1.5,
+				"lib/**":      1.3,
+			},
+		},
+		Behavior: CIPolicyBehavior{
+			OnHighRisk:      "expand",
+			OnLowConfidence: "expand",
+			OnNoTests:       "warn",
+			FailOnExpansion: false,
+		},
+		DynamicImports: CIPolicyDynamicImports{
+			Expansion:            "nearest_module", // nearest_module, package, owners, full_suite
+			OwnersFallback:       true,
+			MaxFilesThreshold:    200,
+			BoundedRiskThreshold: 100, // Bounded imports matching >100 files are treated as risky
+			Allowlist:            []string{},
+			BoundGlobs:           map[string][]string{},
+		},
+		Coverage: CIPolicyCoverage{
+			Enabled:       true,   // Coverage-based selection enabled by default
+			LookbackDays:  30,     // Use coverage from last 30 days
+			MinHits:       1,      // Trust mappings with at least 1 hit
+			OnNoCoverage:  "warn", // Warn but don't expand for files without coverage
+			RetentionDays: 90,     // Prune entries older than 90 days
+		},
+		Contracts: CIPolicyContracts{
+			Enabled:            true,                                       // Contract detection enabled by default
+			OnChange:           "add_tests",                                // Add registered tests when contracts change
+			Types:              []string{"openapi", "protobuf", "graphql"}, // All supported types
+			RetentionRevisions: 50,                                         // Keep last 50 revisions per contract
+			Generated:          []CIPolicyGeneratedMapping{},               // User-defined schema→outputs
+		},
+	}
+}
+
+// loadCIPolicy loads the CI policy from .kai/rules/ci-policy.yaml or returns defaults
+// Falls back to kai.ci-policy.yaml for backwards compatibility
+func loadCIPolicy() (CIPolicyConfig, string, error) {
+	policy := DefaultCIPolicy()
+
+	// Try primary location first, then fallback
+	var data []byte
+	var err error
+	var usedPath string
+
+	data, err = os.ReadFile(ciPolicyFile)
+	if err == nil {
+		usedPath = ciPolicyFile
+	} else if os.IsNotExist(err) {
+		// Try fallback location
+		data, err = os.ReadFile(ciPolicyFileFallback)
+		if err == nil {
+			usedPath = ciPolicyFileFallback
+		} else if os.IsNotExist(err) {
+			return policy, "", nil // Use defaults, no hash
+		}
+	}
+
+	if err != nil {
+		return policy, "", fmt.Errorf("reading CI policy: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, &policy); err != nil {
+		return policy, "", fmt.Errorf("parsing %s: %w", usedPath, err)
+	}
+
+	// Compute policy hash for provenance
+	hash := sha256.Sum256(data)
+	policyHash := hex.EncodeToString(hash[:8]) // First 8 bytes as hex
+
+	return policy, policyHash, nil
+}
+
+// Structural risk type constants
+const (
+	RiskConfigChange      = "config_change"       // package.json, tsconfig, etc changed
+	RiskBuildFileChange   = "build_file_change"   // webpack, vite, build configs
+	RiskGlobalChange      = "global_change"       // Global state, env vars, shared constants
+	RiskDynamicImport     = "dynamic_import"      // Dynamic require/import detected
+	RiskReflection        = "reflection"          // Reflection or metaprogramming
+	RiskTestInfra         = "test_infra"          // Test helpers, fixtures, mocks changed
+	RiskNoTestMapping     = "no_test_mapping"     // Changed files have no test coverage
+	RiskCircularDep       = "circular_dependency" // Circular import detected
+	RiskNewFile           = "new_file"            // New file with no test coverage
+	RiskDeletedFile       = "deleted_file"        // File was deleted
+	RiskManyFilesChanged  = "many_files_changed"  // Too many files changed (>threshold)
+	RiskCrossModuleChange = "cross_module_change" // Changes span multiple modules
+)
+
+// Config file patterns that affect all tests
+var configFilePatterns = []string{
+	"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+	"tsconfig.json", "tsconfig.*.json", "jsconfig.json",
+	".babelrc", "babel.config.js", "babel.config.json",
+	".eslintrc", ".eslintrc.js", ".eslintrc.json",
+	"jest.config.js", "jest.config.ts", "jest.config.json",
+	"vitest.config.js", "vitest.config.ts",
+	"webpack.config.js", "vite.config.js", "vite.config.ts",
+	"rollup.config.js", ".env", ".env.*",
+	"go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
+	"requirements.txt", "setup.py", "pyproject.toml",
+	"Makefile", "Dockerfile", "docker-compose.yml",
+}
+
+// Test infrastructure patterns
+var testInfraPatterns = []string{
+	"**/fixtures/**", "**/mocks/**", "**/__mocks__/**",
+	"**/testutils/**", "**/test-utils/**", "**/helpers/**",
+	"**/setup.*", "**/teardown.*", "**/globalSetup.*",
+	"conftest.py", "pytest.ini",
+}
+
+// DynamicImportPattern represents a pattern for detecting dynamic imports
+type DynamicImportPattern struct {
+	pattern    string
+	kind       string  // Human-readable kind
+	confidence float64 // Base confidence (can be adjusted by context)
+	language   string  // js, ts, py, go, or "" for any
+}
+
+// Dynamic import patterns that indicate runtime-dependent imports
+// These make static analysis unreliable
+var dynamicImportPatterns = []DynamicImportPattern{
+	// JavaScript/TypeScript - High confidence dynamic imports
+	{`require\s*\(\s*[^"'\x60\s]`, "require(variable)", 0.9, "js"},
+	{`import\s*\(\s*[^"'\x60\s]`, "import(variable)", 0.9, "js"},
+	{`__non_webpack_require__\s*\(`, "webpack bypass", 1.0, "js"},
+
+	// require.resolve - often static but can be dynamic
+	{`require\.resolve\s*\(\s*[^"'\x60]`, "require.resolve(variable)", 0.8, "js"},
+
+	// Python - dynamic imports
+	{`__import__\s*\(\s*[^"']`, "__import__(variable)", 0.9, "py"},
+	{`importlib\.import_module\s*\(\s*[^"']`, "importlib.import_module(variable)", 0.9, "py"},
+	{`exec\s*\([^)]*import\s`, "exec(import)", 1.0, "py"},
+
+	// Go - plugin loading
+	{`plugin\.Open\s*\(\s*[^"]`, "plugin.Open(variable)", 0.9, "go"},
+
+	// Generic dangerous patterns
+	{`eval\s*\([^)]*require`, "eval(require)", 1.0, ""},
+	{`eval\s*\([^)]*import`, "eval(import)", 1.0, ""},
+}
+
+// False positive patterns - if these match, reduce confidence
+var dynamicImportFalsePositives = []struct {
+	pattern     string
+	description string
+	reduction   float64 // Reduce confidence by this amount
+}{
+	// Constant string concatenation (e.g., require("foo/" + "bar"))
+	{`require\s*\(\s*["'\x60][^"'\x60]*["'\x60]\s*\+\s*["'\x60]`, "constant concatenation", 0.8},
+	// require.resolve with string literal
+	{`require\.resolve\s*\(\s*["'\x60][^"'\x60]+["'\x60]\s*\)`, "require.resolve(literal)", 0.9},
+	// path.join with __dirname (commonly static)
+	{`require\s*\(\s*path\.join\s*\(\s*__dirname`, "path.join(__dirname)", 0.6},
+	// Template literal with only static parts
+	{`require\s*\(\s*\x60[^\$\x60]+\x60\s*\)`, "static template literal", 0.9},
+}
+
+// Bounding patterns - if these are near a dynamic import, it's bounded
+var dynamicImportBounders = []struct {
+	pattern     string
+	description string
+}{
+	{`/\*\s*webpackInclude:\s*([^*]+)\*/`, "webpackInclude"},
+	{`/\*\s*webpackExclude:\s*([^*]+)\*/`, "webpackExclude"},
+	{`/\*\s*webpackChunkName:\s*["']([^"']+)["']\s*\*/`, "webpackChunkName"},
+	{`/\*\s*@vite-ignore\s*\*/`, "vite-ignore"},
+}
+
+// FileContentReader is a function that reads file content by path
+type FileContentReader func(path string) ([]byte, error)
+
+// detectDynamicImports checks if a file contains dynamic import patterns
+// Returns simple bool/string for backward compatibility
+func detectDynamicImports(content []byte, filePath string) (bool, string) {
+	files := detectDynamicImportsDetailed(content, filePath, nil)
+	if len(files) > 0 {
+		return true, files[0].Kind
+	}
+	return false, ""
+}
+
+// detectDynamicImportsDetailed provides detailed dynamic import detection
+// with false positive reduction and bounding detection
+func detectDynamicImportsDetailed(content []byte, filePath string, policy *CIPolicyDynamicImports) []DynamicImportFile {
+	var results []DynamicImportFile
+	contentStr := string(content)
+	lines := strings.Split(contentStr, "\n")
+
+	// Determine file language from extension
+	ext := strings.ToLower(filepath.Ext(filePath))
+	var lang string
+	switch ext {
+	case ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx":
+		lang = "js"
+	case ".py":
+		lang = "py"
+	case ".go":
+		lang = "go"
+	}
+
+	// Check each pattern
+	for _, p := range dynamicImportPatterns {
+		// Skip patterns for other languages
+		if p.language != "" && p.language != lang {
+			continue
+		}
+
+		re, err := regexp.Compile(p.pattern)
+		if err != nil {
+			continue
+		}
+
+		matches := re.FindAllStringIndex(contentStr, -1)
+		for _, match := range matches {
+			// Find line number
+			lineNum := 1
+			for i := range lines {
+				if match[0] <= len(strings.Join(lines[:i+1], "\n")) {
+					lineNum = i + 1
+					break
+				}
+			}
+
+			// Start with base confidence
+			confidence := p.confidence
+
+			// Check for false positive patterns (reduce confidence)
+			for _, fp := range dynamicImportFalsePositives {
+				fpRe, err := regexp.Compile(fp.pattern)
+				if err != nil {
+					continue
+				}
+				// Check in a window around the match
+				start := match[0]
+				if start > 50 {
+					start = match[0] - 50
+				}
+				end := match[1] + 50
+				if end > len(contentStr) {
+					end = len(contentStr)
+				}
+				window := contentStr[start:end]
+				if fpRe.MatchString(window) {
+					confidence -= fp.reduction
+				}
+			}
+
+			// Check for bounding patterns BEFORE confidence skip
+			// This is important: we only skip low-confidence imports if bounded
+			bounded := false
+			boundedBy := ""
+			for _, b := range dynamicImportBounders {
+				bRe, err := regexp.Compile(b.pattern)
+				if err != nil {
+					continue
+				}
+				// Check in a window before the match (comments come before)
+				start := match[0] - 200
+				if start < 0 {
+					start = 0
+				}
+				window := contentStr[start:match[0]]
+				if bMatch := bRe.FindStringSubmatch(window); bMatch != nil {
+					bounded = true
+					if len(bMatch) > 1 {
+						boundedBy = fmt.Sprintf("%s: %s", b.description, strings.TrimSpace(bMatch[1]))
+					} else {
+						boundedBy = b.description
+					}
+					break
+				}
+			}
+
+			// Skip ONLY if confidence is very low AND the import is bounded
+			// Unbounded imports with low confidence are still risky - include them
+			if confidence <= 0.1 && bounded {
+				continue
+			}
+
+			// Check allowlist
+			allowlisted := false
+			if policy != nil {
+				for _, allow := range policy.Allowlist {
+					matched, _ := doublestar.Match(allow, filePath)
+					if matched {
+						allowlisted = true
+						break
+					}
+				}
+			}
+
+			results = append(results, DynamicImportFile{
+				Path:        filePath,
+				Kind:        p.kind,
+				Line:        lineNum,
+				Bounded:     bounded,
+				BoundedBy:   boundedBy,
+				Allowlisted: allowlisted,
+				Confidence:  confidence,
+			})
+		}
+	}
+
+	return results
+}
+
+// expandForDynamicImports performs scoped expansion based on dynamic import detection
+// Uses union model: nearest_module → owners → full_suite (with fallback)
+// Returns the list of additional test files to add and expansion info
+func expandForDynamicImports(
+	detectedImports []DynamicImportFile,
+	policy *CIPolicyDynamicImports,
+	allTestFiles []string,
+	changedFiles []string,
+	modules []string,
+	filesByModule map[string][]string, // map[module] -> test files in that module
+) ([]string, *DynamicImportInfo) {
+	info := &DynamicImportInfo{
+		Detected: len(detectedImports) > 0,
+		Files:    make([]DynamicImportFile, len(detectedImports)),
+		Policy: DynamicImportPolicyUsed{
+			Expansion:      policy.Expansion,
+			OwnersFallback: policy.OwnersFallback,
+		},
+		Telemetry: DynamicImportTelemetry{
+			TotalDetected: len(detectedImports),
+		},
+	}
+	copy(info.Files, detectedImports)
+
+	if len(detectedImports) == 0 {
+		return nil, info
+	}
+
+	// Classify imports: allowlisted, bounded (safe), bounded-risky, unbounded
+	var importsToExpand []DynamicImportFile
+	for i, imp := range info.Files {
+		if imp.Allowlisted {
+			info.Telemetry.Allowlisted++
+			continue
+		}
+
+		if imp.Bounded {
+			// Check if bounded import has a huge footprint (bounded-but-risky)
+			if policy.BoundedRiskThreshold > 0 && imp.BoundedBy != "" {
+				// Estimate footprint by checking how many files match the bound pattern
+				footprint := estimateBoundedFootprint(imp.BoundedBy, allTestFiles)
+				if footprint > policy.BoundedRiskThreshold {
+					info.Files[i].BoundedRisky = true
+					info.Telemetry.BoundedRisky++
+					importsToExpand = append(importsToExpand, info.Files[i])
+					continue
+				}
+			}
+			info.Telemetry.Bounded++
+			continue
+		}
+
+		// Unbounded - needs expansion
+		info.Telemetry.Unbounded++
+		importsToExpand = append(importsToExpand, imp)
+	}
+
+	// Nothing to expand
+	if len(importsToExpand) == 0 {
+		info.Telemetry.StrategyUsed = "none (all safe)"
+		return nil, info
+	}
+
+	var expandedTests []string
+	expandedTestSet := make(map[string]bool)
+	strategyUsed := policy.Expansion
+
+	// Union model: try nearest_module first, fall back to owners, then full_suite
+	for _, imp := range importsToExpand {
+		impTests, impStrategy := expandSingleImport(imp, policy, allTestFiles, modules, filesByModule)
+
+		// Track what this import expanded to
+		for j := range info.Files {
+			if info.Files[j].Path == imp.Path && info.Files[j].Line == imp.Line {
+				if len(impTests) > 0 {
+					info.Files[j].ExpandedTo = impStrategy
+				}
+				break
+			}
+		}
+
+		// Add tests to set
+		for _, t := range impTests {
+			if !expandedTestSet[t] {
+				expandedTestSet[t] = true
+				expandedTests = append(expandedTests, t)
+			}
+		}
+
+		// Track if we had to escalate
+		if impStrategy == "full_suite" {
+			strategyUsed = "full_suite"
+		} else if impStrategy == "owners" && strategyUsed != "full_suite" {
+			strategyUsed = "owners"
+		}
+	}
+
+	// Apply MaxFilesThreshold - if expansion exceeds threshold, widen to full suite
+	if policy.MaxFilesThreshold > 0 && len(expandedTests) > policy.MaxFilesThreshold {
+		expandedTests = allTestFiles
+		expandedTestSet = make(map[string]bool)
+		for _, t := range allTestFiles {
+			expandedTestSet[t] = true
+		}
+		strategyUsed = "full_suite (threshold exceeded)"
+	}
+
+	info.Policy.Expansion = strategyUsed
+	info.Policy.ExpandedTo = expandedTests
+	info.Telemetry.WidenedTests = len(expandedTests)
+	info.Telemetry.StrategyUsed = strategyUsed
+
+	return expandedTests, info
+}
+
+// expandSingleImport expands a single dynamic import using the union model
+// Returns tests to add and the strategy that was actually used
+func expandSingleImport(
+	imp DynamicImportFile,
+	policy *CIPolicyDynamicImports,
+	allTestFiles []string,
+	modules []string,
+	filesByModule map[string][]string,
+) ([]string, string) {
+	var tests []string
+	fileDir := filepath.Dir(imp.Path)
+
+	// Strategy 1: nearest_module
+	if policy.Expansion == "nearest_module" || policy.Expansion == "package" || policy.OwnersFallback {
+		// Find which module this file belongs to
+		var foundModule string
+		for _, mod := range modules {
+			if strings.HasPrefix(fileDir, mod) || strings.HasPrefix(mod, fileDir) {
+				foundModule = mod
+				if modTests, ok := filesByModule[mod]; ok {
+					tests = append(tests, modTests...)
+				}
+			}
+		}
+
+		if len(tests) > 0 {
+			return tests, "nearest_module: " + foundModule
+		}
+	}
+
+	// Strategy 2: package (same directory)
+	if policy.Expansion == "package" || policy.OwnersFallback {
+		for _, t := range allTestFiles {
+			testDir := filepath.Dir(t)
+			if strings.HasPrefix(testDir, fileDir) || testDir == fileDir {
+				tests = append(tests, t)
+			}
+		}
+
+		if len(tests) > 0 {
+			return tests, "package: " + fileDir
+		}
+	}
+
+	// Strategy 3: owners (would parse CODEOWNERS - for now use parent directories)
+	if policy.Expansion == "owners" || policy.OwnersFallback {
+		// Expand to parent directory tests as a proxy for "team ownership"
+		parentDir := filepath.Dir(fileDir)
+		for _, t := range allTestFiles {
+			testDir := filepath.Dir(t)
+			if strings.HasPrefix(testDir, parentDir) {
+				tests = append(tests, t)
+			}
+		}
+
+		if len(tests) > 0 {
+			return tests, "owners: " + parentDir
+		}
+	}
+
+	// Strategy 4: full_suite (nuclear fallback)
+	return allTestFiles, "full_suite"
+}
+
+// estimateBoundedFootprint estimates how many files a bounded pattern matches
+func estimateBoundedFootprint(boundedBy string, allFiles []string) int {
+	// Extract the pattern from the boundedBy string (e.g., "webpackInclude: /\.widget\.js$/")
+	// For now, do a simple heuristic based on common patterns
+
+	// Check for very broad patterns
+	broadPatterns := []string{"**/*", "/**", ".*", ".+"}
+	for _, broad := range broadPatterns {
+		if strings.Contains(boundedBy, broad) {
+			return len(allFiles) // Assume matches everything
+		}
+	}
+
+	// Check for directory-specific patterns
+	if strings.Contains(boundedBy, "/plugins/") || strings.Contains(boundedBy, "/components/") {
+		// These are typically large directories
+		count := 0
+		for _, f := range allFiles {
+			if strings.Contains(f, "/plugins/") || strings.Contains(f, "/components/") {
+				count++
+			}
+		}
+		return count
+	}
+
+	// Default: assume reasonable footprint
+	return 10
+}
+
+// buildModuleTestMap builds a map of module -> test files in that module
+func buildModuleTestMap(testFiles []string, modules []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, mod := range modules {
+		result[mod] = []string{}
+	}
+
+	for _, t := range testFiles {
+		testDir := filepath.Dir(t)
+		for _, mod := range modules {
+			if strings.HasPrefix(testDir, mod) || strings.HasPrefix(mod, testDir) || testDir == mod {
+				result[mod] = append(result[mod], t)
+			}
+		}
+	}
+
+	return result
+}
+
+// detectStructuralRisks analyzes changed files for patterns that indicate
+// higher risk and should trigger expansion in Guarded mode.
+func detectStructuralRisks(changedFiles []string, affectedTests map[string]bool, allTestFiles []string, modules []string) []StructuralRisk {
+	return detectStructuralRisksWithContent(changedFiles, affectedTests, allTestFiles, modules, nil)
+}
+
+// detectStructuralRisksWithContent is like detectStructuralRisks but also checks file content
+func detectStructuralRisksWithContent(changedFiles []string, affectedTests map[string]bool, allTestFiles []string, modules []string, readContent FileContentReader) []StructuralRisk {
+	var risks []StructuralRisk
+
+	// Check each changed file for risk patterns
+	for _, file := range changedFiles {
+		basename := filepath.Base(file)
+
+		// Check for config file changes
+		for _, pattern := range configFilePatterns {
+			matched, _ := filepath.Match(pattern, basename)
+			if matched {
+				risks = append(risks, StructuralRisk{
+					Type:        RiskConfigChange,
+					Description: fmt.Sprintf("Config file changed: %s - may affect all tests", file),
+					Severity:    "high",
+					FilePath:    file,
+					Triggered:   true,
+				})
+				break
+			}
+		}
+
+		// Check for test infrastructure changes
+		for _, pattern := range testInfraPatterns {
+			matched, _ := doublestar.Match(pattern, file)
+			if matched {
+				risks = append(risks, StructuralRisk{
+					Type:        RiskTestInfra,
+					Description: fmt.Sprintf("Test infrastructure changed: %s - may affect many tests", file),
+					Severity:    "high",
+					FilePath:    file,
+					Triggered:   true,
+				})
+				break
+			}
+		}
+
+		// Check if changed file has no test coverage
+		if !parse.IsTestFile(file) && !affectedTests[file] {
+			hasMapping := false
+			for testPath := range affectedTests {
+				// Check if any test was found for this file
+				if testPath != "" {
+					hasMapping = true
+					break
+				}
+			}
+			if !hasMapping && len(affectedTests) == 0 {
+				risks = append(risks, StructuralRisk{
+					Type:        RiskNoTestMapping,
+					Description: fmt.Sprintf("No test mapping found for: %s", file),
+					Severity:    "medium",
+					FilePath:    file,
+					Triggered:   false, // Don't auto-expand for individual files
+				})
+			}
+		}
+
+		// Check for dynamic imports if we have a content reader
+		if readContent != nil {
+			// Only check source files that might have dynamic imports
+			ext := strings.ToLower(filepath.Ext(file))
+			if ext == ".js" || ext == ".ts" || ext == ".tsx" || ext == ".jsx" ||
+				ext == ".mjs" || ext == ".cjs" || ext == ".py" || ext == ".go" {
+				content, err := readContent(file)
+				if err == nil && len(content) > 0 {
+					if hasDynamic, desc := detectDynamicImports(content, file); hasDynamic {
+						risks = append(risks, StructuralRisk{
+							Type:        RiskDynamicImport,
+							Description: fmt.Sprintf("Dynamic import in %s: %s - static analysis may be incomplete", file, desc),
+							Severity:    "high",
+							FilePath:    file,
+							Triggered:   true, // Auto-expand because we can't trust the dependency graph
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Check for too many files changed
+	const manyFilesThreshold = 20
+	if len(changedFiles) > manyFilesThreshold {
+		risks = append(risks, StructuralRisk{
+			Type:        RiskManyFilesChanged,
+			Description: fmt.Sprintf("Many files changed (%d) - consider running full suite", len(changedFiles)),
+			Severity:    "medium",
+			FilePath:    "",
+			Triggered:   false, // Warning only, don't auto-expand
+		})
+	}
+
+	// Check for cross-module changes
+	if len(modules) > 2 {
+		risks = append(risks, StructuralRisk{
+			Type:        RiskCrossModuleChange,
+			Description: fmt.Sprintf("Changes span %d modules - increased risk of missed dependencies", len(modules)),
+			Severity:    "medium",
+			FilePath:    "",
+			Triggered:   false, // Warning only
+		})
+	}
+
+	return risks
+}
+
+// calculateConfidence returns a confidence score (0.0-1.0) based on the risk signals
+func calculateConfidence(risks []StructuralRisk, testsFound int, changedFiles int) float64 {
+	if changedFiles == 0 {
+		return 1.0 // No changes = max confidence
+	}
+
+	// Start with base confidence
+	confidence := 0.8
+
+	// Reduce confidence for each high-severity risk
+	for _, risk := range risks {
+		switch risk.Severity {
+		case "critical":
+			confidence -= 0.3
+		case "high":
+			confidence -= 0.2
+		case "medium":
+			confidence -= 0.1
+		case "low":
+			confidence -= 0.05
+		}
+	}
+
+	// Reduce confidence if no tests found
+	if testsFound == 0 {
+		confidence -= 0.3
+	}
+
+	// Reduce confidence for many changes
+	if changedFiles > 10 {
+		confidence -= 0.1
+	}
+	if changedFiles > 20 {
+		confidence -= 0.1
+	}
+
+	// Clamp to valid range
+	if confidence < 0.0 {
+		confidence = 0.0
+	}
+	if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	return confidence
+}
+
+// shouldExpandForSafety determines if the selection should be expanded based on safety mode and risks
+func shouldExpandForSafety(safetyMode string, risks []StructuralRisk, confidence float64, policy CIPolicyConfig) (bool, []string) {
+	var reasons []string
+
+	switch safetyMode {
+	case "shadow":
+		// Shadow mode: never expand, just observe
+		return false, nil
+
+	case "strict":
+		// Strict mode: never auto-expand (but panic switch can still force full)
+		return false, nil
+
+	case "guarded":
+		// Use policy thresholds for expansion decisions
+		minConfidence := policy.Thresholds.MinConfidence
+		if minConfidence == 0 {
+			minConfidence = 0.3 // Default fallback
+		}
+
+		// Guarded mode: expand if any high-severity triggered risk
+		for _, risk := range risks {
+			if risk.Triggered && (risk.Severity == "high" || risk.Severity == "critical") {
+				reasons = append(reasons, risk.Description)
+			}
+		}
+
+		// Expand if confidence is below policy threshold
+		if confidence < minConfidence {
+			reasons = append(reasons, fmt.Sprintf("Low confidence score: %.0f%% (threshold: %.0f%%)", confidence*100, minConfidence*100))
+		}
+
+		return len(reasons) > 0, reasons
+	}
+
+	return false, nil
+}
+
+// checkPanicSwitch checks environment variables and returns true if full run is forced
+func checkPanicSwitch() bool {
+	// Check for panic switch environment variables
+	if os.Getenv("KAI_FORCE_FULL") == "1" || os.Getenv("KAI_FORCE_FULL") == "true" {
+		return true
+	}
+	if os.Getenv("KAI_PANIC") == "1" || os.Getenv("KAI_PANIC") == "true" {
+		return true
+	}
+	return false
+}
+
+// getAllTestFiles returns all test files from the file list
+func getAllTestFiles(files []*graph.Node) []string {
+	var tests []string
+	for _, f := range files {
+		path, _ := f.Payload["path"].(string)
+		if parse.IsTestFile(path) {
+			tests = append(tests, path)
+		}
+	}
+	sort.Strings(tests)
+	return tests
 }
 
 func runCIPlan(cmd *cobra.Command, args []string) error {
@@ -1996,11 +3390,13 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 	selector := args[0]
 
 	var baseSnapshotID, headSnapshotID []byte
+	var changesetID []byte // Track for provenance
 	var changedFiles []string
 
 	// Try to resolve as changeset first
 	if strings.HasPrefix(selector, "@cs:") {
 		csID, err := resolveChangeSetID(db, selector)
+		changesetID = csID // Save for provenance
 		if err != nil {
 			return fmt.Errorf("resolving changeset: %w", err)
 		}
@@ -2067,15 +3463,43 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting changed files: %w", err)
 	}
 
+	// Check panic switch first
+	panicSwitch := checkPanicSwitch()
+
+	// Load CI policy configuration
+	ciPolicy, policyHash, err := loadCIPolicy()
+	if err != nil {
+		return fmt.Errorf("loading CI policy: %w", err)
+	}
+
+	// Build provenance info
+	var changesetHex, baseHex, headHex string
+	if changesetID != nil {
+		changesetHex = util.BytesToHex(changesetID)
+	}
+	if baseSnapshotID != nil {
+		baseHex = util.BytesToHex(baseSnapshotID)
+	}
+	if headSnapshotID != nil {
+		headHex = util.BytesToHex(headSnapshotID)
+	}
+
+	// Track which analyzers we use
+	analyzersUsed := []string{}
+
 	// Build the plan
 	plan := CIPlan{
-		Version: 1,
-		Mode:    "selective",
-		Risk:    "low",
+		Version:    1,
+		Mode:       "selective",
+		Risk:       "low",
+		SafetyMode: ciSafetyMode,
+		Confidence: 1.0,
 		Targets: CITargets{
-			Run:  []string{},
-			Skip: []string{},
-			Tags: make(map[string][]string),
+			Run:      []string{},
+			Skip:     []string{},
+			Full:     []string{}, // Will be populated for shadow mode
+			Tags:     make(map[string][]string),
+			Fallback: ciSafetyMode == "guarded", // Enable fallback in guarded mode
 		},
 		Impact: CIImpact{
 			FilesChanged:    changedFiles,
@@ -2088,22 +3512,64 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			Expanded:     false,
 			FallbackUsed: "",
 		},
+		Safety: CISafety{
+			StructuralRisks:  []StructuralRisk{},
+			Confidence:       1.0,
+			RecommendFull:    false,
+			PanicSwitch:      panicSwitch,
+			AutoExpanded:     false,
+			ExpansionReasons: []string{},
+		},
+		Uncertainty: CIUncertainty{
+			Score:   0,
+			Sources: []string{},
+		},
+		ExpansionLog: []string{},
+		Provenance: CIProvenance{
+			Changeset:       changesetHex,
+			Base:            baseHex,
+			Head:            headHex,
+			KaiVersion:      Version,
+			DetectorVersion: DetectorVersion,
+			GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+			Analyzers:       analyzersUsed, // Will be populated as we analyze
+			PolicyHash:      policyHash,
+		},
+		Prediction: CIPrediction{},
 	}
 
-	// No changes = nothing to do
-	if len(changedFiles) == 0 {
+	// Get all files in the snapshot for graph context (need this for all paths)
+	files, err := creator.GetSnapshotFiles(headSnapshotID)
+	if err != nil {
+		return fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	// Get all test files for full suite reference
+	allTestFiles := getAllTestFiles(files)
+
+	// Handle panic switch - forces full run regardless of mode
+	if panicSwitch {
+		plan.Mode = "full"
+		plan.Risk = "low"
+		plan.Targets.Run = allTestFiles
+		plan.Safety.RecommendFull = true
+		plan.Safety.RecommendReason = "Panic switch activated (KAI_FORCE_FULL or KAI_PANIC env var)"
+
+		// For shadow mode, still track prediction data
+		if ciSafetyMode == "shadow" {
+			plan.Prediction.SelectiveTests = 0 // Would have been 0 before panic
+			plan.Prediction.FullTests = len(allTestFiles)
+			plan.Prediction.PredictedSavings = 0.0
+		}
+	} else if len(changedFiles) == 0 {
+		// No changes = nothing to do
 		plan.Mode = "skip"
 		plan.Risk = "low"
+		plan.Safety.Confidence = 1.0
 	} else {
 		// Find affected targets based on strategy
 		affectedTargets := make(map[string]bool)
 		fallbackUsed := ""
-
-		// Get all files in the snapshot for graph context
-		files, err := creator.GetSnapshotFiles(headSnapshotID)
-		if err != nil {
-			return fmt.Errorf("getting snapshot files: %w", err)
-		}
 
 		filePathByID := make(map[string]string)
 		fileIDByPath := make(map[string][]byte)
@@ -2124,10 +3590,12 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			switch strat {
 			case "symbols":
 				// Try symbol-level analysis
+				analyzersUsed = append(analyzersUsed, "symbols@1")
 				// For now, fall through to imports
 				continue
 
 			case "imports":
+				analyzersUsed = append(analyzersUsed, "imports@1")
 				// Use file-level import graph
 				for _, changedPath := range changedFiles {
 					changedID, ok := fileIDByPath[changedPath]
@@ -2162,14 +3630,175 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 				}
 
 			case "coverage":
-				// Would use learned test mappings - not implemented yet
-				continue
+				// Skip if coverage is disabled in policy
+				if !ciPolicy.Coverage.Enabled {
+					continue
+				}
+
+				analyzersUsed = append(analyzersUsed, "coverage@1")
+				// Use coverage map to find tests that cover changed files
+				coverageMap := loadOrCreateCoverageMap()
+
+				// Check if coverage data is too old based on policy
+				lookbackDays := ciPolicy.Coverage.LookbackDays
+				if lookbackDays == 0 {
+					lookbackDays = 30 // Default
+				}
+
+				// Track coverage stats
+				filesWithCoverage := 0
+				filesWithoutCoverage := 0
+				testsFromCoverage := make(map[string]bool)
+
+				for _, changedPath := range changedFiles {
+					// Skip test files themselves
+					if parse.IsTestFile(changedPath) {
+						continue
+					}
+
+					// Check if we have coverage data for this file
+					entries, hasCoverage := coverageMap.Entries[changedPath]
+					if !hasCoverage {
+						// Also try relative path variants
+						for mapPath, mapEntries := range coverageMap.Entries {
+							if strings.HasSuffix(mapPath, changedPath) || strings.HasSuffix(changedPath, mapPath) {
+								entries = mapEntries
+								hasCoverage = true
+								break
+							}
+						}
+					}
+
+					if hasCoverage && len(entries) > 0 {
+						filesWithCoverage++
+						for _, entry := range entries {
+							// Filter by MinHits policy
+							if entry.HitCount >= ciPolicy.Coverage.MinHits && entry.TestID != "aggregate" && entry.TestID != "" {
+								testsFromCoverage[entry.TestID] = true
+							}
+						}
+					} else {
+						filesWithoutCoverage++
+					}
+				}
+
+				// Add tests from coverage to affected targets
+				for testPath := range testsFromCoverage {
+					affectedTargets[testPath] = true
+				}
+
+				// Build coverage info for the plan
+				var coverageAge string
+				if coverageMap.IngestedAt != "" {
+					coverageAge = coverageMap.IngestedAt
+				}
+
+				plan.Coverage = &CoverageInfo{
+					Enabled:              true,
+					LookbackDays:         lookbackDays,
+					FilesWithCoverage:    filesWithCoverage,
+					FilesWithoutCoverage: filesWithoutCoverage,
+					TestsFromCoverage:    mapKeysToSortedSlice(testsFromCoverage),
+					CoverageMapAge:       coverageAge,
+				}
+
+				// If files without coverage, increase uncertainty
+				if filesWithoutCoverage > 0 {
+					plan.Uncertainty.Score += 10 * filesWithoutCoverage
+					plan.Uncertainty.Sources = append(plan.Uncertainty.Sources,
+						fmt.Sprintf("no_coverage_data:%d_files", filesWithoutCoverage))
+				}
+
+				if len(affectedTargets) > 0 {
+					fallbackUsed = "coverage"
+					break
+				}
 			}
 
 			if len(affectedTargets) > 0 {
 				break
 			}
 		}
+
+		// === CONTRACT DETECTION ===
+		// Check if any changed files are registered contract schemas
+		if ciPolicy.Contracts.Enabled {
+			contractRegistry := loadOrCreateContractRegistry()
+			if len(contractRegistry.Contracts) > 0 {
+				var schemasChanged []ContractChange
+				testsFromContracts := make(map[string]bool)
+				generatedChanged := make(map[string]bool)
+
+				// Build a set of changed file paths for quick lookup
+				changedSet := make(map[string]bool)
+				for _, p := range changedFiles {
+					changedSet[p] = true
+				}
+
+				for _, contract := range contractRegistry.Contracts {
+					// Check if this contract schema was changed
+					if changedSet[contract.Path] {
+						// Read current schema and compute digest
+						currentDigest := ""
+						if data, err := os.ReadFile(contract.Path); err == nil {
+							currentDigest = util.Blake3HashHex(data)
+						}
+
+						// If digest changed from registered, this is a schema change
+						if currentDigest != "" && currentDigest != contract.Digest {
+							change := ContractChange{
+								Path:         contract.Path,
+								Type:         contract.Type,
+								Service:      contract.Service,
+								DigestBefore: contract.Digest,
+								DigestAfter:  currentDigest,
+								Tests:        contract.Tests,
+							}
+							schemasChanged = append(schemasChanged, change)
+
+							// Add registered tests for this contract
+							for _, testPath := range contract.Tests {
+								testsFromContracts[testPath] = true
+								affectedTargets[testPath] = true
+							}
+						}
+					}
+
+					// Check if any generated files from this contract changed
+					for _, genPath := range contract.Generated {
+						if changedSet[genPath] {
+							generatedChanged[genPath] = true
+							// Also add the contract tests when generated files change
+							for _, testPath := range contract.Tests {
+								testsFromContracts[testPath] = true
+								affectedTargets[testPath] = true
+							}
+						}
+					}
+				}
+
+				// Build contract info for the plan
+				if len(schemasChanged) > 0 || len(generatedChanged) > 0 {
+					plan.Contracts = &ContractInfo{
+						Changed:          len(schemasChanged) > 0,
+						SchemasChanged:   schemasChanged,
+						TestsFromSchema:  mapKeysToSortedSlice(testsFromContracts),
+						GeneratedChanged: mapKeysToSortedSlice(generatedChanged),
+					}
+
+					// Contract changes increase risk
+					if len(schemasChanged) > 0 {
+						plan.Uncertainty.Score += 20
+						plan.Uncertainty.Sources = append(plan.Uncertainty.Sources,
+							fmt.Sprintf("contract_change:%d_schemas", len(schemasChanged)))
+						analyzersUsed = append(analyzersUsed, "contracts@1")
+					}
+				}
+			}
+		}
+
+		// Update provenance with analyzers used
+		plan.Provenance.Analyzers = analyzersUsed
 
 		plan.Policy.FallbackUsed = fallbackUsed
 
@@ -2184,8 +3813,10 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			plan.Risk = "medium"
 			plan.Impact.Uncertainty = append(plan.Impact.Uncertainty,
 				"No test files found for changed files - dependency graph may be incomplete")
+			plan.Uncertainty.Score += 30
+			plan.Uncertainty.Sources = append(plan.Uncertainty.Sources, "no_test_mapping:present")
 
-			// Apply risk policy
+			// Apply risk policy (original behavior still applies)
 			switch ciRiskPolicy {
 			case "expand":
 				// Add all test files as targets
@@ -2198,12 +3829,236 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 				sort.Strings(plan.Targets.Run)
 				plan.Policy.Expanded = true
 				plan.Risk = "low" // Expanded to be safe
+				plan.ExpansionLog = append(plan.ExpansionLog,
+					fmt.Sprintf("no_test_mapping → expanded to full suite (%d tests)", len(plan.Targets.Run)))
 
 			case "warn":
 				plan.Risk = "high"
 
 			case "fail":
 				return fmt.Errorf("uncertainty detected and risk-policy is 'fail': no test mappings found for changed files")
+			}
+		}
+
+		// === SAFETY MODE LOGIC ===
+
+		// Get modules affected for cross-module risk detection
+		var modulesAffected []string
+		if matcher != nil {
+			moduleSet := make(map[string]bool)
+			for _, f := range changedFiles {
+				modules := matcher.MatchPath(f)
+				for _, m := range modules {
+					moduleSet[m] = true
+				}
+			}
+			for m := range moduleSet {
+				modulesAffected = append(modulesAffected, m)
+			}
+			sort.Strings(modulesAffected)
+			plan.Impact.ModulesAffected = modulesAffected
+		}
+
+		// Create a content reader for dynamic import detection
+		// Map path -> digest for quick lookup
+		fileDigestByPath := make(map[string]string)
+		for _, f := range files {
+			if path, ok := f.Payload["path"].(string); ok {
+				if digest, ok := f.Payload["digest"].(string); ok {
+					fileDigestByPath[path] = digest
+				}
+			}
+		}
+		contentReader := func(path string) ([]byte, error) {
+			digest, ok := fileDigestByPath[path]
+			if !ok {
+				return nil, fmt.Errorf("file not found: %s", path)
+			}
+			return db.ReadObject(digest)
+		}
+
+		// Detect structural risks (with content analysis for dynamic imports)
+		risks := detectStructuralRisksWithContent(changedFiles, affectedTargets, allTestFiles, modulesAffected, contentReader)
+		plan.Safety.StructuralRisks = risks
+
+		// Detect dynamic imports in detail and perform scoped expansion
+		// Uses content-addressable caching by file digest for performance
+		var allDynamicImports []DynamicImportFile
+		var cacheHits, cacheMisses int
+		for _, changedPath := range changedFiles {
+			digest, hasDigest := fileDigestByPath[changedPath]
+
+			// Try cache first if we have a digest
+			if hasDigest {
+				if cached, ok := dynamicImportCache.Get(digest); ok {
+					cacheHits++
+					allDynamicImports = append(allDynamicImports, cached...)
+					continue
+				}
+			}
+
+			// Cache miss - perform detection
+			cacheMisses++
+			content, err := contentReader(changedPath)
+			if err != nil {
+				continue
+			}
+			imports := detectDynamicImportsDetailed(content, changedPath, &ciPolicy.DynamicImports)
+			allDynamicImports = append(allDynamicImports, imports...)
+
+			// Store in cache if we have a digest
+			if hasDigest {
+				dynamicImportCache.Set(digest, imports)
+			}
+		}
+
+		// Build module -> test map for scoped expansion
+		moduleTestMap := buildModuleTestMap(allTestFiles, modulesAffected)
+
+		// Perform scoped expansion based on policy
+		dynamicExpandedTests, dynamicImportInfo := expandForDynamicImports(
+			allDynamicImports,
+			&ciPolicy.DynamicImports,
+			allTestFiles,
+			changedFiles,
+			modulesAffected,
+			moduleTestMap,
+		)
+
+		// Add dynamically expanded tests to targets
+		if len(dynamicExpandedTests) > 0 {
+			for _, t := range dynamicExpandedTests {
+				if !affectedTargets[t] {
+					affectedTargets[t] = true
+					plan.Targets.Run = append(plan.Targets.Run, t)
+				}
+			}
+			sort.Strings(plan.Targets.Run)
+
+			// Log expansion
+			plan.ExpansionLog = append(plan.ExpansionLog,
+				fmt.Sprintf("dynamic_imports (%s) → expanded by %d tests",
+					ciPolicy.DynamicImports.Expansion, len(dynamicExpandedTests)))
+		}
+
+		// Attach dynamic import info to plan
+		plan.DynamicImport = dynamicImportInfo
+
+		// Add cache stats to telemetry
+		if plan.DynamicImport != nil {
+			plan.DynamicImport.Telemetry.CacheHits = cacheHits
+			plan.DynamicImport.Telemetry.CacheMisses = cacheMisses
+		}
+
+		// Add uncertainty sources from structural risks
+		for _, r := range risks {
+			source := fmt.Sprintf("%s:%s", r.Type, r.Severity)
+			plan.Uncertainty.Sources = append(plan.Uncertainty.Sources, source)
+			switch r.Severity {
+			case "critical":
+				plan.Uncertainty.Score += 40
+			case "high":
+				plan.Uncertainty.Score += 25
+			case "medium":
+				plan.Uncertainty.Score += 10
+			case "low":
+				plan.Uncertainty.Score += 5
+			}
+		}
+		// Cap uncertainty at 100
+		if plan.Uncertainty.Score > 100 {
+			plan.Uncertainty.Score = 100
+		}
+
+		// Calculate confidence
+		confidence := calculateConfidence(risks, len(affectedTargets), len(changedFiles))
+		plan.Safety.Confidence = confidence
+		plan.Confidence = confidence // Also set top-level confidence
+
+		// Check if we should expand for safety
+		shouldExpand, expansionReasons := shouldExpandForSafety(ciSafetyMode, risks, confidence, ciPolicy)
+
+		// Apply safety mode behavior
+		switch ciSafetyMode {
+		case "shadow":
+			// Shadow mode: compute selective plan but include full test list
+			// CI should run the full suite and compare results
+			plan.Mode = "shadow"
+			plan.Targets.Full = allTestFiles
+
+			// Populate prediction data for comparison
+			selectiveCount := len(plan.Targets.Run)
+			fullCount := len(allTestFiles)
+			var savings float64
+			if fullCount > 0 {
+				savings = float64(fullCount-selectiveCount) / float64(fullCount) * 100
+			}
+			plan.Prediction = CIPrediction{
+				SelectiveTests:   selectiveCount,
+				FullTests:        fullCount,
+				PredictedSavings: savings,
+			}
+
+			// Log what would have been selected
+			if len(risks) > 0 {
+				plan.Impact.Uncertainty = append(plan.Impact.Uncertainty,
+					fmt.Sprintf("Shadow mode: detected %d structural risks - would have expanded in guarded mode", len(risks)))
+			}
+
+		case "guarded":
+			// Guarded mode: expand if structural risks triggered
+			if shouldExpand {
+				// Expand to full suite
+				plan.Mode = "expanded"
+				plan.Targets.Run = allTestFiles
+				plan.Safety.AutoExpanded = true
+				plan.Safety.ExpansionReasons = expansionReasons
+				plan.Safety.RecommendFull = true
+				plan.Safety.RecommendReason = strings.Join(expansionReasons, "; ")
+				plan.Risk = "low" // Safe because we expanded
+				plan.Policy.Expanded = true
+
+				// Add expansion log entries
+				for _, reason := range expansionReasons {
+					plan.ExpansionLog = append(plan.ExpansionLog,
+						fmt.Sprintf("%s → expanded to full suite", reason))
+				}
+			} else {
+				plan.Mode = "selective"
+				// Still recommend full if confidence is low but not critical
+				if confidence < 0.5 {
+					plan.Safety.RecommendFull = true
+					plan.Safety.RecommendReason = fmt.Sprintf("Low confidence (%.0f%%) - consider running full suite", confidence*100)
+				}
+			}
+
+		case "strict":
+			// Strict mode: never auto-expand, just warn
+			plan.Mode = "selective"
+			plan.Targets.Fallback = false // Disable automatic fallback
+
+			// Still populate warnings
+			if shouldExpand {
+				plan.Safety.RecommendFull = true
+				plan.Safety.RecommendReason = fmt.Sprintf("Strict mode: %d triggered risks detected but not expanding (use KAI_FORCE_FULL=1 for full suite)", len(expansionReasons))
+				for _, reason := range expansionReasons {
+					plan.Impact.Uncertainty = append(plan.Impact.Uncertainty,
+						fmt.Sprintf("Risk detected (not expanding in strict mode): %s", reason))
+				}
+			}
+		}
+
+		// Adjust risk level based on safety analysis
+		if len(risks) > 0 && plan.Risk == "low" {
+			hasHighRisk := false
+			for _, r := range risks {
+				if r.Severity == "high" || r.Severity == "critical" {
+					hasHighRisk = true
+					break
+				}
+			}
+			if hasHighRisk && !plan.Safety.AutoExpanded {
+				plan.Risk = "medium"
 			}
 		}
 	}
@@ -2222,6 +4077,12 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Plan written to %s\n", ciOutFile)
 	}
 
+	// Handle --explain flag for human-readable output
+	if ciExplain {
+		printExplainTable(plan)
+		return nil
+	}
+
 	// Also print if --json flag or no output file
 	if jsonFlag || ciOutFile == "" {
 		fmt.Println(string(planJSON))
@@ -2229,7 +4090,9 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		// Print summary
 		fmt.Printf("\nCI Plan Summary:\n")
 		fmt.Printf("  Mode: %s\n", plan.Mode)
+		fmt.Printf("  Safety Mode: %s\n", plan.SafetyMode)
 		fmt.Printf("  Risk: %s\n", plan.Risk)
+		fmt.Printf("  Confidence: %.0f%%\n", plan.Safety.Confidence*100)
 		fmt.Printf("  Strategy: %s", plan.Policy.Strategy)
 		if plan.Policy.FallbackUsed != "" {
 			fmt.Printf(" (used: %s)", plan.Policy.FallbackUsed)
@@ -2237,12 +4100,247 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Printf("  Files changed: %d\n", len(plan.Impact.FilesChanged))
 		fmt.Printf("  Targets to run: %d\n", len(plan.Targets.Run))
-		if plan.Policy.Expanded {
-			fmt.Printf("  (Expanded due to uncertainty)\n")
+		if len(plan.Targets.Full) > 0 {
+			fmt.Printf("  Full suite size: %d\n", len(plan.Targets.Full))
+		}
+		if plan.Policy.Expanded || plan.Safety.AutoExpanded {
+			fmt.Printf("  (Expanded for safety)\n")
+		}
+		if plan.Safety.PanicSwitch {
+			fmt.Printf("  PANIC SWITCH: Full suite forced via env var\n")
+		}
+		if len(plan.Safety.StructuralRisks) > 0 {
+			fmt.Printf("  Structural risks: %d\n", len(plan.Safety.StructuralRisks))
+		}
+		// Dynamic import telemetry - detailed output
+		if plan.DynamicImport != nil && plan.DynamicImport.Detected {
+			fmt.Printf("\n  Dynamic Imports:\n")
+			fmt.Printf("    Detected: %d total\n", plan.DynamicImport.Telemetry.TotalDetected)
+			if plan.DynamicImport.Telemetry.Bounded > 0 {
+				fmt.Printf("    Bounded (safe): %d\n", plan.DynamicImport.Telemetry.Bounded)
+			}
+			if plan.DynamicImport.Telemetry.BoundedRisky > 0 {
+				fmt.Printf("    Bounded (risky footprint): %d\n", plan.DynamicImport.Telemetry.BoundedRisky)
+			}
+			if plan.DynamicImport.Telemetry.Unbounded > 0 {
+				fmt.Printf("    Unbounded: %d\n", plan.DynamicImport.Telemetry.Unbounded)
+			}
+			if plan.DynamicImport.Telemetry.Allowlisted > 0 {
+				fmt.Printf("    Allowlisted: %d\n", plan.DynamicImport.Telemetry.Allowlisted)
+			}
+
+			// Show per-file details for unbounded/risky imports
+			for _, imp := range plan.DynamicImport.Files {
+				if !imp.Bounded || imp.BoundedRisky {
+					if imp.Allowlisted {
+						continue
+					}
+					status := "unbounded"
+					if imp.BoundedRisky {
+						status = "bounded-risky"
+					}
+					fmt.Printf("    - %s:%d (%s) [%s]", imp.Path, imp.Line, imp.Kind, status)
+					if imp.ExpandedTo != "" {
+						fmt.Printf(" → %s", imp.ExpandedTo)
+					}
+					fmt.Println()
+				}
+			}
+
+			if plan.DynamicImport.Telemetry.WidenedTests > 0 {
+				fmt.Printf("    Tests widened: %d (strategy: %s)\n",
+					plan.DynamicImport.Telemetry.WidenedTests, plan.DynamicImport.Telemetry.StrategyUsed)
+			}
+			// Show cache performance stats if any caching occurred
+			if plan.DynamicImport.Telemetry.CacheHits > 0 || plan.DynamicImport.Telemetry.CacheMisses > 0 {
+				total := plan.DynamicImport.Telemetry.CacheHits + plan.DynamicImport.Telemetry.CacheMisses
+				hitRate := float64(plan.DynamicImport.Telemetry.CacheHits) / float64(total) * 100
+				fmt.Printf("    Cache: %d/%d hits (%.0f%%)\n",
+					plan.DynamicImport.Telemetry.CacheHits, total, hitRate)
+			}
+		}
+		if plan.Safety.RecommendFull && !plan.Safety.AutoExpanded {
+			fmt.Printf("  WARNING: %s\n", plan.Safety.RecommendReason)
+		}
+		// Shadow mode specific output
+		if plan.Mode == "shadow" {
+			fmt.Printf("\n  Shadow Mode Analysis:\n")
+			fmt.Printf("    Selective would run: %d tests\n", plan.Prediction.SelectiveTests)
+			fmt.Printf("    Full suite: %d tests\n", plan.Prediction.FullTests)
+			fmt.Printf("    Predicted savings: %.1f%%\n", plan.Prediction.PredictedSavings)
 		}
 	}
 
+	// Fail-closed: exit non-zero if no tests selected and risk is not low
+	// This prevents silently passing CI when test selection fails
+	if len(plan.Targets.Run) == 0 && plan.Risk != "low" {
+		return fmt.Errorf("fail-closed: no tests selected but risk level is '%s' (uncertainty: %d%%)", plan.Risk, plan.Uncertainty.Score)
+	}
+
+	// Also fail if policy says to fail on expansion
+	if ciPolicy.Behavior.FailOnExpansion && plan.Safety.AutoExpanded {
+		return fmt.Errorf("fail-closed: expansion occurred and policy.behavior.failOnExpansion is true")
+	}
+
 	return nil
+}
+
+// printExplainTable outputs a human-readable why-in/why-out table
+func printExplainTable(plan CIPlan) {
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                           CI TEST SELECTION PLAN                             ║")
+	fmt.Printf("╠══════════════════════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("║ Mode: %-12s  Safety: %-10s  Risk: %-8s  Confidence: %3.0f%% ║\n",
+		plan.Mode, plan.SafetyMode, plan.Risk, plan.Confidence*100)
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+
+	// Changes section
+	fmt.Println("║ CHANGES                                                                      ║")
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	for _, f := range plan.Impact.FilesChanged {
+		if len(f) > 74 {
+			f = "..." + f[len(f)-71:]
+		}
+		fmt.Printf("║   %-75s║\n", f)
+	}
+	if len(plan.Impact.FilesChanged) == 0 {
+		fmt.Println("║   (no changes)                                                               ║")
+	}
+
+	// Tests to run section
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Printf("║ TESTS TO RUN (%d)                                                             ║\n", len(plan.Targets.Run))
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	for i, t := range plan.Targets.Run {
+		if i >= 10 {
+			fmt.Printf("║   ... and %d more                                                            ║\n", len(plan.Targets.Run)-10)
+			break
+		}
+		if len(t) > 74 {
+			t = "..." + t[len(t)-71:]
+		}
+		fmt.Printf("║   %-75s║\n", t)
+	}
+	if len(plan.Targets.Run) == 0 {
+		fmt.Println("║   (none selected)                                                            ║")
+	}
+
+	// Tests skipped section
+	if len(plan.Targets.Skip) > 0 {
+		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+		fmt.Printf("║ TESTS SKIPPED (%d)                                                            ║\n", len(plan.Targets.Skip))
+		fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+		for i, t := range plan.Targets.Skip {
+			if i >= 5 {
+				fmt.Printf("║   ... and %d more                                                            ║\n", len(plan.Targets.Skip)-5)
+				break
+			}
+			if len(t) > 74 {
+				t = "..." + t[len(t)-71:]
+			}
+			fmt.Printf("║   %-75s║\n", t)
+		}
+	}
+
+	// Risks section
+	if len(plan.Safety.StructuralRisks) > 0 {
+		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+		fmt.Println("║ STRUCTURAL RISKS                                                             ║")
+		fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+		for _, r := range plan.Safety.StructuralRisks {
+			triggered := " "
+			if r.Triggered {
+				triggered = "!"
+			}
+			severity := fmt.Sprintf("[%s]", r.Severity)
+			desc := r.Description
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
+			}
+			fmt.Printf("║ %s %-8s %-64s║\n", triggered, severity, desc)
+		}
+	}
+
+	// Dynamic imports section
+	if plan.DynamicImport != nil && plan.DynamicImport.Detected {
+		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+		fmt.Printf("║ DYNAMIC IMPORTS (detected: %d, bounded: %d, unbounded: %d)                    ║\n",
+			plan.DynamicImport.Telemetry.TotalDetected,
+			plan.DynamicImport.Telemetry.Bounded,
+			plan.DynamicImport.Telemetry.Unbounded)
+		fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+		for i, imp := range plan.DynamicImport.Files {
+			if i >= 5 {
+				fmt.Printf("║   ... and %d more                                                            ║\n", len(plan.DynamicImport.Files)-5)
+				break
+			}
+			status := "⚠"
+			if imp.Bounded {
+				status = "✓"
+			} else if imp.Allowlisted {
+				status = "○"
+			}
+			desc := fmt.Sprintf("%s %s:%d (%s)", status, imp.Path, imp.Line, imp.Kind)
+			if len(desc) > 74 {
+				desc = desc[:71] + "..."
+			}
+			fmt.Printf("║   %-75s║\n", desc)
+		}
+		fmt.Printf("║   Strategy: %-65s║\n", plan.DynamicImport.Policy.Expansion)
+		if plan.DynamicImport.Telemetry.WidenedTests > 0 {
+			fmt.Printf("║   Widened tests: %-60d║\n", plan.DynamicImport.Telemetry.WidenedTests)
+		}
+	}
+
+	// Expansion log section
+	if len(plan.ExpansionLog) > 0 {
+		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+		fmt.Println("║ EXPANSION LOG                                                                ║")
+		fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+		for _, entry := range plan.ExpansionLog {
+			if len(entry) > 74 {
+				entry = entry[:71] + "..."
+			}
+			fmt.Printf("║   %-75s║\n", entry)
+		}
+	}
+
+	// Uncertainty section
+	if plan.Uncertainty.Score > 0 {
+		fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+		fmt.Printf("║ UNCERTAINTY SCORE: %d/100                                                     ║\n", plan.Uncertainty.Score)
+		fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+		for _, s := range plan.Uncertainty.Sources {
+			if len(s) > 74 {
+				s = s[:71] + "..."
+			}
+			fmt.Printf("║   %-75s║\n", s)
+		}
+	}
+
+	// Provenance section
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Println("║ PROVENANCE                                                                   ║")
+	fmt.Println("╟──────────────────────────────────────────────────────────────────────────────╢")
+	fmt.Printf("║   Generated: %-63s║\n", plan.Provenance.GeneratedAt)
+	fmt.Printf("║   Kai Version: %-61s║\n", plan.Provenance.KaiVersion)
+	if plan.Provenance.Changeset != "" {
+		cs := plan.Provenance.Changeset
+		if len(cs) > 16 {
+			cs = cs[:16]
+		}
+		fmt.Printf("║   Changeset: %-63s║\n", cs)
+	}
+	if plan.Provenance.PolicyHash != "" {
+		fmt.Printf("║   Policy Hash: %-61s║\n", plan.Provenance.PolicyHash)
+	}
+	if len(plan.Provenance.Analyzers) > 0 {
+		fmt.Printf("║   Analyzers: %-63s║\n", strings.Join(plan.Provenance.Analyzers, ", "))
+	}
+
+	fmt.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
+	fmt.Println()
 }
 
 func runCIPrint(cmd *cobra.Command, args []string) error {
@@ -2300,24 +4398,202 @@ func runCIPrint(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+	case "safety":
+		fmt.Println("Safety Analysis")
+		fmt.Println(strings.Repeat("-", 40))
+		fmt.Printf("Safety Mode:  %s\n", plan.SafetyMode)
+		fmt.Printf("Confidence:   %.0f%%\n", plan.Safety.Confidence*100)
+		fmt.Printf("Panic Switch: %v\n", plan.Safety.PanicSwitch)
+		fmt.Printf("Auto Expanded: %v\n", plan.Safety.AutoExpanded)
+		if plan.Safety.RecommendFull {
+			fmt.Printf("Recommend Full: yes\n")
+			fmt.Printf("Reason: %s\n", plan.Safety.RecommendReason)
+		}
+		if len(plan.Safety.StructuralRisks) > 0 {
+			fmt.Printf("\nStructural Risks: %d\n", len(plan.Safety.StructuralRisks))
+			for _, r := range plan.Safety.StructuralRisks {
+				triggered := ""
+				if r.Triggered {
+					triggered = " [TRIGGERED]"
+				}
+				fmt.Printf("  [%s] %s%s\n", r.Severity, r.Description, triggered)
+			}
+		}
+		if len(plan.Safety.ExpansionReasons) > 0 {
+			fmt.Println("\nExpansion Reasons:")
+			for _, reason := range plan.Safety.ExpansionReasons {
+				fmt.Printf("  - %s\n", reason)
+			}
+		}
+		// Shadow mode prediction
+		if plan.Mode == "shadow" {
+			fmt.Println("\nPrediction (Shadow Mode):")
+			fmt.Printf("  Selective would run: %d tests\n", plan.Prediction.SelectiveTests)
+			fmt.Printf("  Full suite: %d tests\n", plan.Prediction.FullTests)
+			fmt.Printf("  Predicted savings: %.1f%%\n", plan.Prediction.PredictedSavings)
+		}
+
+	case "causes":
+		fmt.Println("Test Selection Root Causes")
+		fmt.Println(strings.Repeat("-", 40))
+
+		// Build cause map: test -> reasons
+		causeMap := make(map[string][]string)
+
+		// 1. Direct changes - tests that are themselves in the changed files
+		for _, f := range plan.Impact.FilesChanged {
+			for _, t := range plan.Targets.Run {
+				if t == f || strings.HasSuffix(f, t) || strings.HasSuffix(t, f) {
+					causeMap[t] = append(causeMap[t], fmt.Sprintf("directly changed: %s", f))
+				}
+			}
+		}
+
+		// 2. Symbol-level impact
+		for _, sym := range plan.Impact.SymbolsChanged {
+			for _, t := range plan.Targets.Run {
+				// Check if test imports/depends on this symbol
+				if strings.Contains(sym.FQ, filepath.Dir(t)) {
+					causeMap[t] = append(causeMap[t], fmt.Sprintf("symbol changed: %s (%s)", sym.FQ, sym.Change))
+				}
+			}
+		}
+
+		// 3. Expansion log entries
+		for _, log := range plan.ExpansionLog {
+			// Parse expansion log: "reason → tests..."
+			parts := strings.SplitN(log, " → ", 2)
+			if len(parts) == 2 {
+				reason := parts[0]
+				// This expansion reason applies to added tests
+				for _, t := range plan.Targets.Run {
+					if len(causeMap[t]) == 0 {
+						causeMap[t] = append(causeMap[t], fmt.Sprintf("expansion: %s", reason))
+					}
+				}
+			}
+		}
+
+		// 4. Dynamic import causes
+		if plan.DynamicImport != nil && plan.DynamicImport.Detected {
+			for _, imp := range plan.DynamicImport.Files {
+				if imp.ExpandedTo != "" {
+					// ExpandedTo might be a module or test pattern
+					for _, t := range plan.Targets.Run {
+						if strings.Contains(t, imp.ExpandedTo) || strings.HasPrefix(t, imp.ExpandedTo) {
+							status := "unbounded"
+							if imp.BoundedRisky {
+								status = "bounded-risky"
+							}
+							causeMap[t] = append(causeMap[t],
+								fmt.Sprintf("dynamic import in %s:%d (%s) [%s]",
+									imp.Path, imp.Line, imp.Kind, status))
+						}
+					}
+				}
+			}
+		}
+
+		// 5. Structural risks that triggered expansion
+		for _, r := range plan.Safety.StructuralRisks {
+			if r.Triggered {
+				for _, t := range plan.Targets.Run {
+					if len(causeMap[t]) == 0 {
+						causeMap[t] = append(causeMap[t],
+							fmt.Sprintf("structural risk: %s (%s)", r.Type, r.Severity))
+					}
+				}
+			}
+		}
+
+		// 6. Auto-expansion reasons
+		if plan.Safety.AutoExpanded {
+			for _, reason := range plan.Safety.ExpansionReasons {
+				for _, t := range plan.Targets.Run {
+					if len(causeMap[t]) == 0 {
+						causeMap[t] = append(causeMap[t], fmt.Sprintf("safety expansion: %s", reason))
+					}
+				}
+			}
+		}
+
+		// Output organized by test
+		if len(plan.Targets.Run) == 0 {
+			fmt.Println("  No tests selected.")
+		} else {
+			for _, t := range plan.Targets.Run {
+				fmt.Printf("\n  %s\n", t)
+				causes := causeMap[t]
+				if len(causes) == 0 {
+					fmt.Println("    → dependency graph traversal (inferred)")
+				} else {
+					// Deduplicate causes
+					seen := make(map[string]bool)
+					for _, c := range causes {
+						if !seen[c] {
+							seen[c] = true
+							fmt.Printf("    → %s\n", c)
+						}
+					}
+				}
+			}
+		}
+
+		// Show if full suite was triggered
+		if plan.Safety.PanicSwitch {
+			fmt.Println("\n  FULL SUITE TRIGGERED (panic switch)")
+		}
+
 	case "summary":
 		fallthrough
 	default:
+		// One-line summary for quick reading
+		coverageTests := 0
+		contractTests := 0
+		if plan.Coverage != nil {
+			coverageTests = len(plan.Coverage.TestsFromCoverage)
+		}
+		if plan.Contracts != nil {
+			contractTests = len(plan.Contracts.TestsFromSchema)
+		}
+		fallbackStatus := "used=false"
+		if plan.Fallback.Used {
+			fallbackStatus = fmt.Sprintf("used=true (%s)", plan.Fallback.Reason)
+		}
+		fmt.Printf("Mode: %s | Risk: %s (score %d) | Fallback: %s | Coverage: %d tests | Contracts: %d tests\n\n",
+			plan.SafetyMode, plan.Risk, plan.Uncertainty.Score, fallbackStatus, coverageTests, contractTests)
+
 		fmt.Println("CI Plan Summary")
 		fmt.Println(strings.Repeat("-", 40))
-		fmt.Printf("Mode:     %s\n", plan.Mode)
-		fmt.Printf("Risk:     %s\n", plan.Risk)
-		fmt.Printf("Strategy: %s\n", plan.Policy.Strategy)
+		fmt.Printf("Mode:       %s\n", plan.Mode)
+		fmt.Printf("Safety:     %s\n", plan.SafetyMode)
+		fmt.Printf("Risk:       %s\n", plan.Risk)
+		fmt.Printf("Confidence: %.0f%%\n", plan.Safety.Confidence*100)
+		fmt.Printf("Strategy:   %s\n", plan.Policy.Strategy)
 		if plan.Policy.FallbackUsed != "" {
-			fmt.Printf("Used:     %s\n", plan.Policy.FallbackUsed)
+			fmt.Printf("Used:       %s\n", plan.Policy.FallbackUsed)
 		}
-		if plan.Policy.Expanded {
-			fmt.Printf("Expanded: yes (widened due to uncertainty)\n")
+		if plan.Policy.Expanded || plan.Safety.AutoExpanded {
+			fmt.Printf("Expanded:   yes (for safety)\n")
+		}
+		if plan.Safety.PanicSwitch {
+			fmt.Printf("Panic:      FULL SUITE FORCED\n")
 		}
 		fmt.Println()
-		fmt.Printf("Changed:  %d files\n", len(plan.Impact.FilesChanged))
-		fmt.Printf("Run:      %d targets\n", len(plan.Targets.Run))
-		fmt.Printf("Skip:     %d targets\n", len(plan.Targets.Skip))
+		fmt.Printf("Changed:    %d files\n", len(plan.Impact.FilesChanged))
+		fmt.Printf("Run:        %d targets\n", len(plan.Targets.Run))
+		fmt.Printf("Skip:       %d targets\n", len(plan.Targets.Skip))
+		if len(plan.Targets.Full) > 0 {
+			fmt.Printf("Full Suite: %d targets\n", len(plan.Targets.Full))
+		}
+
+		if len(plan.Safety.StructuralRisks) > 0 {
+			fmt.Printf("\nRisks:      %d detected\n", len(plan.Safety.StructuralRisks))
+		}
+
+		if plan.Safety.RecommendFull && !plan.Safety.AutoExpanded {
+			fmt.Printf("\nWARNING: %s\n", plan.Safety.RecommendReason)
+		}
 
 		if len(plan.Impact.Uncertainty) > 0 {
 			fmt.Printf("\nWarnings: %d\n", len(plan.Impact.Uncertainty))
@@ -2325,6 +4601,695 @@ func runCIPrint(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  - %s\n", u)
 			}
 		}
+
+		// Shadow mode prediction summary
+		if plan.Mode == "shadow" {
+			fmt.Println("\nShadow Mode:")
+			fmt.Printf("  Would save: %.1f%% (%d of %d tests)\n",
+				plan.Prediction.PredictedSavings,
+				plan.Prediction.FullTests-plan.Prediction.SelectiveTests,
+				plan.Prediction.FullTests)
+		}
+
+		// Coverage info
+		if plan.Coverage != nil && plan.Coverage.Enabled {
+			fmt.Println("\nCoverage:")
+			fmt.Printf("  Files with coverage:    %d\n", plan.Coverage.FilesWithCoverage)
+			fmt.Printf("  Files without coverage: %d\n", plan.Coverage.FilesWithoutCoverage)
+			if len(plan.Coverage.TestsFromCoverage) > 0 {
+				fmt.Printf("  Tests from coverage:    %d\n", len(plan.Coverage.TestsFromCoverage))
+			}
+		}
+
+		// Contracts info
+		if plan.Contracts != nil && plan.Contracts.Changed {
+			fmt.Println("\nContracts:")
+			fmt.Printf("  Schemas changed: %d\n", len(plan.Contracts.SchemasChanged))
+			for _, sc := range plan.Contracts.SchemasChanged {
+				fmt.Printf("    - %s (%s)\n", sc.Path, sc.Type)
+			}
+			if len(plan.Contracts.TestsFromSchema) > 0 {
+				fmt.Printf("  Tests from contracts: %d\n", len(plan.Contracts.TestsFromSchema))
+			}
+		}
+
+		// Fallback status
+		if plan.Fallback.Used {
+			fmt.Println("\nFallback:")
+			fmt.Printf("  Used:   true\n")
+			fmt.Printf("  Reason: %s\n", plan.Fallback.Reason)
+			if plan.Fallback.Trigger != "" {
+				fmt.Printf("  Trigger: %s\n", plan.Fallback.Trigger)
+			}
+			if plan.Fallback.ExitCode != 0 {
+				fmt.Printf("  Exit Code: %d\n", plan.Fallback.ExitCode)
+			}
+		}
+	}
+
+	return nil
+}
+
+// RuntimeRiskReport represents the output of detect-runtime-risk
+type RuntimeRiskReport struct {
+	RisksDetected     bool                `json:"risksDetected"`
+	TotalRisks        int                 `json:"totalRisks"`
+	TripwireTriggered bool                `json:"tripwireTriggered"`
+	Risks             []RuntimeRiskSignal `json:"risks"`
+	Recommendation    string              `json:"recommendation"`
+}
+
+// RuntimeRiskSignal represents a single detected runtime risk
+type RuntimeRiskSignal struct {
+	Type        string `json:"type"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	File        string `json:"file,omitempty"`
+	Line        int    `json:"line,omitempty"`
+	Evidence    string `json:"evidence,omitempty"`
+}
+
+// Runtime risk signal types
+const (
+	RuntimeRiskModuleNotFound = "module_not_found"
+	RuntimeRiskImportError    = "import_error"
+	RuntimeRiskTypeError      = "type_error"
+	RuntimeRiskSetupCrash     = "setup_crash"
+	RuntimeRiskCoverageAnomly = "coverage_anomaly"
+	RuntimeRiskUnexpectedFail = "unexpected_failure"
+)
+
+// Patterns to detect runtime risks in test output
+var runtimeRiskPatterns = []struct {
+	pattern     string
+	riskType    string
+	severity    string
+	description string
+}{
+	// ===== Node.js / JavaScript =====
+	{`Cannot find module ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Module not found - likely selection miss"},
+	{`Error: Cannot find module`, RuntimeRiskModuleNotFound, "critical", "Module not found - likely selection miss"},
+	{`Module not found: Error: Can't resolve ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Webpack module resolution failed"},
+	{`Error: Cannot resolve module ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Module resolution failed"},
+	{`SyntaxError: Cannot use import statement`, RuntimeRiskImportError, "high", "ES module import error"},
+	{`ReferenceError: (\w+) is not defined`, RuntimeRiskImportError, "high", "Reference error - possible missing import"},
+	{`TypeError: (\w+) is not a function`, RuntimeRiskImportError, "high", "Type error - possible missing export"},
+	{`TypeError: Cannot read propert(?:y|ies) of undefined`, RuntimeRiskImportError, "high", "Undefined access - possible missing dependency"},
+
+	// ===== TypeScript =====
+	{`error TS2307:.*Cannot find module`, RuntimeRiskModuleNotFound, "critical", "TypeScript module not found"},
+	{`error TS2305:.*has no exported member`, RuntimeRiskImportError, "critical", "TypeScript export missing"},
+	{`error TS2339:.*does not exist on type`, RuntimeRiskTypeError, "high", "TypeScript property missing"},
+	{`error TS\d+:`, RuntimeRiskTypeError, "high", "TypeScript compilation error"},
+	{`Cannot find name ['"](\w+)['"]`, RuntimeRiskTypeError, "medium", "TypeScript name resolution failed"},
+	// Type error burst detection (3+ errors = critical)
+	{`Found \d+ errors?`, RuntimeRiskTypeError, "high", "TypeScript found errors"},
+
+	// ===== Python =====
+	{`ModuleNotFoundError: No module named ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Python module not found"},
+	{`ImportError: cannot import name ['"]([^'"]+)['"]`, RuntimeRiskImportError, "critical", "Python import name error"},
+	{`ImportError: No module named ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Python import error"},
+	{`AttributeError: module ['"]([^'"]+)['"] has no attribute`, RuntimeRiskImportError, "high", "Python attribute missing"},
+	// Python importlib errors
+	{`importlib\..*Error`, RuntimeRiskImportError, "critical", "Python importlib error"},
+	{`ModuleSpec.*not found`, RuntimeRiskModuleNotFound, "critical", "Python module spec not found"},
+	{`spec_from_file_location.*failed`, RuntimeRiskImportError, "critical", "Python dynamic import failed"},
+	{`__import__.*failed`, RuntimeRiskImportError, "critical", "Python __import__ failed"},
+	// Python fixture/setup errors
+	{`fixture ['"](\w+)['"] not found`, RuntimeRiskSetupCrash, "critical", "pytest fixture not found"},
+	{`E\s+ModuleNotFoundError`, RuntimeRiskModuleNotFound, "critical", "pytest module not found"},
+	{`ERRORS.*collection`, RuntimeRiskSetupCrash, "critical", "pytest collection errors"},
+
+	// ===== Go =====
+	{`undefined: (\w+)`, RuntimeRiskImportError, "high", "Go undefined symbol"},
+	{`cannot find package ['"]([^'"]+)['"]`, RuntimeRiskModuleNotFound, "critical", "Go package not found"},
+	{`no required module provides package`, RuntimeRiskModuleNotFound, "critical", "Go module missing"},
+	// Go plugin load failures
+	{`plugin\.Open.*failed`, RuntimeRiskImportError, "critical", "Go plugin load failed"},
+	{`plugin: symbol .* not found`, RuntimeRiskImportError, "critical", "Go plugin symbol not found"},
+	{`plugin was built with a different version`, RuntimeRiskImportError, "critical", "Go plugin version mismatch"},
+	// Go test failures
+	{`panic: .*nil pointer`, RuntimeRiskUnexpectedFail, "high", "Go nil pointer panic"},
+	{`FAIL\s+[\w/.]+\s+\[build failed\]`, RuntimeRiskSetupCrash, "critical", "Go build failed"},
+
+	// ===== Jest / JavaScript Test Runners =====
+	{`beforeAll.*failed|beforeEach.*failed`, RuntimeRiskSetupCrash, "critical", "Test setup hook failed"},
+	{`afterAll.*failed|afterEach.*failed`, RuntimeRiskSetupCrash, "high", "Test teardown hook failed"},
+	{`Test suite failed to run`, RuntimeRiskSetupCrash, "critical", "Test suite failed to initialize"},
+	{`Jest encountered an unexpected token`, RuntimeRiskSetupCrash, "critical", "Jest parse error - config issue"},
+	{`Cannot find module.*from.*\.test\.[jt]sx?`, RuntimeRiskModuleNotFound, "critical", "Test file import failed"},
+	{`Your test suite must contain at least one test`, RuntimeRiskSetupCrash, "high", "Empty test suite - possible selection miss"},
+	{`RUNS.*0 passed`, RuntimeRiskUnexpectedFail, "medium", "All tests failed"},
+	// Jest environment errors
+	{`Test environment.*not found`, RuntimeRiskSetupCrash, "critical", "Jest environment not found"},
+	{`jest-environment-.*not installed`, RuntimeRiskSetupCrash, "critical", "Jest environment missing"},
+	{`Could not locate module.*mapped as`, RuntimeRiskModuleNotFound, "critical", "Jest module mapping failed"},
+
+	// ===== Mocha =====
+	{`Error: Cannot find module.*mocha`, RuntimeRiskSetupCrash, "critical", "Mocha module error"},
+	{`Error \[ERR_MODULE_NOT_FOUND\]`, RuntimeRiskModuleNotFound, "critical", "ESM module not found"},
+
+	// ===== Generic / Cross-platform =====
+	{`ENOENT.*no such file or directory`, RuntimeRiskModuleNotFound, "high", "File not found at runtime"},
+	{`ENOENT:.*\.js`, RuntimeRiskModuleNotFound, "critical", "JavaScript file missing"},
+	{`Error: connect ECONNREFUSED`, RuntimeRiskUnexpectedFail, "low", "Connection refused - service may be down"},
+	{`SIGTERM|SIGKILL|SIGSEGV`, RuntimeRiskSetupCrash, "critical", "Process killed - resource issue"},
+	{`out of memory|OOM|heap out of memory`, RuntimeRiskSetupCrash, "critical", "Out of memory"},
+	{`Maximum call stack size exceeded`, RuntimeRiskUnexpectedFail, "high", "Stack overflow"},
+
+	// ===== Selection Miss Indicators =====
+	// These patterns specifically indicate a test selection miss
+	{`no tests found`, RuntimeRiskSetupCrash, "high", "No tests found - possible selection miss"},
+	{`0 passing`, RuntimeRiskUnexpectedFail, "medium", "Zero passing tests"},
+	{`nothing to test`, RuntimeRiskSetupCrash, "high", "Nothing to test - possible selection miss"},
+}
+
+func runCIDetectRuntimeRisk(cmd *cobra.Command, args []string) error {
+	report := RuntimeRiskReport{
+		RisksDetected: false,
+		Risks:         []RuntimeRiskSignal{},
+	}
+
+	// Determine input source
+	var content []byte
+	var err error
+
+	if ciLogsFile != "" {
+		content, err = os.ReadFile(ciLogsFile)
+		if err != nil {
+			return fmt.Errorf("reading logs file: %w", err)
+		}
+	} else if ciStderrFile != "" {
+		content, err = os.ReadFile(ciStderrFile)
+		if err != nil {
+			return fmt.Errorf("reading stderr file: %w", err)
+		}
+	} else {
+		return fmt.Errorf("either --logs or --stderr is required")
+	}
+
+	// Load plan if provided (for cross-referencing)
+	var plan *CIPlan
+	if ciPlanFile != "" {
+		planData, err := os.ReadFile(ciPlanFile)
+		if err == nil {
+			var p CIPlan
+			if json.Unmarshal(planData, &p) == nil {
+				plan = &p
+			}
+		}
+	}
+
+	// Convert content to string for pattern matching
+	contentStr := string(content)
+
+	// Check each pattern
+	for _, p := range runtimeRiskPatterns {
+		re, err := regexp.Compile(p.pattern)
+		if err != nil {
+			continue
+		}
+
+		matches := re.FindAllStringSubmatch(contentStr, -1)
+		for _, match := range matches {
+			risk := RuntimeRiskSignal{
+				Type:        p.riskType,
+				Severity:    p.severity,
+				Description: p.description,
+			}
+
+			// Extract additional context if available
+			if len(match) > 1 {
+				risk.Evidence = match[1]
+			} else {
+				risk.Evidence = match[0]
+			}
+
+			// Check if the risk is related to files outside the plan selection
+			if plan != nil && risk.File != "" {
+				inPlan := false
+				for _, t := range plan.Targets.Run {
+					if strings.Contains(t, risk.File) || strings.Contains(risk.File, t) {
+						inPlan = true
+						break
+					}
+				}
+				if inPlan {
+					// Risk is in selected files, lower severity
+					risk.Description += " (in selected files)"
+				} else {
+					risk.Description += " (NOT in selected files - possible miss)"
+				}
+			}
+
+			report.Risks = append(report.Risks, risk)
+		}
+	}
+
+	// Determine overall risk status
+	report.TotalRisks = len(report.Risks)
+	report.RisksDetected = report.TotalRisks > 0
+
+	// Count by severity
+	criticalCount := 0
+	highCount := 0
+	for _, r := range report.Risks {
+		switch r.Severity {
+		case "critical":
+			criticalCount++
+		case "high":
+			highCount++
+		}
+	}
+
+	// Determine if tripwire should trigger
+	tripwireTriggered := criticalCount > 0 || highCount > 0
+	if ciRerunOnFail && report.RisksDetected {
+		tripwireTriggered = true
+	}
+
+	// Generate recommendation
+	if criticalCount > 0 {
+		report.Recommendation = "RERUN: Critical runtime errors detected. Run full test suite."
+	} else if highCount > 0 {
+		report.Recommendation = "RERUN: High severity runtime errors detected. Run full test suite."
+	} else if report.RisksDetected && ciRerunOnFail {
+		report.Recommendation = "RERUN: Failures detected with --rerun-on-fail. Run full test suite."
+	} else if report.RisksDetected {
+		report.Recommendation = "WARNING: Minor runtime issues detected. Monitor for patterns."
+	} else {
+		report.Recommendation = "OK: No runtime risk signals detected."
+	}
+
+	// Tripwire mode: simple output for CI scripting
+	if ciTripwire {
+		if tripwireTriggered {
+			fmt.Println("RERUN")
+			// Exit with code 75 (custom code for "rerun needed")
+			// We use a custom error type to signal this
+			os.Exit(75)
+		}
+		fmt.Println("OK")
+		return nil
+	}
+
+	// Output report
+	if jsonFlag {
+		report.TripwireTriggered = tripwireTriggered
+		output, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(output))
+	} else {
+		fmt.Println("Runtime Risk Analysis")
+		fmt.Println(strings.Repeat("=", 50))
+		fmt.Printf("Risks Detected: %v\n", report.RisksDetected)
+		fmt.Printf("Total Signals:  %d\n", report.TotalRisks)
+		if tripwireTriggered {
+			fmt.Printf("Tripwire:       TRIGGERED (rerun recommended)\n")
+		}
+		fmt.Printf("Recommendation: %s\n", report.Recommendation)
+
+		if len(report.Risks) > 0 {
+			fmt.Println("\nDetected Risks:")
+			for i, r := range report.Risks {
+				if i >= 10 {
+					fmt.Printf("  ... and %d more\n", len(report.Risks)-10)
+					break
+				}
+				fmt.Printf("  [%s] %s: %s\n", r.Severity, r.Type, r.Description)
+				if r.Evidence != "" {
+					evidence := r.Evidence
+					if len(evidence) > 60 {
+						evidence = evidence[:57] + "..."
+					}
+					fmt.Printf("         Evidence: %s\n", evidence)
+				}
+			}
+		}
+
+		// CI integration hint
+		if tripwireTriggered {
+			fmt.Println("\nCI Integration:")
+			fmt.Println("  Use --tripwire flag for exit code 75 to trigger rerun:")
+			fmt.Println("  kai ci detect-runtime-risk --stderr test.log --tripwire || npm run test:full")
+		}
+	}
+
+	// Exit non-zero if risks detected that warrant fallback
+	if tripwireTriggered {
+		return fmt.Errorf("runtime risks detected: %d critical, %d high - rerun full suite", criticalCount, highCount)
+	}
+
+	return nil
+}
+
+// MissRecord represents a recorded test selection miss
+type MissRecord struct {
+	Timestamp     string   `json:"timestamp"`
+	PlanFile      string   `json:"planFile,omitempty"`
+	PlanProvenance CIProvenance `json:"planProvenance,omitempty"`
+	FailedTests   []string `json:"failedTests"`
+	SelectedTests []string `json:"selectedTests"`
+	MissedTests   []string `json:"missedTests"` // Failed but not selected
+	FalsePositives []string `json:"falsePositives,omitempty"` // Selected but didn't fail
+}
+
+func runCIRecordMiss(cmd *cobra.Command, args []string) error {
+	if ciPlanFile == "" {
+		return fmt.Errorf("--plan is required")
+	}
+
+	// Read plan
+	planData, err := os.ReadFile(ciPlanFile)
+	if err != nil {
+		return fmt.Errorf("reading plan file: %w", err)
+	}
+
+	var plan CIPlan
+	if err := json.Unmarshal(planData, &plan); err != nil {
+		return fmt.Errorf("parsing plan file: %w", err)
+	}
+
+	// Get failed tests
+	var failedTests []string
+	if ciFailedTests != "" {
+		failedTests = strings.Split(ciFailedTests, ",")
+		for i := range failedTests {
+			failedTests[i] = strings.TrimSpace(failedTests[i])
+		}
+	} else if ciEvidenceFile != "" {
+		// Try to parse evidence file (Jest/Mocha JSON format)
+		evidenceData, err := os.ReadFile(ciEvidenceFile)
+		if err != nil {
+			return fmt.Errorf("reading evidence file: %w", err)
+		}
+		failedTests = extractFailedTestsFromEvidence(evidenceData)
+	} else {
+		return fmt.Errorf("either --failed or --evidence is required")
+	}
+
+	// Build sets for comparison
+	selectedSet := make(map[string]bool)
+	for _, t := range plan.Targets.Run {
+		selectedSet[t] = true
+	}
+
+	failedSet := make(map[string]bool)
+	for _, t := range failedTests {
+		failedSet[t] = true
+	}
+
+	// Find misses (failed but not selected)
+	var missedTests []string
+	for _, t := range failedTests {
+		if !selectedSet[t] {
+			missedTests = append(missedTests, t)
+		}
+	}
+
+	// Find false positives (selected but didn't fail)
+	// Note: This is tricky because we don't know which selected tests passed
+	// We can only record this if we have full test results
+	var falsePositives []string
+	// For now, we'll leave this empty unless we have evidence
+
+	// Create miss record
+	record := MissRecord{
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		PlanFile:       ciPlanFile,
+		PlanProvenance: plan.Provenance,
+		FailedTests:    failedTests,
+		SelectedTests:  plan.Targets.Run,
+		MissedTests:    missedTests,
+		FalsePositives: falsePositives,
+	}
+
+	// Output
+	if jsonFlag {
+		output, _ := json.MarshalIndent(record, "", "  ")
+		fmt.Println(string(output))
+	} else {
+		fmt.Println("Test Selection Miss Report")
+		fmt.Println(strings.Repeat("=", 50))
+		fmt.Printf("Timestamp:     %s\n", record.Timestamp)
+		fmt.Printf("Selected:      %d tests\n", len(record.SelectedTests))
+		fmt.Printf("Failed:        %d tests\n", len(record.FailedTests))
+		fmt.Printf("Missed:        %d tests\n", len(record.MissedTests))
+
+		if len(missedTests) > 0 {
+			fmt.Println("\nMissed Tests (failed but not selected):")
+			for _, t := range missedTests {
+				fmt.Printf("  - %s\n", t)
+			}
+			fmt.Println("\nThese tests failed but were not in the selection plan.")
+			fmt.Println("Consider investigating missing dependency edges.")
+		} else {
+			fmt.Println("\nNo misses detected! All failing tests were selected.")
+		}
+	}
+
+	// Store record for aggregation (append to .kai/ci-misses.jsonl)
+	if err := appendMissRecord(record); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to persist miss record: %v\n", err)
+	}
+
+	// Exit non-zero if there were misses
+	if len(missedTests) > 0 {
+		return fmt.Errorf("recorded %d missed tests", len(missedTests))
+	}
+
+	return nil
+}
+
+// extractFailedTestsFromEvidence parses test results to find failed tests
+func extractFailedTestsFromEvidence(data []byte) []string {
+	var failedTests []string
+
+	// Try Jest format
+	var jestResult struct {
+		TestResults []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"testResults"`
+	}
+	if json.Unmarshal(data, &jestResult) == nil && len(jestResult.TestResults) > 0 {
+		for _, tr := range jestResult.TestResults {
+			if tr.Status == "failed" {
+				failedTests = append(failedTests, tr.Name)
+			}
+		}
+		return failedTests
+	}
+
+	// Try pytest format
+	var pytestResult struct {
+		Tests []struct {
+			NodeID  string `json:"nodeid"`
+			Outcome string `json:"outcome"`
+		} `json:"tests"`
+	}
+	if json.Unmarshal(data, &pytestResult) == nil && len(pytestResult.Tests) > 0 {
+		for _, t := range pytestResult.Tests {
+			if t.Outcome == "failed" {
+				failedTests = append(failedTests, t.NodeID)
+			}
+		}
+		return failedTests
+	}
+
+	// Try Go test JSON format
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		var goResult struct {
+			Action  string `json:"Action"`
+			Package string `json:"Package"`
+			Test    string `json:"Test"`
+		}
+		if json.Unmarshal([]byte(line), &goResult) == nil {
+			if goResult.Action == "fail" && goResult.Test != "" {
+				failedTests = append(failedTests, goResult.Package+"/"+goResult.Test)
+			}
+		}
+	}
+
+	return failedTests
+}
+
+// appendMissRecord appends a miss record to the CI misses log
+func appendMissRecord(record MissRecord) error {
+	// Find .kai directory
+	kaiPath := filepath.Join(".", kaiDir)
+	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
+		return nil // Not in a kai repo, skip
+	}
+
+	missesFile := filepath.Join(kaiPath, "ci-misses.jsonl")
+
+	f, err := os.OpenFile(missesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	_, err = f.WriteString(string(data) + "\n")
+	return err
+}
+
+// runCIExplainDynamicImports scans files for dynamic imports and explains their impact
+func runCIExplainDynamicImports(cmd *cobra.Command, args []string) error {
+	// Default to current directory
+	targetPath := "."
+	if len(args) > 0 {
+		targetPath = args[0]
+	}
+
+	// Load CI policy
+	ciPolicy, _, err := loadCIPolicy()
+	if err != nil {
+		return fmt.Errorf("loading CI policy: %w", err)
+	}
+
+	// Find all files to scan
+	var filesToScan []string
+	stat, err := os.Stat(targetPath)
+	if err != nil {
+		return fmt.Errorf("accessing path: %w", err)
+	}
+
+	if stat.IsDir() {
+		// Walk directory
+		err = filepath.Walk(targetPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // Skip errors
+			}
+			if info.IsDir() {
+				// Skip common non-source directories
+				base := filepath.Base(path)
+				if base == "node_modules" || base == ".git" || base == "vendor" || base == "__pycache__" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			// Only check source files
+			ext := strings.ToLower(filepath.Ext(path))
+			switch ext {
+			case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".go":
+				filesToScan = append(filesToScan, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("walking directory: %w", err)
+		}
+	} else {
+		filesToScan = append(filesToScan, targetPath)
+	}
+
+	// Scan each file for dynamic imports
+	var allImports []DynamicImportFile
+	for _, filePath := range filesToScan {
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+		imports := detectDynamicImportsDetailed(content, filePath, &ciPolicy.DynamicImports)
+		allImports = append(allImports, imports...)
+	}
+
+	// Output
+	if jsonFlag {
+		output := struct {
+			TotalFilesScanned int                  `json:"totalFilesScanned"`
+			TotalDetected     int                  `json:"totalDetected"`
+			Policy            CIPolicyDynamicImports `json:"policy"`
+			Imports           []DynamicImportFile  `json:"imports"`
+		}{
+			TotalFilesScanned: len(filesToScan),
+			TotalDetected:     len(allImports),
+			Policy:            ciPolicy.DynamicImports,
+			Imports:           allImports,
+		}
+		data, _ := json.MarshalIndent(output, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	// Human-readable output
+	fmt.Println()
+	fmt.Println("Dynamic Import Analysis")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("Files scanned: %d\n", len(filesToScan))
+	fmt.Printf("Dynamic imports found: %d\n", len(allImports))
+	fmt.Printf("Expansion strategy: %s\n", ciPolicy.DynamicImports.Expansion)
+	fmt.Printf("Owners fallback: %v\n", ciPolicy.DynamicImports.OwnersFallback)
+	fmt.Printf("Bounded risk threshold: %d files\n", ciPolicy.DynamicImports.BoundedRiskThreshold)
+	fmt.Println()
+
+	if len(allImports) == 0 {
+		fmt.Println("No dynamic imports detected.")
+		return nil
+	}
+
+	// Group by status
+	var bounded, boundedRisky, unbounded, allowlisted []DynamicImportFile
+	for _, imp := range allImports {
+		if imp.Allowlisted {
+			allowlisted = append(allowlisted, imp)
+		} else if imp.Bounded {
+			bounded = append(bounded, imp)
+		} else {
+			unbounded = append(unbounded, imp)
+		}
+	}
+
+	// Show unbounded first (most important)
+	if len(unbounded) > 0 {
+		fmt.Printf("⚠️  UNBOUNDED (%d) - Will trigger expansion:\n", len(unbounded))
+		for _, imp := range unbounded {
+			fmt.Printf("   %s:%d\n", imp.Path, imp.Line)
+			fmt.Printf("      Type: %s (confidence: %.0f%%)\n", imp.Kind, imp.Confidence*100)
+			fmt.Printf("      Action: Expand to %s\n", ciPolicy.DynamicImports.Expansion)
+		}
+		fmt.Println()
+	}
+
+	if len(boundedRisky) > 0 {
+		fmt.Printf("⚡ BOUNDED-RISKY (%d) - Bounded but large footprint:\n", len(boundedRisky))
+		for _, imp := range boundedRisky {
+			fmt.Printf("   %s:%d\n", imp.Path, imp.Line)
+			fmt.Printf("      Type: %s\n", imp.Kind)
+			fmt.Printf("      Bound: %s\n", imp.BoundedBy)
+			fmt.Printf("      Action: Treat as unbounded (footprint > %d)\n", ciPolicy.DynamicImports.BoundedRiskThreshold)
+		}
+		fmt.Println()
+	}
+
+	if len(bounded) > 0 {
+		fmt.Printf("✓  BOUNDED (%d) - Safe, will not expand:\n", len(bounded))
+		for _, imp := range bounded {
+			fmt.Printf("   %s:%d → %s\n", imp.Path, imp.Line, imp.BoundedBy)
+		}
+		fmt.Println()
+	}
+
+	if len(allowlisted) > 0 {
+		fmt.Printf("○  ALLOWLISTED (%d) - Ignored by policy:\n", len(allowlisted))
+		for _, imp := range allowlisted {
+			fmt.Printf("   %s:%d\n", imp.Path, imp.Line)
+		}
+		fmt.Println()
+	}
+
+	// Recommendations
+	if len(unbounded) > 0 {
+		fmt.Println("Recommendations:")
+		fmt.Println("  • Add webpackInclude/webpackExclude comments to bound dynamic imports")
+		fmt.Println("  • Add paths to dynamicImports.allowlist in .kai/rules/ci-policy.yaml")
+		fmt.Println("  • Use explicit imports where possible")
 	}
 
 	return nil
@@ -6467,4 +9432,699 @@ func contains(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// ========== Coverage Ingestion ==========
+
+const coverageMapFile = ".kai/coverage-map.json"
+
+// runCIIngestCoverage ingests coverage reports to build file→test mappings
+func runCIIngestCoverage(cmd *cobra.Command, args []string) error {
+	// Read coverage file
+	data, err := os.ReadFile(ciCoverageFrom)
+	if err != nil {
+		return fmt.Errorf("reading coverage file: %w", err)
+	}
+
+	// Detect format if auto
+	format := ciCoverageFormat
+	if format == "auto" {
+		format = detectCoverageFormat(ciCoverageFrom, data)
+	}
+
+	// Parse coverage based on format
+	var entries map[string][]CoverageEntry
+	switch format {
+	case "nyc":
+		entries, err = parseNYCCoverage(data)
+	case "coveragepy":
+		entries, err = parseCoveragePyCoverage(data)
+	case "jacoco":
+		entries, err = parseJaCoCoCoverage(data)
+	default:
+		return fmt.Errorf("unknown coverage format: %s (use --format nyc|coveragepy|jacoco)", format)
+	}
+
+	if err != nil {
+		return fmt.Errorf("parsing coverage (%s): %w", format, err)
+	}
+
+	// Normalize paths to repo-relative POSIX format
+	normalizedEntries := make(map[string][]CoverageEntry)
+	for filePath, testEntries := range entries {
+		normPath := normalizePath(filePath)
+		normalizedEntries[normPath] = testEntries
+	}
+	entries = normalizedEntries
+
+	// Load or create coverage map
+	coverageMap := loadOrCreateCoverageMap()
+
+	// Load policy for retention settings
+	ciPolicy, _, _ := loadCIPolicy()
+	retentionDays := ciPolicy.Coverage.RetentionDays
+	if retentionDays == 0 {
+		retentionDays = 90 // Default
+	}
+
+	// Merge new entries
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	for filePath, testEntries := range entries {
+		for i := range testEntries {
+			testEntries[i].LastSeenAt = timestamp
+		}
+		// Merge with existing entries
+		coverageMap.Entries[filePath] = mergeTestEntries(coverageMap.Entries[filePath], testEntries)
+	}
+
+	// Prune old entries based on retention policy
+	pruneCount := pruneCoverageMap(coverageMap, retentionDays)
+
+	// Update metadata
+	coverageMap.IngestedAt = timestamp
+	if ciCoverageBranch != "" {
+		coverageMap.Branch = ciCoverageBranch
+	}
+	if ciCoverageTag != "" {
+		coverageMap.Tag = ciCoverageTag
+	}
+
+	// Save coverage map
+	if err := saveCoverageMap(coverageMap); err != nil {
+		return fmt.Errorf("saving coverage map: %w", err)
+	}
+
+	// Output summary
+	fmt.Println("Coverage Ingestion Complete")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("Format:      %s\n", format)
+	fmt.Printf("Files:       %d\n", len(entries))
+	fmt.Printf("Total pairs: %d\n", countTotalPairs(coverageMap.Entries))
+	if pruneCount > 0 {
+		fmt.Printf("Pruned:      %d old entries (>%d days)\n", pruneCount, retentionDays)
+	}
+	if ciCoverageBranch != "" {
+		fmt.Printf("Branch:      %s\n", ciCoverageBranch)
+	}
+	if ciCoverageTag != "" {
+		fmt.Printf("Tag:         %s\n", ciCoverageTag)
+	}
+	fmt.Printf("Saved to:    %s\n", coverageMapFile)
+
+	return nil
+}
+
+// normalizePath converts a file path to repo-relative POSIX format
+func normalizePath(path string) string {
+	// Convert Windows backslashes to forward slashes
+	path = strings.ReplaceAll(path, "\\", "/")
+
+	// Remove common absolute path prefixes
+	if idx := strings.Index(path, "/src/"); idx >= 0 {
+		path = path[idx+1:]
+	} else if idx := strings.Index(path, "/app/"); idx >= 0 {
+		path = path[idx+1:]
+	}
+
+	// Strip leading ./
+	path = strings.TrimPrefix(path, "./")
+
+	return path
+}
+
+// pruneCoverageMap removes entries older than retentionDays
+func pruneCoverageMap(cm *CoverageMap, retentionDays int) int {
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	pruneCount := 0
+
+	for filePath, entries := range cm.Entries {
+		var kept []CoverageEntry
+		for _, e := range entries {
+			if e.LastSeenAt != "" {
+				lastSeen, err := time.Parse(time.RFC3339, e.LastSeenAt)
+				if err == nil && lastSeen.Before(cutoff) {
+					pruneCount++
+					continue
+				}
+			}
+			kept = append(kept, e)
+		}
+		if len(kept) == 0 {
+			delete(cm.Entries, filePath)
+		} else {
+			cm.Entries[filePath] = kept
+		}
+	}
+
+	return pruneCount
+}
+
+// detectCoverageFormat auto-detects coverage format from filename and content
+func detectCoverageFormat(path string, data []byte) string {
+	name := filepath.Base(path)
+
+	if strings.Contains(name, "coverage-final") || strings.Contains(name, "nyc") {
+		return "nyc"
+	}
+	if strings.HasSuffix(name, ".xml") {
+		return "jacoco"
+	}
+
+	content := string(data)
+	if strings.Contains(content, "statementMap") {
+		return "nyc"
+	}
+	if strings.Contains(content, "<jacoco") || strings.Contains(content, "<report") {
+		return "jacoco"
+	}
+	if strings.Contains(content, "executed_lines") || strings.Contains(content, "missing_lines") {
+		return "coveragepy"
+	}
+
+	return "nyc"
+}
+
+// parseNYCCoverage parses NYC/Istanbul coverage-final.json
+func parseNYCCoverage(data []byte) (map[string][]CoverageEntry, error) {
+	var nycData map[string]struct {
+		Path         string         `json:"path"`
+		StatementMap map[string]struct {
+			Start struct{ Line int } `json:"start"`
+			End   struct{ Line int } `json:"end"`
+		} `json:"statementMap"`
+		S map[string]int `json:"s"`
+	}
+
+	if err := json.Unmarshal(data, &nycData); err != nil {
+		return nil, err
+	}
+
+	entries := make(map[string][]CoverageEntry)
+	for filePath, coverage := range nycData {
+		var coveredLines []int
+		for stmtID, hits := range coverage.S {
+			if hits > 0 {
+				if stmt, ok := coverage.StatementMap[stmtID]; ok {
+					coveredLines = append(coveredLines, stmt.Start.Line)
+				}
+			}
+		}
+
+		if len(coveredLines) > 0 {
+			entries[filePath] = []CoverageEntry{
+				{TestID: "aggregate", HitCount: 1, LinesCovered: coveredLines},
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// parseCoveragePyCoverage parses coverage.py JSON output
+func parseCoveragePyCoverage(data []byte) (map[string][]CoverageEntry, error) {
+	var coverageData struct {
+		Files map[string]struct {
+			ExecutedLines []int `json:"executed_lines"`
+		} `json:"files"`
+	}
+
+	if err := json.Unmarshal(data, &coverageData); err != nil {
+		return nil, err
+	}
+
+	entries := make(map[string][]CoverageEntry)
+	for filePath, coverage := range coverageData.Files {
+		if len(coverage.ExecutedLines) > 0 {
+			entries[filePath] = []CoverageEntry{
+				{TestID: "aggregate", HitCount: 1, LinesCovered: coverage.ExecutedLines},
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// parseJaCoCoCoverage parses JaCoCo XML format
+func parseJaCoCoCoverage(data []byte) (map[string][]CoverageEntry, error) {
+	entries := make(map[string][]CoverageEntry)
+
+	sourceFileRe := regexp.MustCompile(`<sourcefile[^>]*name="([^"]+)"`)
+	lineRe := regexp.MustCompile(`<line[^>]*nr="(\d+)"[^>]*ci="(\d+)"`)
+
+	content := string(data)
+	sourceMatches := sourceFileRe.FindAllStringSubmatchIndex(content, -1)
+
+	for i, match := range sourceMatches {
+		fileName := content[match[2]:match[3]]
+
+		endIdx := len(content)
+		if i+1 < len(sourceMatches) {
+			endIdx = sourceMatches[i+1][0]
+		}
+
+		section := content[match[0]:endIdx]
+		lineMatches := lineRe.FindAllStringSubmatch(section, -1)
+
+		var coveredLines []int
+		for _, lm := range lineMatches {
+			if len(lm) >= 3 {
+				lineNum := 0
+				ci := 0
+				fmt.Sscanf(lm[1], "%d", &lineNum)
+				fmt.Sscanf(lm[2], "%d", &ci)
+				if ci > 0 {
+					coveredLines = append(coveredLines, lineNum)
+				}
+			}
+		}
+
+		if len(coveredLines) > 0 {
+			entries[fileName] = []CoverageEntry{
+				{TestID: "aggregate", HitCount: 1, LinesCovered: coveredLines},
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+func loadOrCreateCoverageMap() *CoverageMap {
+	data, err := os.ReadFile(coverageMapFile)
+	if err != nil {
+		return &CoverageMap{Version: 1, Entries: make(map[string][]CoverageEntry)}
+	}
+
+	var cm CoverageMap
+	if json.Unmarshal(data, &cm) != nil {
+		return &CoverageMap{Version: 1, Entries: make(map[string][]CoverageEntry)}
+	}
+
+	if cm.Entries == nil {
+		cm.Entries = make(map[string][]CoverageEntry)
+	}
+	return &cm
+}
+
+func saveCoverageMap(cm *CoverageMap) error {
+	os.MkdirAll(filepath.Dir(coverageMapFile), 0755)
+	data, err := json.MarshalIndent(cm, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(coverageMapFile, data, 0644)
+}
+
+func mergeTestEntries(existing, new []CoverageEntry) []CoverageEntry {
+	entryMap := make(map[string]*CoverageEntry)
+	for i := range existing {
+		entryMap[existing[i].TestID] = &existing[i]
+	}
+	for _, e := range new {
+		if ex, ok := entryMap[e.TestID]; ok {
+			ex.HitCount += e.HitCount
+			ex.LastSeenAt = e.LastSeenAt
+		} else {
+			entryCopy := e
+			entryMap[e.TestID] = &entryCopy
+		}
+	}
+
+	result := make([]CoverageEntry, 0, len(entryMap))
+	for _, e := range entryMap {
+		result = append(result, *e)
+	}
+	return result
+}
+
+func countTotalPairs(entries map[string][]CoverageEntry) int {
+	count := 0
+	for _, tests := range entries {
+		count += len(tests)
+	}
+	return count
+}
+
+// mapKeysToSortedSlice converts a map[string]bool to a sorted slice of keys
+func mapKeysToSortedSlice(m map[string]bool) []string {
+	result := make([]string, 0, len(m))
+	for k := range m {
+		result = append(result, k)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// ========== Contract Ingestion ==========
+
+const contractsFile = ".kai/contracts.json"
+
+// runCIIngestContracts registers contract schemas and their tests
+func runCIIngestContracts(cmd *cobra.Command, args []string) error {
+	validTypes := map[string]bool{"openapi": true, "protobuf": true, "graphql": true}
+	if !validTypes[ciContractType] {
+		return fmt.Errorf("invalid contract type: %s (use openapi, protobuf, or graphql)", ciContractType)
+	}
+
+	if _, err := os.Stat(ciContractPath); os.IsNotExist(err) {
+		return fmt.Errorf("schema file not found: %s", ciContractPath)
+	}
+
+	schemaData, err := os.ReadFile(ciContractPath)
+	if err != nil {
+		return fmt.Errorf("reading schema: %w", err)
+	}
+
+	// Canonicalize schema before hashing to avoid noisy re-runs on non-semantic edits
+	canonicalData := canonicalizeSchema(schemaData, ciContractType)
+	digest := util.Blake3HashHex(canonicalData)
+
+	registry := loadOrCreateContractRegistry()
+
+	found := false
+	for i, c := range registry.Contracts {
+		if c.Path == ciContractPath {
+			registry.Contracts[i].Type = ciContractType
+			registry.Contracts[i].Service = ciContractService
+			registry.Contracts[i].Tests = strings.Split(ciContractTests, ",")
+			registry.Contracts[i].Digest = digest
+			if ciContractGenerated != "" {
+				registry.Contracts[i].Generated = strings.Split(ciContractGenerated, ",")
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		binding := ContractBinding{
+			Type:    ciContractType,
+			Path:    ciContractPath,
+			Service: ciContractService,
+			Tests:   strings.Split(ciContractTests, ","),
+			Digest:  digest,
+		}
+		if ciContractGenerated != "" {
+			binding.Generated = strings.Split(ciContractGenerated, ",")
+		}
+		registry.Contracts = append(registry.Contracts, binding)
+	}
+
+	if err := saveContractRegistry(registry); err != nil {
+		return fmt.Errorf("saving contract registry: %w", err)
+	}
+
+	fmt.Println("Contract Registration Complete")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("Type:     %s\n", ciContractType)
+	fmt.Printf("Path:     %s\n", ciContractPath)
+	fmt.Printf("Service:  %s\n", ciContractService)
+	fmt.Printf("Tests:    %s\n", ciContractTests)
+	fmt.Printf("Digest:   %s\n", digest[:16]+"...")
+	if ciContractGenerated != "" {
+		fmt.Printf("Generated: %s\n", ciContractGenerated)
+	}
+	fmt.Printf("Saved to: %s\n", contractsFile)
+
+	return nil
+}
+
+func loadOrCreateContractRegistry() *ContractRegistry {
+	data, err := os.ReadFile(contractsFile)
+	if err != nil {
+		return &ContractRegistry{Version: 1, Contracts: []ContractBinding{}}
+	}
+
+	var cr ContractRegistry
+	if json.Unmarshal(data, &cr) != nil {
+		return &ContractRegistry{Version: 1, Contracts: []ContractBinding{}}
+	}
+	return &cr
+}
+
+func saveContractRegistry(cr *ContractRegistry) error {
+	os.MkdirAll(filepath.Dir(contractsFile), 0755)
+	data, err := json.MarshalIndent(cr, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(contractsFile, data, 0644)
+}
+
+// canonicalizeSchema normalizes schema content before hashing to avoid noisy re-runs
+// on non-semantic changes (comments, whitespace, key ordering)
+func canonicalizeSchema(data []byte, schemaType string) []byte {
+	content := string(data)
+
+	switch schemaType {
+	case "openapi":
+		// For YAML/JSON OpenAPI: try to parse and re-serialize with sorted keys
+		// Fallback to basic normalization if parsing fails
+		return canonicalizeYAMLorJSON(data)
+
+	case "graphql":
+		// For GraphQL: strip comments and normalize whitespace
+		return canonicalizeGraphQL(content)
+
+	case "protobuf":
+		// For Protobuf: strip comments and normalize whitespace
+		return canonicalizeProtobuf(content)
+	}
+
+	return data
+}
+
+// canonicalizeYAMLorJSON attempts to parse and re-serialize with sorted keys
+func canonicalizeYAMLorJSON(data []byte) []byte {
+	// Try JSON first
+	var jsonObj interface{}
+	if err := json.Unmarshal(data, &jsonObj); err == nil {
+		if canonical, err := json.Marshal(jsonObj); err == nil {
+			return canonical
+		}
+	}
+
+	// Try YAML
+	var yamlObj interface{}
+	if err := yaml.Unmarshal(data, &yamlObj); err == nil {
+		if canonical, err := yaml.Marshal(yamlObj); err == nil {
+			return canonical
+		}
+	}
+
+	// Fallback: basic whitespace normalization
+	return normalizeWhitespace(data)
+}
+
+// canonicalizeGraphQL strips GraphQL comments and normalizes whitespace
+func canonicalizeGraphQL(content string) []byte {
+	// Strip single-line comments (# ...)
+	lines := strings.Split(content, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		// Remove comment portion
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	return []byte(strings.Join(cleaned, "\n"))
+}
+
+// canonicalizeProtobuf strips Protobuf comments and normalizes whitespace
+func canonicalizeProtobuf(content string) []byte {
+	// Strip // comments
+	var result strings.Builder
+	lines := strings.Split(content, "\n")
+	inBlockComment := false
+
+	for _, line := range lines {
+		// Handle block comments /* ... */
+		for {
+			if inBlockComment {
+				if idx := strings.Index(line, "*/"); idx >= 0 {
+					line = line[idx+2:]
+					inBlockComment = false
+				} else {
+					line = ""
+					break
+				}
+			} else {
+				if idx := strings.Index(line, "/*"); idx >= 0 {
+					prefix := line[:idx]
+					rest := line[idx+2:]
+					if endIdx := strings.Index(rest, "*/"); endIdx >= 0 {
+						line = prefix + rest[endIdx+2:]
+					} else {
+						line = prefix
+						inBlockComment = true
+					}
+				} else {
+					break
+				}
+			}
+		}
+
+		// Strip // comments
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			line = line[:idx]
+		}
+
+		line = strings.TrimSpace(line)
+		if line != "" {
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+	}
+
+	return []byte(result.String())
+}
+
+// normalizeWhitespace collapses multiple whitespace to single space
+func normalizeWhitespace(data []byte) []byte {
+	// Replace all whitespace sequences with single space
+	re := regexp.MustCompile(`\s+`)
+	return re.ReplaceAll(data, []byte(" "))
+}
+
+// ========== Plan Annotation ==========
+
+// runCIAnnotatePlan annotates a plan with fallback information
+func runCIAnnotatePlan(cmd *cobra.Command, args []string) error {
+	planFile := args[0]
+
+	data, err := os.ReadFile(planFile)
+	if err != nil {
+		return fmt.Errorf("reading plan: %w", err)
+	}
+
+	var plan CIPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return fmt.Errorf("parsing plan: %w", err)
+	}
+
+	if ciFallbackUsed {
+		plan.Fallback.Used = true
+	}
+	if ciFallbackReason != "" {
+		plan.Fallback.Reason = ciFallbackReason
+	}
+	if ciFallbackTrigger != "" {
+		plan.Fallback.Trigger = ciFallbackTrigger
+	}
+	if ciFallbackExitCode != 0 {
+		plan.Fallback.ExitCode = ciFallbackExitCode
+	}
+
+	output, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling plan: %w", err)
+	}
+
+	if err := os.WriteFile(planFile, output, 0644); err != nil {
+		return fmt.Errorf("writing plan: %w", err)
+	}
+
+	fmt.Printf("Plan annotated: %s\n", planFile)
+	if plan.Fallback.Used {
+		fmt.Printf("  Fallback: used=true reason=%s\n", plan.Fallback.Reason)
+		if plan.Fallback.Trigger != "" {
+			fmt.Printf("  Trigger: %s\n", plan.Fallback.Trigger)
+		}
+		if plan.Fallback.ExitCode != 0 {
+			fmt.Printf("  Exit code: %d\n", plan.Fallback.ExitCode)
+		}
+	}
+
+	return nil
+}
+
+// runCIValidatePlan validates plan JSON schema and required fields
+func runCIValidatePlan(cmd *cobra.Command, args []string) error {
+	planFile := args[0]
+
+	data, err := os.ReadFile(planFile)
+	if err != nil {
+		return fmt.Errorf("reading plan: %w", err)
+	}
+
+	var plan CIPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return fmt.Errorf("parsing plan: %w", err)
+	}
+
+	var errors []string
+
+	// Required fields
+	if plan.Mode == "" {
+		errors = append(errors, "missing required field: mode")
+	}
+	if plan.Risk == "" {
+		errors = append(errors, "missing required field: risk")
+	}
+	if plan.SafetyMode == "" {
+		errors = append(errors, "missing required field: safetyMode")
+	}
+
+	// Provenance fields
+	if plan.Provenance.KaiVersion == "" {
+		errors = append(errors, "missing provenance.kaiVersion")
+	}
+	if plan.Provenance.DetectorVersion == "" {
+		errors = append(errors, "missing provenance.detectorVersion")
+	}
+	if plan.Provenance.GeneratedAt == "" {
+		errors = append(errors, "missing provenance.generatedAt")
+	}
+
+	// Strict mode: validate optional fields
+	if ciValidateStrict {
+		if plan.Provenance.PolicyHash == "" && plan.Mode != "skip" {
+			errors = append(errors, "strict: missing provenance.policyHash")
+		}
+		if len(plan.Provenance.Analyzers) == 0 && plan.Mode != "skip" {
+			errors = append(errors, "strict: missing provenance.analyzers")
+		}
+	}
+
+	// Validate mode values
+	validModes := map[string]bool{"selective": true, "expanded": true, "full": true, "shadow": true, "skip": true}
+	if plan.Mode != "" && !validModes[plan.Mode] {
+		errors = append(errors, fmt.Sprintf("invalid mode value: %s", plan.Mode))
+	}
+
+	// Validate risk values
+	validRisks := map[string]bool{"low": true, "medium": true, "high": true}
+	if plan.Risk != "" && !validRisks[plan.Risk] {
+		errors = append(errors, fmt.Sprintf("invalid risk value: %s", plan.Risk))
+	}
+
+	// Validate safety mode values
+	validSafetyModes := map[string]bool{"shadow": true, "guarded": true, "strict": true}
+	if plan.SafetyMode != "" && !validSafetyModes[plan.SafetyMode] {
+		errors = append(errors, fmt.Sprintf("invalid safetyMode value: %s", plan.SafetyMode))
+	}
+
+	if len(errors) > 0 {
+		fmt.Println("Plan validation FAILED")
+		fmt.Println(strings.Repeat("-", 40))
+		for _, e := range errors {
+			fmt.Printf("  - %s\n", e)
+		}
+		return fmt.Errorf("validation failed with %d errors", len(errors))
+	}
+
+	fmt.Println("Plan validation PASSED")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("Mode:       %s\n", plan.Mode)
+	fmt.Printf("Risk:       %s\n", plan.Risk)
+	fmt.Printf("Safety:     %s\n", plan.SafetyMode)
+	fmt.Printf("Confidence: %.0f%%\n", plan.Safety.Confidence*100)
+	fmt.Printf("Targets:    %d run, %d skip\n", len(plan.Targets.Run), len(plan.Targets.Skip))
+	fmt.Printf("Kai:        %s\n", plan.Provenance.KaiVersion)
+	fmt.Printf("Detector:   %s\n", plan.Provenance.DetectorVersion)
+
+	return nil
 }
