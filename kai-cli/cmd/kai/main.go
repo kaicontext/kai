@@ -2930,8 +2930,8 @@ func expandForDynamicImports(
 	policy *CIPolicyDynamicImports,
 	allTestFiles []string,
 	changedFiles []string,
-	modules []string,
-	filesByModule map[string][]string, // map[module] -> test files in that module
+	moduleMappings []ModulePathMapping,
+	filesByModule map[string][]string, // map[module name] -> test files in that module
 ) ([]string, *DynamicImportInfo) {
 	info := &DynamicImportInfo{
 		Detected: len(detectedImports) > 0,
@@ -2991,7 +2991,7 @@ func expandForDynamicImports(
 
 	// Union model: try nearest_module first, fall back to owners, then full_suite
 	for _, imp := range importsToExpand {
-		impTests, impStrategy := expandSingleImport(imp, policy, allTestFiles, modules, filesByModule)
+		impTests, impStrategy := expandSingleImport(imp, policy, allTestFiles, moduleMappings, filesByModule)
 
 		// Track what this import expanded to
 		for j := range info.Files {
@@ -3043,7 +3043,7 @@ func expandSingleImport(
 	imp DynamicImportFile,
 	policy *CIPolicyDynamicImports,
 	allTestFiles []string,
-	modules []string,
+	moduleMappings []ModulePathMapping,
 	filesByModule map[string][]string,
 ) ([]string, string) {
 	var tests []string
@@ -3051,14 +3051,20 @@ func expandSingleImport(
 
 	// Strategy 1: nearest_module
 	if policy.Expansion == "nearest_module" || policy.Expansion == "package" || policy.OwnersFallback {
-		// Find which module this file belongs to
+		// Find which module this file belongs to using path prefixes
 		var foundModule string
-		for _, mod := range modules {
-			if strings.HasPrefix(fileDir, mod) || strings.HasPrefix(mod, fileDir) {
-				foundModule = mod
-				if modTests, ok := filesByModule[mod]; ok {
-					tests = append(tests, modTests...)
+		for _, mod := range moduleMappings {
+			for _, prefix := range mod.PathPrefixes {
+				if strings.HasPrefix(fileDir, prefix) || strings.HasPrefix(imp.Path, prefix) {
+					foundModule = mod.Name
+					if modTests, ok := filesByModule[mod.Name]; ok {
+						tests = append(tests, modTests...)
+					}
+					break
 				}
+			}
+			if foundModule != "" {
+				break
 			}
 		}
 
@@ -3130,18 +3136,92 @@ func estimateBoundedFootprint(boundedBy string, allFiles []string) int {
 	return 10
 }
 
-// buildModuleTestMap builds a map of module -> test files in that module
-func buildModuleTestMap(testFiles []string, modules []string) map[string][]string {
+// ModulePathMapping maps module names to their path prefixes for matching
+type ModulePathMapping struct {
+	Name         string   // Module name (e.g., "App")
+	PathPrefixes []string // Extracted path prefixes (e.g., ["src/app", "lib/app"])
+}
+
+// extractPathPrefix converts a glob pattern to a path prefix for matching.
+// For example: "src/app/**" -> "src/app", "lib/*.js" -> "lib"
+func extractPathPrefix(pattern string) string {
+	// Remove trailing glob patterns
+	prefix := pattern
+
+	// Remove common glob suffixes
+	suffixes := []string{"/**", "/*", "**/*", "**"}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(prefix, suffix) {
+			prefix = strings.TrimSuffix(prefix, suffix)
+			break
+		}
+	}
+
+	// If pattern contains wildcards in the middle, take up to the first wildcard
+	if idx := strings.IndexAny(prefix, "*?["); idx != -1 {
+		prefix = prefix[:idx]
+		// Trim trailing slash if present
+		prefix = strings.TrimSuffix(prefix, "/")
+	}
+
+	// If we ended up with empty string, use the directory of the pattern
+	if prefix == "" {
+		prefix = filepath.Dir(pattern)
+		if prefix == "." {
+			prefix = ""
+		}
+	}
+
+	return prefix
+}
+
+// buildModulePathMappings builds path mappings for modules using their configured glob patterns
+func buildModulePathMappings(matcher *module.Matcher, moduleNames []string) []ModulePathMapping {
+	var mappings []ModulePathMapping
+
+	for _, name := range moduleNames {
+		mod := matcher.GetModule(name)
+		if mod == nil {
+			continue
+		}
+
+		var prefixes []string
+		seen := make(map[string]bool)
+		for _, pattern := range mod.Paths {
+			prefix := extractPathPrefix(pattern)
+			if prefix != "" && !seen[prefix] {
+				prefixes = append(prefixes, prefix)
+				seen[prefix] = true
+			}
+		}
+
+		if len(prefixes) > 0 {
+			mappings = append(mappings, ModulePathMapping{
+				Name:         name,
+				PathPrefixes: prefixes,
+			})
+		}
+	}
+
+	return mappings
+}
+
+// buildModuleTestMap builds a map of module name -> test files in that module
+// Uses path prefixes from module configurations for accurate matching
+func buildModuleTestMap(testFiles []string, moduleMappings []ModulePathMapping) map[string][]string {
 	result := make(map[string][]string)
-	for _, mod := range modules {
-		result[mod] = []string{}
+	for _, mod := range moduleMappings {
+		result[mod.Name] = []string{}
 	}
 
 	for _, t := range testFiles {
 		testDir := filepath.Dir(t)
-		for _, mod := range modules {
-			if strings.HasPrefix(testDir, mod) || strings.HasPrefix(mod, testDir) || testDir == mod {
-				result[mod] = append(result[mod], t)
+		for _, mod := range moduleMappings {
+			for _, prefix := range mod.PathPrefixes {
+				if strings.HasPrefix(testDir, prefix) || strings.HasPrefix(t, prefix) {
+					result[mod.Name] = append(result[mod.Name], t)
+					break // Only add once per module
+				}
 			}
 		}
 	}
@@ -3844,6 +3924,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 
 		// Get modules affected for cross-module risk detection
 		var modulesAffected []string
+		var moduleMappings []ModulePathMapping
 		if matcher != nil {
 			moduleSet := make(map[string]bool)
 			for _, f := range changedFiles {
@@ -3857,6 +3938,9 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			}
 			sort.Strings(modulesAffected)
 			plan.Impact.ModulesAffected = modulesAffected
+
+			// Build path mappings for accurate test matching
+			moduleMappings = buildModulePathMappings(matcher, modulesAffected)
 		}
 
 		// Create a content reader for dynamic import detection
@@ -3913,7 +3997,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		}
 
 		// Build module -> test map for scoped expansion
-		moduleTestMap := buildModuleTestMap(allTestFiles, modulesAffected)
+		moduleTestMap := buildModuleTestMap(allTestFiles, moduleMappings)
 
 		// Perform scoped expansion based on policy
 		dynamicExpandedTests, dynamicImportInfo := expandForDynamicImports(
@@ -3921,7 +4005,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			&ciPolicy.DynamicImports,
 			allTestFiles,
 			changedFiles,
-			modulesAffected,
+			moduleMappings,
 			moduleTestMap,
 		)
 

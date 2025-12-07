@@ -1098,8 +1098,13 @@ func TestExpandForDynamicImports(t *testing.T) {
 		"src/b/b.test.js",
 		"src/c/c.test.js",
 	}
-	modules := []string{"src/a", "src/b", "src/c"}
-	moduleTestMap := buildModuleTestMap(allTestFiles, modules)
+	// Use proper ModulePathMapping with path prefixes (not just names)
+	moduleMappings := []ModulePathMapping{
+		{Name: "A", PathPrefixes: []string{"src/a"}},
+		{Name: "B", PathPrefixes: []string{"src/b"}},
+		{Name: "C", PathPrefixes: []string{"src/c"}},
+	}
+	moduleTestMap := buildModuleTestMap(allTestFiles, moduleMappings)
 
 	tests := []struct {
 		name              string
@@ -1183,7 +1188,7 @@ func TestExpandForDynamicImports(t *testing.T) {
 				policy,
 				allTestFiles,
 				[]string{},
-				modules,
+				moduleMappings,
 				moduleTestMap,
 			)
 
@@ -1219,7 +1224,7 @@ func TestDynamicImportTelemetry(t *testing.T) {
 		policy,
 		[]string{"test.js"},
 		[]string{},
-		[]string{},
+		[]ModulePathMapping{}, // Empty module mappings
 		map[string][]string{},
 	)
 
@@ -1405,20 +1410,25 @@ func TestExpansionStrategyDeterminism(t *testing.T) {
 	}
 
 	allTests := []string{
-		"tests/loader.test.js",
-		"tests/utils.test.js",
+		"src/loader.test.js",
+		"src/utils.test.js",
 		"tests/app.test.js",
 	}
 	changedFiles := []string{"src/loader.js"}
-	modules := []string{"Loader", "Utils", "App"}
+	// Use proper path prefixes for module matching
+	moduleMappings := []ModulePathMapping{
+		{Name: "Src", PathPrefixes: []string{"src"}},
+		{Name: "Tests", PathPrefixes: []string{"tests"}},
+	}
 	moduleTestMap := map[string][]string{
-		"src": {"tests/loader.test.js"},
+		"Src":   {"src/loader.test.js", "src/utils.test.js"},
+		"Tests": {"tests/app.test.js"},
 	}
 
 	// Run expansion multiple times
 	results := make([][]string, 10)
 	for i := 0; i < 10; i++ {
-		expanded, _ := expandForDynamicImports(imports, policy, allTests, changedFiles, modules, moduleTestMap)
+		expanded, _ := expandForDynamicImports(imports, policy, allTests, changedFiles, moduleMappings, moduleTestMap)
 		results[i] = expanded
 	}
 
@@ -1698,6 +1708,276 @@ func TestMapKeysToSortedSlice(t *testing.T) {
 	for i, v := range expected {
 		if result[i] != v {
 			t.Errorf("result[%d] = %q, want %q", i, result[i], v)
+		}
+	}
+}
+
+// TestExtractPathPrefix verifies that glob patterns are correctly converted to path prefixes
+func TestExtractPathPrefix(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		// Standard glob suffixes
+		{"src/app/**", "src/app"},
+		{"src/app/*", "src/app"},
+		{"lib/utils/**/*", "lib/utils"},
+		{"lib/utils**", "lib/utils"},
+
+		// Single file patterns
+		{"src/app.js", "src/app.js"},
+		{"lib/utils.ts", "lib/utils.ts"},
+
+		// Wildcards in middle
+		{"src/*/components", "src"},
+		{"src/app/*.js", "src/app"},
+		{"lib/[a-z]/utils", "lib"},
+
+		// Edge cases
+		{"**", ""},
+		{"*", ""},
+		{"src", "src"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			got := extractPathPrefix(tc.pattern)
+			if got != tc.want {
+				t.Errorf("extractPathPrefix(%q) = %q, want %q", tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildModuleTestMap verifies that test files are correctly mapped to modules
+// using path prefixes (not module names!)
+func TestBuildModuleTestMap(t *testing.T) {
+	// This test specifically catches the bug where module names were used
+	// instead of path prefixes for matching
+
+	testFiles := []string{
+		"src/app/app.test.js",
+		"src/app/components/button.test.js",
+		"src/utils/helper.test.js",
+		"lib/core/core.test.js",
+		"tests/integration/e2e.test.js",
+	}
+
+	// Simulate what buildModulePathMappings would produce:
+	// Module "App" has paths ["src/app/**"] -> prefix "src/app"
+	// Module "Utils" has paths ["src/utils/**"] -> prefix "src/utils"
+	// Module "Core" has paths ["lib/core/**"] -> prefix "lib/core"
+	moduleMappings := []ModulePathMapping{
+		{Name: "App", PathPrefixes: []string{"src/app"}},
+		{Name: "Utils", PathPrefixes: []string{"src/utils"}},
+		{Name: "Core", PathPrefixes: []string{"lib/core"}},
+	}
+
+	result := buildModuleTestMap(testFiles, moduleMappings)
+
+	// Verify App module gets the right tests
+	appTests := result["App"]
+	if len(appTests) != 2 {
+		t.Errorf("App module got %d tests, want 2: %v", len(appTests), appTests)
+	}
+	wantAppTests := map[string]bool{
+		"src/app/app.test.js":              true,
+		"src/app/components/button.test.js": true,
+	}
+	for _, test := range appTests {
+		if !wantAppTests[test] {
+			t.Errorf("Unexpected test in App: %s", test)
+		}
+	}
+
+	// Verify Utils module gets the right tests
+	utilsTests := result["Utils"]
+	if len(utilsTests) != 1 || utilsTests[0] != "src/utils/helper.test.js" {
+		t.Errorf("Utils module got wrong tests: %v", utilsTests)
+	}
+
+	// Verify Core module gets the right tests
+	coreTests := result["Core"]
+	if len(coreTests) != 1 || coreTests[0] != "lib/core/core.test.js" {
+		t.Errorf("Core module got wrong tests: %v", coreTests)
+	}
+}
+
+// TestBuildModuleTestMapWithModuleNamesWouldFail demonstrates the bug that was fixed
+// If we passed module names instead of path prefixes, no tests would match
+func TestBuildModuleTestMapWithModuleNamesWouldFail(t *testing.T) {
+	testFiles := []string{
+		"src/app/app.test.js",
+		"src/utils/helper.test.js",
+	}
+
+	// WRONG: Using module names as if they were paths (the old bug)
+	// This simulates what would happen if we passed ["App", "Utils"] directly
+	wrongMappings := []ModulePathMapping{
+		{Name: "App", PathPrefixes: []string{"App"}},    // Wrong! "App" doesn't match "src/app"
+		{Name: "Utils", PathPrefixes: []string{"Utils"}}, // Wrong! "Utils" doesn't match "src/utils"
+	}
+
+	result := buildModuleTestMap(testFiles, wrongMappings)
+
+	// With wrong mappings, no tests should match (demonstrating the bug)
+	if len(result["App"]) != 0 {
+		t.Errorf("With wrong mappings, App should have 0 tests but got: %v", result["App"])
+	}
+	if len(result["Utils"]) != 0 {
+		t.Errorf("With wrong mappings, Utils should have 0 tests but got: %v", result["Utils"])
+	}
+}
+
+// TestExpandSingleImportUsesPathPrefixes verifies that expandSingleImport
+// correctly matches files to modules using path prefixes
+func TestExpandSingleImportUsesPathPrefixes(t *testing.T) {
+	policy := &CIPolicyDynamicImports{
+		Expansion:      "nearest_module",
+		OwnersFallback: true,
+	}
+
+	allTestFiles := []string{
+		"src/app/app.test.js",
+		"src/app/loader.test.js",
+		"src/utils/utils.test.js",
+		"tests/e2e.test.js",
+	}
+
+	// Correct mappings with path prefixes
+	moduleMappings := []ModulePathMapping{
+		{Name: "App", PathPrefixes: []string{"src/app"}},
+		{Name: "Utils", PathPrefixes: []string{"src/utils"}},
+	}
+
+	filesByModule := map[string][]string{
+		"App":   {"src/app/app.test.js", "src/app/loader.test.js"},
+		"Utils": {"src/utils/utils.test.js"},
+	}
+
+	// Dynamic import in src/app/loader.js should match the App module
+	imp := DynamicImportFile{
+		Path: "src/app/loader.js",
+		Kind: "require(variable)",
+		Line: 42,
+	}
+
+	tests, strategy := expandSingleImport(imp, policy, allTestFiles, moduleMappings, filesByModule)
+
+	// Should find the App module and return its tests
+	if len(tests) != 2 {
+		t.Errorf("expandSingleImport got %d tests, want 2: %v", len(tests), tests)
+	}
+
+	if strategy != "nearest_module: App" {
+		t.Errorf("expandSingleImport strategy = %q, want 'nearest_module: App'", strategy)
+	}
+}
+
+// TestExpandSingleImportWithModuleNamesWouldFallback demonstrates the bug fix
+// With wrong mappings (module names instead of paths), it would fall back to broader strategies
+func TestExpandSingleImportWithModuleNamesWouldFallback(t *testing.T) {
+	policy := &CIPolicyDynamicImports{
+		Expansion:      "nearest_module",
+		OwnersFallback: false, // Disable fallback to see the effect
+	}
+
+	allTestFiles := []string{
+		"src/app/app.test.js",
+		"tests/e2e.test.js",
+	}
+
+	// WRONG: Module names instead of path prefixes (the old bug)
+	wrongMappings := []ModulePathMapping{
+		{Name: "App", PathPrefixes: []string{"App"}}, // Won't match src/app/
+	}
+
+	filesByModule := map[string][]string{
+		"App": {"src/app/app.test.js"},
+	}
+
+	imp := DynamicImportFile{
+		Path: "src/app/loader.js",
+		Kind: "require(variable)",
+		Line: 42,
+	}
+
+	tests, strategy := expandSingleImport(imp, policy, allTestFiles, wrongMappings, filesByModule)
+
+	// With wrong mappings and no fallback, should go to full_suite
+	if strategy != "full_suite" {
+		t.Errorf("With wrong mappings and no fallback, expected 'full_suite' but got %q", strategy)
+	}
+	if len(tests) != len(allTestFiles) {
+		t.Errorf("With full_suite, expected all %d tests but got %d", len(allTestFiles), len(tests))
+	}
+}
+
+// TestModulePathMappingIntegration tests the full flow from module names to correct test matching
+func TestModulePathMappingIntegration(t *testing.T) {
+	// This is an integration test that simulates the full flow
+
+	testFiles := []string{
+		"src/widgets/button.test.js",
+		"src/widgets/modal.test.js",
+		"src/api/client.test.js",
+		"src/api/auth.test.js",
+		"lib/helpers/format.test.js",
+	}
+
+	// Simulate module configurations like in kai.modules.yaml
+	// Module "Widgets" -> paths: ["src/widgets/**"]
+	// Module "API" -> paths: ["src/api/**"]
+	// Module "Helpers" -> paths: ["lib/helpers/**"]
+	moduleMappings := []ModulePathMapping{
+		{Name: "Widgets", PathPrefixes: []string{"src/widgets"}},
+		{Name: "API", PathPrefixes: []string{"src/api"}},
+		{Name: "Helpers", PathPrefixes: []string{"lib/helpers"}},
+	}
+
+	testMap := buildModuleTestMap(testFiles, moduleMappings)
+
+	// Verify each module gets correct tests
+	if len(testMap["Widgets"]) != 2 {
+		t.Errorf("Widgets should have 2 tests, got %d: %v", len(testMap["Widgets"]), testMap["Widgets"])
+	}
+	if len(testMap["API"]) != 2 {
+		t.Errorf("API should have 2 tests, got %d: %v", len(testMap["API"]), testMap["API"])
+	}
+	if len(testMap["Helpers"]) != 1 {
+		t.Errorf("Helpers should have 1 test, got %d: %v", len(testMap["Helpers"]), testMap["Helpers"])
+	}
+
+	// Now test expansion for a file in Widgets
+	policy := &CIPolicyDynamicImports{
+		Expansion:      "nearest_module",
+		OwnersFallback: true,
+	}
+
+	imp := DynamicImportFile{
+		Path: "src/widgets/dynamic-loader.js",
+		Kind: "import(variable)",
+		Line: 10,
+	}
+
+	expandedTests, strategy := expandSingleImport(imp, policy, testFiles, moduleMappings, testMap)
+
+	// Should expand to Widgets tests only (nearest_module strategy)
+	if strategy != "nearest_module: Widgets" {
+		t.Errorf("Expected strategy 'nearest_module: Widgets', got %q", strategy)
+	}
+	if len(expandedTests) != 2 {
+		t.Errorf("Expected 2 tests for Widgets, got %d: %v", len(expandedTests), expandedTests)
+	}
+
+	// Verify the right tests were selected
+	expectedTests := map[string]bool{
+		"src/widgets/button.test.js": true,
+		"src/widgets/modal.test.js":  true,
+	}
+	for _, test := range expandedTests {
+		if !expectedTests[test] {
+			t.Errorf("Unexpected test in expansion: %s", test)
 		}
 	}
 }
