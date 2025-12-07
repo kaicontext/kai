@@ -1723,6 +1723,88 @@ kai ref set snap.v1.0 abc123          # Name by ID
 kai ref list                          # See all refs
 ` + "```" + `
 
+## Accessing Raw Diffs (Ground Truth)
+
+Kai provides semantic understanding, but raw Git diffs remain the authoritative source when you need to verify accuracy.
+
+### When to Check the Raw Diff
+
+| Scenario | Why Raw Diff Helps |
+|----------|-------------------|
+| **Ground truth** | If Kai miscategorizes a change (e.g., labels logic as "formatting"), the raw diff is authoritative |
+| **Context visibility** | See actual code around changes, not just symbol names |
+| **Uncategorized changes** | Catch formatting normalization, semicolon fixes—usually noise, but sometimes meaningful (e.g., ASI bugs in JS) |
+| **Verification** | Confirm the structured summary matches what actually changed |
+
+### Getting Both Views
+
+` + "```" + `bash
+# Kai's structured semantic analysis
+kai dump @cs:last --json
+
+# Raw Git diff for the same changes (ground truth)
+git diff HEAD~1..HEAD
+
+# Or use Kai's diff with --raw flag
+kai diff @snap:prev @snap:last --raw
+` + "```" + `
+
+### Recommended Workflow
+
+1. **Start with Kai** — Use structured data for speed and semantic understanding
+2. **Verify when needed** — Check raw diff if something seems miscategorized
+3. **Trust the diff** — If Kai and raw diff disagree, the diff is correct
+
+## CI & Test Selection
+
+Kai provides intelligent test selection for CI pipelines. Instead of running all tests on every change, analyze which tests are affected.
+
+### Generate a Test Plan
+
+` + "```" + `bash
+# Generate test selection plan from a changeset
+kai ci plan @cs:last --out plan.json
+
+# Human-readable explanation
+kai ci plan @cs:last --explain
+
+# Force full suite (panic switch)
+KAI_FORCE_FULL=1 kai ci plan @cs:last --out plan.json
+` + "```" + `
+
+### Safety Modes
+
+| Mode | Description |
+|------|-------------|
+| ` + "`" + `shadow` + "`" + ` | Compute plan but run full suite. Compare predictions to learn. |
+| ` + "`" + `guarded` + "`" + ` | Run selective with auto-fallback on risk. Default mode. |
+| ` + "`" + `strict` + "`" + ` | Run selective only. Use panic switch for full suite. |
+
+` + "```" + `bash
+kai ci plan @cs:last --safety-mode=shadow   # Learning phase
+kai ci plan @cs:last --safety-mode=guarded  # Safe default
+kai ci plan @cs:last --safety-mode=strict   # High confidence
+` + "```" + `
+
+### Find Affected Tests
+
+` + "```" + `bash
+# Which tests are affected by changes between two snapshots?
+kai test affected @snap:prev @snap:last
+
+# Uses import graph tracing to find transitive dependencies
+` + "```" + `
+
+### Structural Risks Detected
+
+| Risk | Severity | Meaning |
+|------|----------|---------|
+| ` + "`" + `config_change` + "`" + ` | High | package.json, tsconfig, etc. changed |
+| ` + "`" + `test_infra` + "`" + ` | High | Fixtures, mocks, setup files changed |
+| ` + "`" + `dynamic_import` + "`" + ` | High | Dynamic require/import detected |
+| ` + "`" + `no_test_mapping` + "`" + ` | Medium | Changed files have no test coverage |
+| ` + "`" + `cross_module_change` + "`" + ` | Medium | Changes span 3+ modules |
+
 ## Troubleshooting
 
 | Error | Fix |
