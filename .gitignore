@@ -38,3 +38,4 @@ kailab/data/
 .DS_Store
 Thumbs.db
 .kai/
+kailab-control/internal/api/web/_app/
