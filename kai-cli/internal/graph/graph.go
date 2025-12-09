@@ -398,6 +398,42 @@ func (db *DB) GetEdgesByContextAndDst(at []byte, edgeType EdgeType, dst []byte) 
 	return edges, rows.Err()
 }
 
+// GetEdgesToByPath finds edges of a given type where the destination node is a File
+// with the specified path. This is useful for finding TESTS edges regardless of
+// which content-addressed version of the file they point to.
+func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT e.src, e.dst, e.created_at
+		FROM edges e
+		JOIN nodes n ON e.dst = n.id
+		WHERE e.type = ?
+		AND n.kind = 'File'
+		AND json_extract(n.payload, '$.path') = ?
+	`, string(edgeType), filePath)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges by path: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var src, dst []byte
+		var createdAt int64
+		if err := rows.Scan(&src, &dst, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+
+		edges = append(edges, &Edge{
+			Src:       src,
+			Type:      edgeType,
+			Dst:       dst,
+			CreatedAt: createdAt,
+		})
+	}
+
+	return edges, rows.Err()
+}
+
 // UpdateNodePayload updates the payload of an existing node.
 func (db *DB) UpdateNodePayload(id []byte, payload map[string]interface{}) error {
 	payloadJSON, err := cas.CanonicalJSON(payload)

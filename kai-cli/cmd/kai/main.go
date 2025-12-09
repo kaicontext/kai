@@ -52,7 +52,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.5.0"
+var Version = "0.5.1"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -2596,15 +2596,9 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 
 	// First: direct test files for changed files
 	for changedPath := range changedPaths {
-		changedID, ok := fileIDByPath[changedPath]
-		if !ok {
-			continue
-		}
-
-		// Find TESTS edges pointing to this file
-		// Query: File --TESTS--> changedFile
-		// We need reverse lookup, so get all edges where dst=changedID
-		testsEdges, err := db.GetEdgesTo(changedID, graph.EdgeTests)
+		// Find TESTS edges pointing to files with this path
+		// Uses path-based lookup to handle content-addressed ID changes
+		testsEdges, err := db.GetEdgesToByPath(changedPath, graph.EdgeTests)
 		if err != nil {
 			continue
 		}
@@ -2612,11 +2606,18 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 			srcHex := util.BytesToHex(e.Src)
 			if path, ok := filePathByID[srcHex]; ok {
 				affectedTests[path] = true
+			} else {
+				// Query node directly if not in current snapshot
+				if srcNode, _ := db.GetNode(e.Src); srcNode != nil {
+					if srcPath, ok := srcNode.Payload["path"].(string); ok {
+						affectedTests[srcPath] = true
+					}
+				}
 			}
 		}
 
 		// Also find files that import/call into the changed file
-		importsEdges, err := db.GetEdgesTo(changedID, graph.EdgeImports)
+		importsEdges, err := db.GetEdgesToByPath(changedPath, graph.EdgeImports)
 		if err != nil {
 			continue
 		}
@@ -2627,10 +2628,19 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 				if parse.IsTestFile(path) {
 					affectedTests[path] = true
 				}
+			} else {
+				// Query node directly
+				if srcNode, _ := db.GetNode(e.Src); srcNode != nil {
+					if srcPath, ok := srcNode.Payload["path"].(string); ok {
+						if parse.IsTestFile(srcPath) {
+							affectedTests[srcPath] = true
+						}
+					}
+				}
 			}
 		}
 
-		callsEdges, err := db.GetEdgesTo(changedID, graph.EdgeCalls)
+		callsEdges, err := db.GetEdgesToByPath(changedPath, graph.EdgeCalls)
 		if err != nil {
 			continue
 		}
@@ -2639,6 +2649,15 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 			if path, ok := filePathByID[srcHex]; ok {
 				if parse.IsTestFile(path) {
 					affectedTests[path] = true
+				}
+			} else {
+				// Query node directly
+				if srcNode, _ := db.GetNode(e.Src); srcNode != nil {
+					if srcPath, ok := srcNode.Payload["path"].(string); ok {
+						if parse.IsTestFile(srcPath) {
+							affectedTests[srcPath] = true
+						}
+					}
 				}
 			}
 		}
@@ -4151,27 +4170,40 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 				analyzersUsed = append(analyzersUsed, "imports@1")
 				// Use file-level import graph
 				for _, changedPath := range changedFiles {
-					changedID, ok := fileIDByPath[changedPath]
-					if !ok {
-						continue
-					}
-
-					// Find test files that test this file
-					testsEdges, _ := db.GetEdgesTo(changedID, graph.EdgeTests)
+					// Find test files that test this file BY PATH
+					// This handles content-addressed ID changes when files are modified
+					testsEdges, _ := db.GetEdgesToByPath(changedPath, graph.EdgeTests)
 					for _, e := range testsEdges {
 						srcHex := util.BytesToHex(e.Src)
 						if path, ok := filePathByID[srcHex]; ok {
 							affectedTargets[path] = true
+						} else {
+							// Source file might not be in current snapshot's filePathByID
+							// Query the node directly to get its path
+							if srcNode, err := db.GetNode(e.Src); err == nil && srcNode != nil {
+								if srcPath, ok := srcNode.Payload["path"].(string); ok {
+									affectedTargets[srcPath] = true
+								}
+							}
 						}
 					}
 
-					// Find files that import this file and are tests
-					importsEdges, _ := db.GetEdgesTo(changedID, graph.EdgeImports)
+					// Find files that import this file and are tests (also by path)
+					importsEdges, _ := db.GetEdgesToByPath(changedPath, graph.EdgeImports)
 					for _, e := range importsEdges {
 						srcHex := util.BytesToHex(e.Src)
 						if path, ok := filePathByID[srcHex]; ok {
 							if parse.IsTestFile(path) {
 								affectedTargets[path] = true
+							}
+						} else {
+							// Query node directly
+							if srcNode, err := db.GetNode(e.Src); err == nil && srcNode != nil {
+								if srcPath, ok := srcNode.Payload["path"].(string); ok {
+									if parse.IsTestFile(srcPath) {
+										affectedTargets[srcPath] = true
+									}
+								}
 							}
 						}
 					}
