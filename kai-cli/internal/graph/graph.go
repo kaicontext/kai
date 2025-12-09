@@ -245,7 +245,7 @@ func (db *DB) HasNode(id []byte) (bool, error) {
 // GetNodesByKind retrieves all nodes of a specific kind.
 func (db *DB) GetNodesByKind(kind NodeKind) ([]*Node, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, payload, created_at FROM nodes WHERE kind = ?
+		SELECT id, payload, created_at FROM nodes WHERE kind = ? ORDER BY created_at DESC
 	`, string(kind))
 	if err != nil {
 		return nil, fmt.Errorf("querying nodes: %w", err)
