@@ -33,7 +33,7 @@ type ParsedCalls struct {
 	Exports []string    `json:"exports"` // Exported symbol names
 }
 
-// ExtractCalls extracts function calls and imports from JavaScript/TypeScript source.
+// ExtractCalls extracts function calls and imports from source code.
 func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error) {
 	parsed, err := p.Parse(content, lang)
 	if err != nil {
@@ -48,14 +48,17 @@ func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error)
 
 	root := parsed.Tree.RootNode()
 
-	// Extract imports
-	result.Imports = extractImports(root, content)
-
-	// Extract calls
-	result.Calls = extractCallSites(root, content)
-
-	// Extract exports
-	result.Exports = extractExports(root, content)
+	switch lang {
+	case "go", "golang":
+		result.Imports = extractGoImports(root, content)
+		result.Calls = extractGoCallSites(root, content)
+		result.Exports = extractGoExports(root, content)
+	default:
+		// JavaScript/TypeScript/Python
+		result.Imports = extractImports(root, content)
+		result.Calls = extractCallSites(root, content)
+		result.Exports = extractExports(root, content)
+	}
 
 	return result, nil
 }
@@ -667,4 +670,311 @@ func FindTestsForFile(sourcePath string, allFiles []string) []string {
 	}
 
 	return tests
+}
+
+// ==================== Go Import/Call Extraction ====================
+
+// extractGoImports finds all import declarations in Go source.
+func extractGoImports(node *sitter.Node, content []byte) []*Import {
+	var imports []*Import
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		if n.Type() == "import_declaration" {
+			imps := parseGoImportDeclaration(n, content)
+			imports = append(imports, imps...)
+		}
+	}
+
+	return imports
+}
+
+// parseGoImportDeclaration parses Go import declaration.
+// Handles:
+//   - import "fmt"
+//   - import alias "pkg"
+//   - import . "pkg"
+//   - import _ "pkg"
+//   - import ( "fmt"; "os" )
+func parseGoImportDeclaration(node *sitter.Node, content []byte) []*Import {
+	var imports []*Import
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		switch child.Type() {
+		case "import_spec":
+			imp := parseGoImportSpec(child, content)
+			if imp != nil {
+				imports = append(imports, imp)
+			}
+		case "import_spec_list":
+			// Multiple imports in parentheses
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "import_spec" {
+					imp := parseGoImportSpec(spec, content)
+					if imp != nil {
+						imports = append(imports, imp)
+					}
+				}
+			}
+		}
+	}
+
+	return imports
+}
+
+// parseGoImportSpec parses a single Go import spec.
+func parseGoImportSpec(node *sitter.Node, content []byte) *Import {
+	imp := &Import{
+		Named: make(map[string]string),
+		Range: nodeRange(node),
+	}
+
+	var alias string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		switch child.Type() {
+		case "package_identifier", "identifier", "blank_identifier", "dot":
+			// Alias or . or _
+			alias = child.Content(content)
+		case "interpreted_string_literal", "raw_string_literal":
+			// Import path
+			source := strings.Trim(child.Content(content), "\"'`")
+			imp.Source = source
+			// Go imports are typically not "relative" in the same way as JS
+			// But we can mark local/internal packages
+			imp.IsRelative = strings.HasPrefix(source, "./") ||
+				strings.HasPrefix(source, "../") ||
+				strings.Contains(source, "/internal/")
+		}
+	}
+
+	if imp.Source == "" {
+		return nil
+	}
+
+	// Set alias info
+	if alias != "" {
+		switch alias {
+		case ".":
+			// Dot import - all exported identifiers available directly
+			imp.Namespace = "."
+		case "_":
+			// Blank import - side effects only
+			imp.Default = "_"
+		default:
+			// Named alias
+			imp.Default = alias
+		}
+	} else {
+		// No alias - use last component of path as default import name
+		parts := strings.Split(imp.Source, "/")
+		if len(parts) > 0 {
+			imp.Default = parts[len(parts)-1]
+		}
+	}
+
+	return imp
+}
+
+// extractGoCallSites finds all function/method calls in Go source.
+func extractGoCallSites(node *sitter.Node, content []byte) []*CallSite {
+	var calls []*CallSite
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		if n.Type() != "call_expression" {
+			continue
+		}
+
+		call := parseGoCallExpression(n, content)
+		if call != nil {
+			calls = append(calls, call)
+		}
+	}
+
+	return calls
+}
+
+// parseGoCallExpression extracts call info from a Go call_expression.
+func parseGoCallExpression(node *sitter.Node, content []byte) *CallSite {
+	if node.ChildCount() == 0 {
+		return nil
+	}
+
+	// First child is the function being called
+	callee := node.Child(0)
+	if callee == nil {
+		return nil
+	}
+
+	call := &CallSite{
+		Range: nodeRange(node),
+	}
+
+	switch callee.Type() {
+	case "identifier":
+		// Direct call: foo()
+		call.CalleeName = callee.Content(content)
+		call.IsMethodCall = false
+
+	case "selector_expression":
+		// Method/package call: pkg.Func() or obj.Method()
+		call.IsMethodCall = true
+		parseGoSelectorExpression(callee, content, call)
+
+	case "call_expression":
+		// Chained call: foo()()
+		return nil
+
+	case "parenthesized_expression":
+		// (foo)()
+		if callee.ChildCount() > 0 {
+			for i := 0; i < int(callee.ChildCount()); i++ {
+				inner := callee.Child(i)
+				if inner != nil && inner.Type() == "identifier" {
+					call.CalleeName = inner.Content(content)
+					break
+				}
+			}
+		}
+
+	case "type_conversion_expression":
+		// Type conversion: int(x)
+		// Find the type being converted to
+		for i := 0; i < int(callee.ChildCount()); i++ {
+			child := callee.Child(i)
+			if child.Type() == "type_identifier" {
+				call.CalleeName = child.Content(content)
+				break
+			}
+		}
+
+	default:
+		return nil
+	}
+
+	if call.CalleeName == "" {
+		return nil
+	}
+
+	return call
+}
+
+// parseGoSelectorExpression extracts object and field from selector_expression.
+func parseGoSelectorExpression(node *sitter.Node, content []byte, call *CallSite) {
+	// selector_expression: operand.field_identifier
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		switch child.Type() {
+		case "identifier":
+			// Package or object name
+			if call.CalleeObject == "" {
+				call.CalleeObject = child.Content(content)
+			}
+		case "field_identifier":
+			// Method/function name
+			call.CalleeName = child.Content(content)
+		case "selector_expression":
+			// Nested: a.b.c()
+			parseGoSelectorExpression(child, content, call)
+		case "call_expression":
+			// foo().bar()
+			call.CalleeObject = "(call)"
+		}
+	}
+}
+
+// extractGoExports finds exported symbols in Go source.
+// In Go, exported symbols are those starting with uppercase letter.
+func extractGoExports(node *sitter.Node, content []byte) []string {
+	var exports []string
+	seen := make(map[string]bool)
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		var name string
+
+		switch n.Type() {
+		case "function_declaration":
+			// Find function name
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "identifier" {
+					name = child.Content(content)
+					break
+				}
+			}
+
+		case "method_declaration":
+			// Find method name
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "field_identifier" {
+					name = child.Content(content)
+					break
+				}
+			}
+
+		case "type_spec":
+			// Find type name
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "type_identifier" {
+					name = child.Content(content)
+					break
+				}
+			}
+
+		case "var_spec", "const_spec":
+			// Find variable/constant names
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "identifier" {
+					varName := child.Content(content)
+					if isGoExported(varName) && !seen[varName] {
+						seen[varName] = true
+						exports = append(exports, varName)
+					}
+				}
+			}
+			continue
+		}
+
+		if name != "" && isGoExported(name) && !seen[name] {
+			seen[name] = true
+			exports = append(exports, name)
+		}
+	}
+
+	return exports
+}
+
+// isGoExported returns true if the name is exported (starts with uppercase).
+func isGoExported(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+	r := rune(name[0])
+	return r >= 'A' && r <= 'Z'
 }

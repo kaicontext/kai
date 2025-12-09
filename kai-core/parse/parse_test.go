@@ -766,3 +766,189 @@ def commented():
 		t.Error("Expected to find function 'commented'")
 	}
 }
+
+// ==================== Go Tests ====================
+
+func TestParser_ParseGoFunction(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+package main
+
+func Hello(name string) string {
+	return "Hello, " + name
+}
+`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) == 0 {
+		t.Fatal("Expected at least one symbol")
+	}
+
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Hello" && sym.Kind == "function" {
+			found = true
+			if sym.Signature == "" {
+				t.Error("expected function signature")
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("Expected to find function 'Hello'")
+	}
+}
+
+func TestParser_ParseGoStruct(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+package main
+
+type User struct {
+	Name  string
+	Email string
+}
+`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Error("Expected to find struct 'User'")
+	}
+}
+
+func TestParser_ParseGoMethod(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+package main
+
+type User struct {
+	Name string
+}
+
+func (u *User) Greet() string {
+	return "Hello, " + u.Name
+}
+`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	foundStruct := false
+	foundMethod := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			foundStruct = true
+		}
+		if sym.Name == "*User.Greet" && sym.Kind == "function" {
+			foundMethod = true
+		}
+	}
+
+	if !foundStruct {
+		t.Error("Expected to find struct 'User'")
+	}
+	if !foundMethod {
+		t.Error("Expected to find method '*User.Greet'")
+	}
+}
+
+func TestParser_ParseGoInterface(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+package main
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Reader" && sym.Kind == "interface" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Error("Expected to find interface 'Reader'")
+	}
+}
+
+func TestParser_ParseGoVariables(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+package main
+
+var MaxSize = 100
+const Version = "1.0.0"
+`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	foundVar := false
+	foundConst := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "MaxSize" && sym.Kind == "variable" {
+			foundVar = true
+		}
+		if sym.Name == "Version" && sym.Kind == "variable" {
+			foundConst = true
+		}
+	}
+
+	if !foundVar {
+		t.Error("Expected to find variable 'MaxSize'")
+	}
+	if !foundConst {
+		t.Error("Expected to find constant 'Version'")
+	}
+}
+
+func TestParser_ParseGoEmptyFile(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`package main`)
+
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Package declaration doesn't create symbols
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for package-only file, got %d", len(parsed.Symbols))
+	}
+}

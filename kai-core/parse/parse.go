@@ -1,11 +1,13 @@
-// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, and Python.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, and Go.
 package parse
 
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/python"
 )
@@ -35,9 +37,10 @@ type ParsedFile struct {
 type Parser struct {
 	jsParser *sitter.Parser
 	pyParser *sitter.Parser
+	goParser *sitter.Parser
 }
 
-// NewParser creates a new parser with support for JavaScript/TypeScript and Python.
+// NewParser creates a new parser with support for JavaScript/TypeScript, Python, and Go.
 func NewParser() *Parser {
 	jsParser := sitter.NewParser()
 	jsParser.SetLanguage(javascript.GetLanguage())
@@ -45,9 +48,13 @@ func NewParser() *Parser {
 	pyParser := sitter.NewParser()
 	pyParser.SetLanguage(python.GetLanguage())
 
+	goParser := sitter.NewParser()
+	goParser.SetLanguage(golang.GetLanguage())
+
 	return &Parser{
 		jsParser: jsParser,
 		pyParser: pyParser,
+		goParser: goParser,
 	}
 }
 
@@ -60,6 +67,9 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 	case "py", "python":
 		parser = p.pyParser
 		extractFn = extractPythonSymbols
+	case "go", "golang":
+		parser = p.goParser
+		extractFn = extractGoSymbols
 	case "js", "ts", "javascript", "typescript":
 		parser = p.jsParser
 		extractFn = extractSymbols
@@ -570,6 +580,276 @@ func extractPythonAssignment(node *sitter.Node, content []byte) []*Symbol {
 			}
 			break
 		}
+	}
+
+	return symbols
+}
+
+// ==================== Go Symbol Extraction ====================
+
+// extractGoSymbols walks the Go AST and extracts function, type, and variable declarations.
+func extractGoSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil {
+			break
+		}
+		if n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "function_declaration":
+			sym := extractGoFunction(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "method_declaration":
+			sym := extractGoMethod(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "type_declaration":
+			syms := extractGoTypes(n, content)
+			symbols = append(symbols, syms...)
+		case "var_declaration", "const_declaration":
+			syms := extractGoVarConst(n, content)
+			symbols = append(symbols, syms...)
+		}
+	}
+
+	return symbols
+}
+
+func extractGoFunction(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var params string
+	var result string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "parameter_list":
+			params = child.Content(content)
+		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type":
+			result = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := "func " + name + params
+	if result != "" {
+		signature += " " + result
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractGoMethod(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var receiver string
+	var params string
+	var result string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "parameter_list":
+			if receiver == "" {
+				// First parameter_list is the receiver
+				receiver = extractGoReceiverType(child, content)
+			} else if params == "" {
+				// Second parameter_list is the params
+				params = child.Content(content)
+			} else {
+				// Third would be result
+				result = child.Content(content)
+			}
+		case "field_identifier":
+			name = child.Content(content)
+		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type":
+			result = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	fullName := name
+	if receiver != "" {
+		fullName = receiver + "." + name
+	}
+
+	signature := "func "
+	if receiver != "" {
+		signature += "(" + receiver + ") "
+	}
+	signature += name + params
+	if result != "" {
+		signature += " " + result
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractGoReceiverType(paramList *sitter.Node, content []byte) string {
+	// parameter_list contains parameter_declaration(s)
+	// Find the type in the first parameter_declaration
+	for i := 0; i < int(paramList.ChildCount()); i++ {
+		child := paramList.Child(i)
+		if child.Type() == "parameter_declaration" {
+			// Look for the type
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				switch typeChild.Type() {
+				case "type_identifier":
+					return typeChild.Content(content)
+				case "pointer_type":
+					// Extract the base type from pointer
+					for k := 0; k < int(typeChild.ChildCount()); k++ {
+						ptrChild := typeChild.Child(k)
+						if ptrChild.Type() == "type_identifier" {
+							return "*" + ptrChild.Content(content)
+						}
+					}
+					return typeChild.Content(content)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func extractGoTypes(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	// type_declaration contains type_spec(s)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_spec" {
+			sym := extractGoTypeSpec(child, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractGoTypeSpec(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var kind = "type"
+	var typeKind string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "struct_type":
+			kind = "class" // Use "class" for structs to match other languages
+			typeKind = "struct"
+		case "interface_type":
+			kind = "interface"
+			typeKind = "interface"
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := "type " + name
+	if typeKind != "" {
+		signature += " " + typeKind
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      kind,
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractGoVarConst(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+	isConst := node.Type() == "const_declaration"
+	declKind := "var"
+	if isConst {
+		declKind = "const"
+	}
+
+	// var/const_declaration contains var_spec or const_spec
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "var_spec" || child.Type() == "const_spec" {
+			syms := extractGoVarSpec(child, content, declKind)
+			symbols = append(symbols, syms...)
+		}
+	}
+
+	return symbols
+}
+
+func extractGoVarSpec(node *sitter.Node, content []byte, declKind string) []*Symbol {
+	var symbols []*Symbol
+	var names []string
+	var typeStr string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			name := child.Content(content)
+			names = append(names, name)
+		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type", "array_type", "function_type":
+			typeStr = child.Content(content)
+		}
+	}
+
+	for _, name := range names {
+		signature := declKind + " " + name
+		if typeStr != "" {
+			signature += " " + typeStr
+		}
+
+		// Determine if this is a function variable
+		kind := "variable"
+		if strings.HasPrefix(typeStr, "func") {
+			kind = "function"
+		}
+
+		symbols = append(symbols, &Symbol{
+			Name:      name,
+			Kind:      kind,
+			Range:     nodeRange(node),
+			Signature: signature,
+		})
 	}
 
 	return symbols

@@ -13,4 +13,6 @@ coverage.out
 
 # OS
 .DS_Store
-.kai/db.sqlite
+
+# Kai data (from testing kai init locally)
+.kai/

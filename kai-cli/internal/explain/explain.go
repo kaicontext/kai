@@ -279,3 +279,282 @@ func ExplainWorkspaceCreate(name, base string) *Context {
 		},
 	}
 }
+
+// ExplainStatus returns explanation context for status command
+func ExplainStatus(hasBaseline bool, changedFiles, addedFiles, deletedFiles int) *Context {
+	ctx := &Context{
+		Command:     "kai status",
+		Description: "Shows the current state of your working directory compared to the baseline.",
+		Nouns: []Noun{
+			{
+				Name:        "@snap:last",
+				Description: "Your committed baseline snapshot",
+				WhyUsed:     "The reference point for detecting changes",
+			},
+			{
+				Name:        "Working Directory",
+				Description: "Current files on disk (uncommitted)",
+				WhyUsed:     "Compared against baseline to show pending changes",
+			},
+		},
+		Steps: []string{
+			"Load baseline snapshot (@snap:last)",
+			"Scan current directory for files",
+			"Compare file digests to detect changes",
+			"Classify files as modified, added, or deleted",
+		},
+	}
+
+	if !hasBaseline {
+		ctx.Tips = []string{
+			"No baseline exists yet. Run 'kai capture' to create one.",
+		}
+	} else {
+		ctx.Nouns = append(ctx.Nouns, Noun{
+			Name:        "File Changes",
+			Description: "Differences between baseline and working directory",
+			WhyUsed:     fmt.Sprintf("%d modified, %d added, %d deleted", changedFiles, addedFiles, deletedFiles),
+		})
+		ctx.Tips = []string{
+			"Run 'kai diff' to see semantic details of changes",
+			"Run 'kai capture' to create a new snapshot with these changes",
+			"Run 'kai review open' to commit and create a review",
+		}
+	}
+
+	return ctx
+}
+
+// ExplainInit returns explanation context for init command
+func ExplainInit(dir string) *Context {
+	return &Context{
+		Command:     "kai init",
+		Description: "Initializes a new Kai repository in the current directory.",
+		Nouns: []Noun{
+			{
+				Name:        ".kai/",
+				Description: "The Kai data directory (like .git for Git)",
+				WhyUsed:     fmt.Sprintf("Will be created in %s", dir),
+			},
+			{
+				Name:        "db.sqlite",
+				Description: "Graph database storing snapshots, symbols, and relationships",
+				WhyUsed:     "Stores all semantic data locally",
+			},
+			{
+				Name:        "objects/",
+				Description: "Content-addressed storage for file contents",
+				WhyUsed:     "Deduplicates file storage across snapshots",
+			},
+			{
+				Name:        "AGENTS.md",
+				Description: "AI agent guide explaining Kai concepts",
+				WhyUsed:     "Helps AI assistants understand your Kai workflow",
+			},
+			{
+				Name:        "kai.modules.yaml",
+				Description: "Module definitions mapping paths to logical areas",
+				WhyUsed:     "Enables intent generation like 'Update Auth login flow'",
+			},
+		},
+		Steps: []string{
+			"Create .kai/ directory structure",
+			"Initialize SQLite database with schema",
+			"Create objects/ for content storage",
+			"Generate AGENTS.md guide",
+			"Create default kai.modules.yaml (if none exists)",
+		},
+		Tips: []string{
+			"Edit kai.modules.yaml to define your project's logical areas",
+			"Run 'kai capture' to create your first snapshot",
+			"The .kai/ directory should be gitignored (stores local data)",
+		},
+	}
+}
+
+// ExplainPush returns explanation context for push command
+func ExplainPush(remote, refSpec string, refCount int) *Context {
+	return &Context{
+		Command:     "kai push",
+		Description: "Uploads refs and their associated data to a remote server.",
+		Nouns: []Noun{
+			{
+				Name:        "Remote",
+				Description: "A KaiLab server that stores shared Kai data",
+				WhyUsed:     fmt.Sprintf("Pushing to '%s'", remote),
+			},
+			{
+				Name:        "Ref",
+				Description: "A named pointer to a snapshot, changeset, or review",
+				WhyUsed:     fmt.Sprintf("Pushing %d ref(s) matching '%s'", refCount, refSpec),
+			},
+			{
+				Name:        "Objects",
+				Description: "Content-addressed blobs (file contents, nodes)",
+				WhyUsed:     "Uploaded to ensure remote has all required data",
+			},
+		},
+		Steps: []string{
+			"Resolve refs matching " + refSpec,
+			"Collect all objects reachable from refs",
+			"Upload objects not already on remote",
+			"Create/update refs on remote",
+		},
+		Tips: []string{
+			"Use 'kai push origin review:<id>' to push a review with its changeset",
+			"Use 'kai fetch origin' to download refs from remote",
+			"Run 'kai remote set' to configure remotes",
+		},
+	}
+}
+
+// ExplainFetch returns explanation context for fetch command
+func ExplainFetch(remote string, refCount int) *Context {
+	return &Context{
+		Command:     "kai fetch",
+		Description: "Downloads refs and their associated data from a remote server.",
+		Nouns: []Noun{
+			{
+				Name:        "Remote",
+				Description: "A KaiLab server storing shared Kai data",
+				WhyUsed:     fmt.Sprintf("Fetching from '%s'", remote),
+			},
+			{
+				Name:        "Refs",
+				Description: "Named pointers to snapshots, changesets, reviews",
+				WhyUsed:     fmt.Sprintf("Downloading %d ref(s)", refCount),
+			},
+			{
+				Name:        "Objects",
+				Description: "Content-addressed blobs needed by refs",
+				WhyUsed:     "Downloaded to make refs usable locally",
+			},
+		},
+		Steps: []string{
+			"List refs available on remote",
+			"Download objects referenced by new refs",
+			"Create/update local refs",
+		},
+		Tips: []string{
+			"Use 'kai ref list' to see downloaded refs",
+			"Use 'kai diff <remote-ref>' to compare with local",
+		},
+	}
+}
+
+// ExplainReviewOpenFull returns comprehensive explanation for review open
+func ExplainReviewOpenFull(target, title string, hasWorkspace bool, workspaceName string, autoTitle bool) *Context {
+	ctx := &Context{
+		Command:     "kai review open",
+		Description: "Creates a code review for your changes.",
+		Nouns: []Noun{
+			{
+				Name:        "Review",
+				Description: "A code review session tracking comments and approvals",
+				WhyUsed:     fmt.Sprintf("Will be created with title: '%s'", title),
+			},
+			{
+				Name:        "ChangeSet",
+				Description: "The set of semantic changes between two snapshots",
+				WhyUsed:     fmt.Sprintf("Target: %s", target),
+			},
+			{
+				Name:        "@snap:last",
+				Description: "Your committed baseline (before changes)",
+				WhyUsed:     "Base of the changeset",
+			},
+			{
+				Name:        "@snap:working",
+				Description: "Current working directory state",
+				WhyUsed:     "Head of the changeset (your changes)",
+			},
+		},
+		Steps: []string{
+			"Create changeset from @snap:last → @snap:working",
+			"Detect semantic changes (functions added, conditions changed, etc.)",
+			"Create review record linked to changeset",
+			"Set review status to 'draft'",
+		},
+	}
+
+	if hasWorkspace {
+		ctx.Nouns = append(ctx.Nouns, Noun{
+			Name:        "Workspace",
+			Description: "A branch-like container for stacking changesets",
+			WhyUsed:     fmt.Sprintf("Using workspace '%s' - changeset added to stack", workspaceName),
+		})
+		ctx.Steps = append(ctx.Steps, "Add changeset to workspace's changeset stack")
+	}
+
+	if autoTitle {
+		ctx.Nouns = append(ctx.Nouns, Noun{
+			Name:        "Intent",
+			Description: "Auto-generated summary based on semantic analysis",
+			WhyUsed:     "Title generated from detected changes (use -m to override)",
+		})
+	}
+
+	ctx.Tips = []string{
+		"Use 'kai review view <id>' to see the review details",
+		"Use 'kai review approve <id>' to approve",
+		"Use 'kai push origin review:<id>' to share with team",
+	}
+
+	return ctx
+}
+
+// ExplainDiffFull returns comprehensive explanation for diff command
+func ExplainDiffFull(baseRef, headRef string, fileCount int, changeTypes []string, modules []string) *Context {
+	ctx := &Context{
+		Command:     "kai diff",
+		Description: "Shows semantic differences between two points in time.",
+		Nouns: []Noun{
+			{
+				Name:        "Base Snapshot",
+				Description: "The 'before' state for comparison",
+				WhyUsed:     fmt.Sprintf("Using %s as baseline", baseRef),
+			},
+			{
+				Name:        "Head",
+				Description: "The 'after' state (your current changes)",
+				WhyUsed:     fmt.Sprintf("Comparing to %s", headRef),
+			},
+			{
+				Name:        "Semantic Diff",
+				Description: "Changes classified by type (not just line changes)",
+				WhyUsed:     "Shows WHAT changed, not just WHERE",
+			},
+		},
+		Steps: []string{
+			fmt.Sprintf("Load base snapshot: %s", baseRef),
+			fmt.Sprintf("Load head: %s", headRef),
+			fmt.Sprintf("Compare %d file(s) for content changes", fileCount),
+			"Parse changed files to extract symbols",
+			"Classify changes into semantic categories",
+		},
+	}
+
+	if len(changeTypes) > 0 {
+		ctx.Nouns = append(ctx.Nouns, Noun{
+			Name:        "Change Types",
+			Description: "Semantic classification of modifications",
+			WhyUsed:     fmt.Sprintf("Detected: %s", strings.Join(changeTypes, ", ")),
+		})
+	}
+
+	if len(modules) > 0 {
+		ctx.Nouns = append(ctx.Nouns, Noun{
+			Name:        "Modules",
+			Description: "Logical areas of code affected",
+			WhyUsed:     fmt.Sprintf("Affected: %s", strings.Join(modules, ", ")),
+		})
+	}
+
+	ctx.Tips = []string{
+		"Use --patch (-p) for line-level unified diff",
+		"Use --json for machine-readable output",
+		"Use --name-only to list just file paths",
+	}
+
+	return ctx
+}

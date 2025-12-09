@@ -918,3 +918,344 @@ func TestGetNodeRawPayload_PreservesExactJSON(t *testing.T) {
 		t.Errorf("raw payload differs from expected:\n  got: %s\n  want: %s", rawPayloadJSON, expectedJSON)
 	}
 }
+
+// TestGC_EphemeralRefsNotRoots verifies that snap.working and snap.latest are not GC roots
+func TestGC_EphemeralRefsNotRoots(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a snapshot node
+	snapPayload := map[string]interface{}{"path": "."}
+	snapID, err := db.InsertNodeDirect(KindSnapshot, snapPayload)
+	if err != nil {
+		t.Fatalf("inserting snapshot: %v", err)
+	}
+
+	// Set snap.working to point to snapshot (ephemeral - NOT a root)
+	_, err = db.Exec(`INSERT INTO refs (name, target_id, target_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		"snap.working", snapID, "Snapshot", 1000, 1000)
+	if err != nil {
+		t.Fatalf("inserting snap.working ref: %v", err)
+	}
+
+	// Set snap.latest to point to same snapshot (ephemeral - NOT a root)
+	_, err = db.Exec(`INSERT INTO refs (name, target_id, target_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		"snap.latest", snapID, "Snapshot", 1000, 1000)
+	if err != nil {
+		t.Fatalf("inserting snap.latest ref: %v", err)
+	}
+
+	// Build GC plan - snapshot should be a candidate since only ephemeral refs point to it
+	plan, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	// Snapshot should be in candidates (since snap.working and snap.latest are not roots)
+	found := false
+	for _, node := range plan.NodesToDelete {
+		if bytes.Equal(node.ID, snapID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected snapshot to be a GC candidate when only ephemeral refs point to it")
+	}
+}
+
+// TestGC_NamedRefIsRoot verifies that named refs (like snap.main) ARE roots
+func TestGC_NamedRefIsRoot(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a snapshot node
+	snapPayload := map[string]interface{}{"path": "."}
+	snapID, err := db.InsertNodeDirect(KindSnapshot, snapPayload)
+	if err != nil {
+		t.Fatalf("inserting snapshot: %v", err)
+	}
+
+	// Set snap.main to point to snapshot (named ref - IS a root)
+	_, err = db.Exec(`INSERT INTO refs (name, target_id, target_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		"snap.main", snapID, "Snapshot", 1000, 1000)
+	if err != nil {
+		t.Fatalf("inserting snap.main ref: %v", err)
+	}
+
+	// Build GC plan - snapshot should NOT be a candidate
+	plan, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	// Snapshot should NOT be in candidates
+	for _, node := range plan.NodesToDelete {
+		if bytes.Equal(node.ID, snapID) {
+			t.Error("snapshot with named ref should NOT be a GC candidate")
+		}
+	}
+}
+
+// TestGC_ReviewKeepsTargetAlive verifies that review nodes keep their targets alive
+func TestGC_ReviewKeepsTargetAlive(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a changeset node
+	csPayload := map[string]interface{}{"title": "test changeset"}
+	csID, err := db.InsertNodeDirect(KindChangeSet, csPayload)
+	if err != nil {
+		t.Fatalf("inserting changeset: %v", err)
+	}
+
+	// Create a review node pointing to the changeset
+	reviewPayload := map[string]interface{}{
+		"title":      "test review",
+		"state":      "draft",
+		"targetId":   string(csID),
+		"targetKind": "ChangeSet",
+	}
+	reviewID, err := db.InsertNodeDirect(KindReview, reviewPayload)
+	if err != nil {
+		t.Fatalf("inserting review: %v", err)
+	}
+
+	// Create REVIEW_OF edge
+	tx, _ := db.BeginTx()
+	db.InsertEdge(tx, reviewID, EdgeReviewOf, csID, nil)
+	tx.Commit()
+
+	// Build GC plan - review and changeset should NOT be candidates
+	plan, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	// Neither should be candidates
+	for _, node := range plan.NodesToDelete {
+		if bytes.Equal(node.ID, reviewID) {
+			t.Error("review node should NOT be a GC candidate")
+		}
+		if bytes.Equal(node.ID, csID) {
+			t.Error("changeset targeted by review should NOT be a GC candidate")
+		}
+	}
+}
+
+// TestGC_KeepFilter verifies that --keep patterns preserve matching nodes
+func TestGC_KeepFilter(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create file nodes
+	srcFile, _ := db.InsertNodeDirect(KindFile, map[string]interface{}{"path": "src/main.js"})
+	testFile, _ := db.InsertNodeDirect(KindFile, map[string]interface{}{"path": "test/main.test.js"})
+
+	// Build GC plan without keep filter - both should be candidates
+	plan1, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	srcFound := false
+	testFound := false
+	for _, node := range plan1.NodesToDelete {
+		if bytes.Equal(node.ID, srcFile) {
+			srcFound = true
+		}
+		if bytes.Equal(node.ID, testFile) {
+			testFound = true
+		}
+	}
+	if !srcFound || !testFound {
+		t.Error("without keep filter, both files should be candidates")
+	}
+
+	// Build GC plan with keep filter for src/**
+	plan2, err := db.BuildGCPlan(GCOptions{Keep: []string{"src/**"}})
+	if err != nil {
+		t.Fatalf("building GC plan with keep: %v", err)
+	}
+
+	srcFoundWithKeep := false
+	testFoundWithKeep := false
+	for _, node := range plan2.NodesToDelete {
+		if bytes.Equal(node.ID, srcFile) {
+			srcFoundWithKeep = true
+		}
+		if bytes.Equal(node.ID, testFile) {
+			testFoundWithKeep = true
+		}
+	}
+	if srcFoundWithKeep {
+		t.Error("src file should be preserved by keep filter")
+	}
+	if !testFoundWithKeep {
+		t.Error("test file should still be a candidate (not matching keep)")
+	}
+}
+
+// TestGC_SinceFilter verifies that --since filter only deletes old content
+func TestGC_SinceFilter(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create an old snapshot (created a very long time ago)
+	// Since we're using absolute timestamps, let's use a fixed old timestamp
+	_, err := db.Exec(`INSERT INTO nodes (id, kind, payload, created_at) VALUES (?, ?, ?, ?)`,
+		[]byte("old-snap"), "Snapshot", `{"path":"."}`, 1000) // Very old
+	if err != nil {
+		t.Fatalf("inserting old snapshot: %v", err)
+	}
+
+	// Create a new snapshot (created now)
+	newPayload := map[string]interface{}{"path": "."}
+	newSnapID, err := db.InsertNodeDirect(KindSnapshot, newPayload)
+	if err != nil {
+		t.Fatalf("inserting new snapshot: %v", err)
+	}
+
+	// Build GC plan with since=7 days - should only include old snapshot
+	plan, err := db.BuildGCPlan(GCOptions{SinceDays: 7})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	oldFound := false
+	newFound := false
+	for _, node := range plan.NodesToDelete {
+		if string(node.ID) == "old-snap" {
+			oldFound = true
+		}
+		if bytes.Equal(node.ID, newSnapID) {
+			newFound = true
+		}
+	}
+
+	// Old snapshot should be a candidate (older than 7 days)
+	if !oldFound {
+		t.Error("old snapshot should be a GC candidate with since filter")
+	}
+	// New snapshot should NOT be a candidate (too recent)
+	if newFound {
+		t.Error("new snapshot should NOT be a GC candidate with since filter")
+	}
+}
+
+// TestGC_WorkspaceKeepsContentAlive verifies workspaces keep their snapshots/changesets alive
+func TestGC_WorkspaceKeepsContentAlive(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create base and head snapshots
+	baseSnap, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"path": "."})
+	headSnap, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"path": "."})
+
+	// Create a changeset
+	csPayload := map[string]interface{}{
+		"title":        "test changeset",
+		"baseSnapshot": string(baseSnap),
+		"headSnapshot": string(headSnap),
+	}
+	csID, _ := db.InsertNodeDirect(KindChangeSet, csPayload)
+
+	// Create workspace with base, head, and changeset
+	wsPayload := map[string]interface{}{
+		"name":           "feature-branch",
+		"baseSnapshot":   bytesToHex(baseSnap),
+		"headSnapshot":   bytesToHex(headSnap),
+		"openChangeSets": []interface{}{bytesToHex(csID)},
+	}
+	wsID, _ := db.InsertNodeDirect(KindWorkspace, wsPayload)
+
+	// Build GC plan - workspace and all its content should be preserved
+	plan, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	// Check none of our content is in candidates
+	for _, node := range plan.NodesToDelete {
+		if bytes.Equal(node.ID, wsID) {
+			t.Error("workspace should NOT be a GC candidate")
+		}
+		if bytes.Equal(node.ID, baseSnap) {
+			t.Error("workspace base snapshot should NOT be a GC candidate")
+		}
+		if bytes.Equal(node.ID, headSnap) {
+			t.Error("workspace head snapshot should NOT be a GC candidate")
+		}
+		if bytes.Equal(node.ID, csID) {
+			t.Error("workspace changeset should NOT be a GC candidate")
+		}
+	}
+}
+
+// TestGC_WorkspaceAndReviewCoexistence verifies that workspace with review keeps all content alive
+func TestGC_WorkspaceAndReviewCoexistence(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create base and head snapshots
+	baseSnap, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"path": "."})
+	headSnap, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"path": "."})
+
+	// Create a changeset
+	csPayload := map[string]interface{}{
+		"title":        "test changeset",
+		"baseSnapshot": string(baseSnap),
+		"headSnapshot": string(headSnap),
+	}
+	csID, _ := db.InsertNodeDirect(KindChangeSet, csPayload)
+
+	// Create workspace with changeset
+	wsPayload := map[string]interface{}{
+		"name":           "feature-branch",
+		"baseSnapshot":   bytesToHex(baseSnap),
+		"headSnapshot":   bytesToHex(headSnap),
+		"openChangeSets": []interface{}{bytesToHex(csID)},
+	}
+	wsID, _ := db.InsertNodeDirect(KindWorkspace, wsPayload)
+
+	// Create a review targeting the workspace
+	reviewPayload := map[string]interface{}{
+		"title":      "PR #123",
+		"state":      "draft",
+		"targetId":   bytesToHex(wsID),
+		"targetKind": "Workspace",
+	}
+	reviewID, _ := db.InsertNodeDirect(KindReview, reviewPayload)
+
+	// Create REVIEW_OF edge
+	tx, _ := db.BeginTx()
+	db.InsertEdge(tx, reviewID, EdgeReviewOf, wsID, nil)
+	tx.Commit()
+
+	// Build GC plan
+	plan, err := db.BuildGCPlan(GCOptions{})
+	if err != nil {
+		t.Fatalf("building GC plan: %v", err)
+	}
+
+	// All content should be preserved
+	contentIDs := [][]byte{wsID, baseSnap, headSnap, csID, reviewID}
+	for _, node := range plan.NodesToDelete {
+		for _, contentID := range contentIDs {
+			if bytes.Equal(node.ID, contentID) {
+				t.Errorf("content %x should NOT be a GC candidate when workspace has review", contentID[:8])
+			}
+		}
+	}
+}
+
+// bytesToHex is a helper for tests
+func bytesToHex(b []byte) string {
+	const hex = "0123456789abcdef"
+	result := make([]byte, len(b)*2)
+	for i, v := range b {
+		result[i*2] = hex[v>>4]
+		result[i*2+1] = hex[v&0x0f]
+	}
+	return string(result)
+}
