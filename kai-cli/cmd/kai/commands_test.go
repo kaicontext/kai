@@ -41,8 +41,9 @@ func TestSnapshotCommand(t *testing.T) {
 	if snapshotCmd == nil {
 		t.Fatal("snapshotCmd should not be nil")
 	}
-	if snapshotCmd.Use != "snapshot [git-ref]" {
-		t.Errorf("expected Use 'snapshot [git-ref]', got %q", snapshotCmd.Use)
+	// Use is now just "snapshot" - positional args are banned
+	if snapshotCmd.Use != "snapshot" {
+		t.Errorf("expected Use 'snapshot', got %q", snapshotCmd.Use)
 	}
 }
 
@@ -130,6 +131,23 @@ func TestDiffCommand(t *testing.T) {
 	}
 	if !strings.HasPrefix(diffCmd.Use, "diff") {
 		t.Errorf("expected Use to start with 'diff', got %q", diffCmd.Use)
+	}
+}
+
+// TestDiffCommand_AcceptsZeroArgs tests that diff accepts zero arguments (defaults to @snap:last)
+func TestDiffCommand_AcceptsZeroArgs(t *testing.T) {
+	// Verify the Args validator accepts 0-2 args
+	if err := diffCmd.Args(diffCmd, []string{}); err != nil {
+		t.Errorf("diff should accept zero arguments, got error: %v", err)
+	}
+	if err := diffCmd.Args(diffCmd, []string{"@snap:last"}); err != nil {
+		t.Errorf("diff should accept one argument, got error: %v", err)
+	}
+	if err := diffCmd.Args(diffCmd, []string{"@snap:prev", "@snap:last"}); err != nil {
+		t.Errorf("diff should accept two arguments, got error: %v", err)
+	}
+	if err := diffCmd.Args(diffCmd, []string{"a", "b", "c"}); err == nil {
+		t.Error("diff should reject three arguments")
 	}
 }
 
@@ -360,7 +378,7 @@ func TestCommandFlags(t *testing.T) {
 		{snapshotCmd, []string{"repo", "dir", "message"}, "snapshot"},
 		{statusCmd, []string{"dir", "against", "name-only", "json", "semantic"}, "status"},
 		{logCmd, []string{"limit"}, "log"},
-		{diffCmd, []string{"dir", "name-only"}, "diff"},
+		{diffCmd, []string{"dir", "name-only", "explain", "semantic", "json", "patch"}, "diff"},
 		{checkoutCmd, []string{"dir", "clean"}, "checkout"},
 		{pushCmd, []string{"force", "all"}, "push"},
 		{remoteLogCmd, []string{"ref", "limit"}, "remote-log"},
@@ -558,6 +576,76 @@ func TestAllCommandsRegistered(t *testing.T) {
 	for _, expected := range expectedCommands {
 		if !registeredCommands[expected] {
 			t.Errorf("command %q should be registered", expected)
+		}
+	}
+}
+
+// TestNoHiddenCommands ensures no commands are hidden (regression test for mode removal)
+func TestNoHiddenCommands(t *testing.T) {
+	// These commands were previously hidden in "Simple mode"
+	// They must always be visible now
+	formerlyHiddenCommands := []string{
+		"snapshot", "snap", "analyze", "changeset", "intent",
+		"dump", "list", "log", "ws", "integrate", "merge",
+		"checkout", "ref", "modules", "pick", "test",
+		"remote", "push", "fetch", "clone", "prune", "remote-log",
+	}
+
+	for _, name := range formerlyHiddenCommands {
+		cmd, _, err := rootCmd.Find([]string{name})
+		if err != nil {
+			t.Errorf("command %q should be findable: %v", name, err)
+			continue
+		}
+		if cmd.Hidden {
+			t.Errorf("command %q should NOT be hidden (mode system was removed)", name)
+		}
+	}
+}
+
+// TestNoModeFlag ensures no --mode flag exists on any command (regression test)
+func TestNoModeFlag(t *testing.T) {
+	// Check root command
+	if rootCmd.Flags().Lookup("mode") != nil {
+		t.Error("rootCmd should NOT have a --mode flag (mode system was removed)")
+	}
+
+	// Check all subcommands
+	for _, cmd := range rootCmd.Commands() {
+		if cmd.Flags().Lookup("mode") != nil {
+			t.Errorf("command %q should NOT have a --mode flag (mode system was removed)", cmd.Name())
+		}
+	}
+}
+
+// TestCommandsHaveGroups ensures commands are properly grouped for discoverability
+func TestCommandsHaveGroups(t *testing.T) {
+	// Check that groups are defined
+	groups := rootCmd.Groups()
+	if len(groups) == 0 {
+		t.Error("rootCmd should have command groups defined")
+	}
+
+	// Check key commands have group assignments
+	groupedCommands := map[string]string{
+		"init":    "start",
+		"capture": "start",
+		"diff":     "diff",
+		"review":   "diff",
+		"ws":       "workspace",
+		"ci":       "ci",
+		"push":     "remote",
+		"snapshot": "plumbing",
+	}
+
+	for cmdName, expectedGroup := range groupedCommands {
+		cmd, _, err := rootCmd.Find([]string{cmdName})
+		if err != nil {
+			t.Errorf("command %q should be findable: %v", cmdName, err)
+			continue
+		}
+		if cmd.GroupID != expectedGroup {
+			t.Errorf("command %q should be in group %q, got %q", cmdName, expectedGroup, cmd.GroupID)
 		}
 	}
 }

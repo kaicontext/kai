@@ -216,8 +216,10 @@ func (db *DB) ExecuteGC(plan *GCPlan) error {
 func (db *DB) collectRoots() (map[string]bool, error) {
 	roots := make(map[string]bool)
 
-	// 1. All ref targets
-	rows, err := db.Query(`SELECT target_id FROM refs`)
+	// 1. All ref targets EXCEPT snap.working (ephemeral working snapshot)
+	// snap.working is not a root because it's meant to be overwritten by each kai scan.
+	// This allows old working snapshots to be GC'd when replaced.
+	rows, err := db.Query(`SELECT target_id FROM refs WHERE name != 'snap.working'`)
 	if err != nil {
 		return nil, fmt.Errorf("querying refs: %w", err)
 	}

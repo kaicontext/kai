@@ -281,14 +281,20 @@ func (r *Resolver) resolveSelector(input string, wantKind *Kind) (*ResolveResult
 		return r.resolveWorkspaceSelector(selector)
 	}
 
-	// Handle :last, :prev for snapshots and changesets
+	// Handle :last, :prev, :working for snapshots and changesets
 	switch selector {
 	case "last":
 		return r.resolveLatest(kind, offset)
 	case "prev":
 		return r.resolveLatest(kind, offset+1)
+	case "working":
+		// @snap:working resolves to the snap.working ref (ephemeral working snapshot)
+		if kind != KindSnapshot {
+			return nil, fmt.Errorf("@%s:working only valid for snapshots", kindStr)
+		}
+		return r.resolveRef("snap.working", &kind)
 	default:
-		return nil, fmt.Errorf("unknown selector: %s (try 'last' or 'prev')", selector)
+		return nil, fmt.Errorf("unknown selector: %s (try 'last', 'prev', or 'working')", selector)
 	}
 }
 
@@ -669,14 +675,37 @@ func NewAutoRefManager(db *graph.DB) *AutoRefManager {
 	}
 }
 
-// OnSnapshotCreated updates refs after a snapshot is created.
+// OnSnapshotCreated updates refs after a snapshot is created (committed snapshot).
+// This adds the snapshot to the log, making it resolvable via @snap:last.
 func (m *AutoRefManager) OnSnapshotCreated(id []byte) error {
 	// Update snap.latest
 	if err := m.refMgr.Set("snap.latest", id, KindSnapshot); err != nil {
 		return err
 	}
-	// Append to log
+	// Append to log (this makes it @snap:last)
 	return m.logMgr.Append(KindSnapshot, id)
+}
+
+// OnWorkingSnapshotUpdated updates the working snapshot ref without logging.
+// This is used by 'kai scan' - the snapshot is ephemeral until promoted.
+// Unlike OnSnapshotCreated, this does NOT add to the log, so:
+// - @snap:working resolves to this snapshot
+// - @snap:last still points to the previous committed snapshot
+// - GC can reclaim old working snapshots when overwritten
+func (m *AutoRefManager) OnWorkingSnapshotUpdated(id []byte) error {
+	return m.refMgr.Set("snap.working", id, KindSnapshot)
+}
+
+// PromoteWorkingSnapshot promotes the working snapshot to a committed snapshot.
+// This adds it to the log, making it @snap:last.
+func (m *AutoRefManager) PromoteWorkingSnapshot() error {
+	// Get current working snapshot
+	ref, err := m.refMgr.Get("snap.working")
+	if err != nil {
+		return fmt.Errorf("no working snapshot to promote: %w", err)
+	}
+	// Now commit it (add to log, update snap.latest)
+	return m.OnSnapshotCreated(ref.TargetID)
 }
 
 // OnChangeSetCreated updates refs after a changeset is created.

@@ -190,36 +190,77 @@ sudo ln -s /path/to/kai/kai-cli/kai /usr/local/bin/kai
 
 ## Quick Start
 
-Here's the fastest way to get started with Kai:
+### 2-Minute Value Path (Recommended)
+
+Get Kai's value in 7 simple commands:
 
 ```bash
-# 1. Navigate to your Git repository
+# 1. Navigate to your project
 cd your-typescript-project
 
 # 2. Initialize Kai
 kai init
 
-# 3. Create a snapshot of your main branch
-kai snapshot main --repo .
+# 3. Scan your project (creates baseline snapshot)
+kai capture
+
+# 4. Make some changes to your code...
+
+# 5. See what changed semantically
+kai diff
+
+# 6. Scan again to capture your changes (updates working snapshot)
+kai capture
+
+# 7. Open a review (commits working snapshot, creates changeset)
+kai review open --title "Fix login bug"
+
+# 8. Preview CI impact (which tests to run)
+kai ci plan --explain
+
+# 9. Complete the review
+kai review view <id>        # View review details
+kai review approve <id>     # Approve the review
+kai review close <id> --state merged
+```
+
+That's it! You now have semantic diffs, change classification, and selective CI.
+
+**How snapshots work:** The first `kai capture` creates a baseline (`@snap:last`). Subsequent scans update a working snapshot (`@snap:working`) without creating garbage. When you `kai review open`, the working snapshot is committed as the new baseline. Old working snapshots are automatically cleaned up by `kai prune`.
+
+Use `--explain` on any command to learn what concepts are involved:
+```bash
+kai capture --explain     # Shows: Snapshot, Symbols, Modules
+kai diff --explain     # Shows: Snapshot, ChangeTypes
+kai ci plan --explain  # Shows: ChangeSet, CallGraph, Strategy
+```
+
+### Detailed Workflow (Advanced)
+
+For more control, here's the step-by-step approach:
+
+```bash
+# Create a snapshot of your main branch
+kai snapshot --git main
 # Output: Created snapshot: abc123...
 
-# 4. Create a snapshot of your feature branch
-kai snapshot feature-branch --repo .
+# Create a snapshot of your feature branch
+kai snapshot --git feature-branch
 # Output: Created snapshot: def456...
 
-# 5. Analyze symbols in both snapshots
+# Analyze symbols in both snapshots
 kai analyze symbols abc123...
 kai analyze symbols def456...
 
-# 6. Create a changeset between them
+# Create a changeset between them
 kai changeset create abc123... def456...
 # Output: Created changeset: ghi789...
 
-# 7. Generate an intent sentence
+# Generate an intent sentence
 kai intent render ghi789...
 # Output: Intent: Update Auth login
 
-# 8. View the full changeset as JSON
+# View the full changeset as JSON
 kai dump ghi789... --json
 ```
 
@@ -1083,35 +1124,40 @@ Integration conflicts (1):
 
 ### `kai diff`
 
-Show semantic differences between two snapshots.
+Show semantic differences between snapshots.
 
 ```bash
-kai diff <base-ref> [head-ref] [flags]
+kai diff [base-ref] [head-ref] [flags]
 ```
 
 **Arguments:**
-- `<base-ref>` - Base snapshot (ref, selector, or short ID)
+- `[base-ref]` - Base snapshot (optional; defaults to `@snap:last`)
 - `[head-ref]` - Head snapshot (optional; if omitted, compares against working directory)
 
 **Flags:**
-- `--semantic` - Show semantic diff (functions, classes, JSON keys, SQL tables)
-- `--json` - Output diff as JSON (implies --semantic)
+- `-p, --patch` - Show line-level diff (like git diff) with colors
+- `--semantic` - Show semantic diff (default)
+- `--json` - Output diff as JSON
 - `--name-only` - Output just paths with status prefixes (A/M/D)
 - `--dir <path>` - Directory to compare against (default: current directory)
+- `--explain` - Show what concepts are being used
 
 **Examples:**
 ```bash
-# Compare two snapshots with semantic analysis
-kai diff @snap:prev @snap:last --semantic
+# Semantic diff - last snapshot vs working directory (default)
+kai diff
 
-# Compare snapshot vs working directory
-kai diff @snap:last --semantic
+# Line-level diff like git (with colors)
+kai diff -p
+
+# Compare two snapshots
+kai diff @snap:prev @snap:last
 
 # Output as JSON for programmatic use
-kai diff @snap:prev @snap:last --json
+kai diff --json
 
-# Simple file-level diff
-kai diff @snap:prev @snap:last --name-only
+# Just file paths
+kai diff --name-only
 ```
 
 **Output example:**

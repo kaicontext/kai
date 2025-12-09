@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -23,6 +24,7 @@ import (
 	"kai-core/merge"
 	"kai/internal/classify"
 	"kai/internal/dirio"
+	"kai/internal/explain"
 	"kai/internal/filesource"
 	"kai/internal/gitio"
 	"kai/internal/graph"
@@ -50,7 +52,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.3.1"
+var Version = "0.5.0"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -59,6 +61,16 @@ var rootCmd = &cobra.Command{
 	Version: Version,
 }
 
+// Command groups for organized help output
+const (
+	groupStart     = "start"
+	groupDiff      = "diff"
+	groupWorkspace = "workspace"
+	groupCI        = "ci"
+	groupRemote    = "remote"
+	groupPlumbing  = "plumbing"
+)
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize Kai in the current directory",
@@ -66,20 +78,23 @@ var initCmd = &cobra.Command{
 }
 
 var snapshotCmd = &cobra.Command{
-	Use:   "snapshot [git-ref]",
+	Use:   "snapshot",
 	Short: "Create a snapshot from a Git ref or directory",
 	Long: `Create a snapshot from a Git ref or directory.
 
-Git Snapshot (explicit Git ref):
-  kai snapshot main --repo .        # Snapshot from Git commit
-  kai snapshot feature/login        # Snapshot from branch
-  kai snapshot abc123def            # Snapshot from commit hash
+IMPORTANT: You must be explicit about the source using --git or --dir.
 
-Directory Snapshot (no Git):
+Git Snapshot:
+  kai snapshot --git main           # Snapshot from Git branch
+  kai snapshot --git feature/login  # Snapshot from branch
+  kai snapshot --git abc123def      # Snapshot from commit hash
+
+Directory Snapshot:
   kai snapshot --dir .              # Snapshot current directory
   kai snapshot --dir ./src          # Snapshot specific path
 
-For a quick directory snapshot, use 'kai snap' instead.`,
+For a quick directory snapshot, use 'kai snap' instead.
+For the full workflow (snapshot + analyze), use 'kai capture'.`,
 	RunE: runSnapshot,
 }
 
@@ -104,6 +119,30 @@ This command:
   - Works without a Git repository
   - Is ideal for workspaces, CI, and local development`,
 	RunE: runSnap,
+}
+
+var captureCmd = &cobra.Command{
+	Use:   "capture [path]",
+	Short: "Capture your project (snapshot + analyze) in one step",
+	Long: `Captures your codebase in one simple command.
+
+This is the recommended way to get started with Kai. It performs:
+  1. Creates a snapshot of your project
+  2. Analyzes symbols (functions, classes, variables)
+  3. Builds the call graph (imports, dependencies)
+  4. Updates module mappings
+
+Examples:
+  kai capture              # Capture current directory
+  kai capture src/         # Capture specific path
+  kai capture --explain    # Show what's happening
+
+This is equivalent to running:
+  kai snap . && kai analyze symbols @snap:last && kai analyze calls @snap:last
+
+The capture command is the first step in the "2-minute value path":
+  kai capture → kai diff → kai review open → kai ci plan`,
+	RunE: runCapture,
 }
 
 var analyzeCmd = &cobra.Command{
@@ -207,10 +246,11 @@ Risk policies:
   fail      - Exit non-zero on uncertainty
 
 Examples:
+  kai ci plan                  # Uses @cs:last by default
   kai ci plan @cs:last --out plan.json
   kai ci plan @cs:last --strategy=imports --risk-policy=expand
   kai ci plan @ws:feature/auth --out plan.json --json`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.RangeArgs(0, 1),
 	RunE: runCIPlan,
 }
 
@@ -531,16 +571,22 @@ var statusCmd = &cobra.Command{
 }
 
 var diffCmd = &cobra.Command{
-	Use:   "diff <base-ref> [head-ref]",
-	Short: "Show differences between two snapshots",
-	Long: `Show file-level differences between two snapshots.
+	Use:   "diff [base-ref] [head-ref]",
+	Short: "Show semantic differences between snapshots",
+	Long: `Show semantic differences between snapshots.
 
-If head-ref is omitted, compares base-ref against the working directory.
+With no arguments, compares the last snapshot against the working directory.
+This is the recommended way to see what changed after 'kai capture'.
+
+By default shows semantic diff (functions, classes, JSON keys changed).
+Use -p/--patch for git-style line-level diff.
 
 Examples:
+  kai diff                         # Semantic diff: @snap:last vs working directory
+  kai diff -p                      # Line-level diff like git
   kai diff @snap:prev @snap:last   # Compare two snapshots
-  kai diff @snap:last              # Compare snapshot vs working directory`,
-	Args: cobra.RangeArgs(1, 2),
+  kai diff --name-only             # Just file paths`,
+	Args: cobra.RangeArgs(0, 2),
 	RunE: runDiff,
 }
 
@@ -556,13 +602,18 @@ var wsCreateCmd = &cobra.Command{
 	Short: "Create a new workspace",
 	Long: `Create a new workspace for parallel development.
 
-If --base is not provided, Kai automatically snapshots the current directory
-and uses that as the base. This is the recommended workflow.
+Base snapshot options (must choose one or let it default):
+  --from-dir <path>    Create base from directory snapshot
+  --from-git <ref>     Create base from Git commit/branch/tag
+  --base <selector>    Use existing snapshot as base
+
+If no base is specified, Kai automatically snapshots the current directory.
 
 Examples:
-  kai ws create feat/demo              # Auto-snapshot current dir as base
-  kai ws create --name feat/demo       # Same, using --name flag
-  kai ws create feat/demo --base @snap:last  # Explicit base snapshot
+  kai ws create feat/demo                    # Auto-snapshot current dir as base
+  kai ws create feat/demo --from-dir .       # Explicit directory snapshot
+  kai ws create feat/demo --from-git main    # From Git branch
+  kai ws create feat/demo --base @snap:last  # From existing snapshot
 
 The workspace name can be provided as a positional argument or via --name.`,
 	Args: cobra.MaximumNArgs(1),
@@ -1057,14 +1108,18 @@ Examples:
 }
 
 var reviewOpenCmd = &cobra.Command{
-	Use:   "open <changeset|workspace>",
+	Use:   "open [changeset|workspace]",
 	Short: "Open a new review",
 	Long: `Open a new code review for a changeset or workspace.
 
+With no arguments, automatically creates a changeset from your last two snapshots
+(@snap:prev → @snap:last) and opens a review for it.
+
 Examples:
-  kai review open @cs:last --title "Reduce timeout"
-  kai review open @ws:feature/auth:head --title "Auth feature" --reviewers alice --reviewers bob`,
-	Args: cobra.ExactArgs(1),
+  kai review open --title "Fix bug"                    # Auto-create changeset
+  kai review open @cs:last --title "Reduce timeout"    # Explicit changeset
+  kai review open @ws:feature/auth:head --title "Auth" # From workspace`,
+	Args: cobra.RangeArgs(0, 1),
 	RunE: runReviewOpen,
 }
 
@@ -1142,6 +1197,8 @@ var (
 	// Workspace flags
 	wsName           string
 	wsBase           string
+	wsFromDir        string
+	wsFromGit        string
 	wsDescription    string
 	wsDir            string
 	wsTarget         string
@@ -1161,6 +1218,7 @@ var (
 	reviewExportHTML  bool
 	reviewJSON        bool
 	reviewViewMode    string
+	reviewExplain     bool
 
 	statusDir      string
 	statusAgainst  string
@@ -1190,9 +1248,18 @@ var (
 	diffNameOnly bool
 	diffSemantic bool
 	diffJSON     bool
+	diffExplain  bool
+	diffPatch    bool // git-style line-level diff
 
 	// Snapshot flags
 	snapshotMessage string
+	snapshotGitRef  string // explicit git ref for disambiguation
+
+	// Capture flags
+	captureExplain bool
+
+	// Global explain flag
+	explainFlag bool
 
 	// Push/fetch flags
 	pushForce     bool
@@ -1229,7 +1296,12 @@ var (
 func init() {
 	snapshotCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
 	snapshotCmd.Flags().StringVar(&dirPath, "dir", "", "Path to directory (creates snapshot without Git)")
+	snapshotCmd.Flags().StringVar(&snapshotGitRef, "git", "", "Git ref to snapshot (explicit mode)")
 	snapshotCmd.Flags().StringVarP(&snapshotMessage, "message", "m", "", "Description for this snapshot")
+	snapshotCmd.Flags().BoolVar(&explainFlag, "explain", false, "Show detailed explanation of what this command does")
+
+	// Capture command flags
+	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
 	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
@@ -1246,12 +1318,16 @@ func init() {
 	// Diff command flags
 	diffCmd.Flags().StringVar(&diffDir, "dir", ".", "Directory to compare against (when comparing snapshot vs working dir)")
 	diffCmd.Flags().BoolVar(&diffNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
-	diffCmd.Flags().BoolVar(&diffSemantic, "semantic", false, "Show semantic diff (functions, classes, JSON keys, SQL tables)")
+	diffCmd.Flags().BoolVar(&diffSemantic, "semantic", false, "Show semantic diff (default, use --name-only to disable)")
 	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Output diff as JSON (implies --semantic)")
+	diffCmd.Flags().BoolVar(&diffExplain, "explain", false, "Show detailed explanation of what this command does")
+	diffCmd.Flags().BoolVarP(&diffPatch, "patch", "p", false, "Show line-level diff (like git diff)")
 
 	// Workspace command flags
 	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (or pass as positional arg)")
-	wsCreateCmd.Flags().StringVar(&wsBase, "base", "", "Base snapshot (default: auto-snapshot current dir)")
+	wsCreateCmd.Flags().StringVar(&wsBase, "base", "", "Base snapshot selector (e.g., @snap:last)")
+	wsCreateCmd.Flags().StringVar(&wsFromDir, "from-dir", "", "Create base from directory snapshot")
+	wsCreateCmd.Flags().StringVar(&wsFromGit, "from-git", "", "Create base from Git commit/branch/tag")
 	wsCreateCmd.Flags().StringVar(&wsDescription, "desc", "", "Workspace description")
 
 	wsStageCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name (or pass as positional arg)")
@@ -1323,6 +1399,7 @@ func init() {
 	reviewOpenCmd.Flags().StringVar(&reviewTitle, "title", "", "Review title (required)")
 	reviewOpenCmd.Flags().StringVar(&reviewDesc, "desc", "", "Review description")
 	reviewOpenCmd.Flags().StringArrayVar(&reviewReviewers, "reviewers", nil, "Reviewers (can be specified multiple times)")
+	reviewOpenCmd.Flags().BoolVar(&reviewExplain, "explain", false, "Show detailed explanation of what this command does")
 	reviewOpenCmd.MarkFlagRequired("title")
 
 	reviewViewCmd.Flags().BoolVar(&reviewJSON, "json", false, "Output as JSON")
@@ -1451,32 +1528,84 @@ func init() {
 	ciAnnotatePlanCmd.Flags().StringVar(&ciFallbackTrigger, "fallback.trigger", "", "What triggered fallback (e.g., 'Cannot find module')")
 	ciAnnotatePlanCmd.Flags().IntVar(&ciFallbackExitCode, "fallback.exitCode", 0, "Exit code that triggered fallback")
 
+	// Define command groups for organized help output
+	rootCmd.AddGroup(
+		&cobra.Group{ID: groupStart, Title: "Getting Started:"},
+		&cobra.Group{ID: groupDiff, Title: "Diff & Review:"},
+		&cobra.Group{ID: groupWorkspace, Title: "Workspaces:"},
+		&cobra.Group{ID: groupCI, Title: "CI & Testing:"},
+		&cobra.Group{ID: groupRemote, Title: "Remote & Sync:"},
+		&cobra.Group{ID: groupPlumbing, Title: "Plumbing:"},
+	)
+
+	// Getting Started
+	initCmd.GroupID = groupStart
+	captureCmd.GroupID = groupStart
 	rootCmd.AddCommand(initCmd)
-	rootCmd.AddCommand(snapshotCmd)
-	rootCmd.AddCommand(snapCmd)
-	rootCmd.AddCommand(analyzeCmd)
-	rootCmd.AddCommand(testCmd)
-	rootCmd.AddCommand(ciCmd)
+	rootCmd.AddCommand(captureCmd)
+
+	// Diff & Review
+	diffCmd.GroupID = groupDiff
+	statusCmd.GroupID = groupDiff
+	reviewCmd.GroupID = groupDiff
+	changesetCmd.GroupID = groupDiff
+	intentCmd.GroupID = groupDiff
+	rootCmd.AddCommand(diffCmd)
+	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(changesetCmd)
 	rootCmd.AddCommand(intentCmd)
-	rootCmd.AddCommand(dumpCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(logCmd)
-	rootCmd.AddCommand(statusCmd)
-	rootCmd.AddCommand(diffCmd)
+
+	// Workspaces
+	wsCmd.GroupID = groupWorkspace
+	integrateCmd.GroupID = groupWorkspace
+	mergeCmd.GroupID = groupWorkspace
+	checkoutCmd.GroupID = groupWorkspace
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
-	rootCmd.AddCommand(refCmd)
-	rootCmd.AddCommand(modulesCmd)
-	rootCmd.AddCommand(pickCmd)
-	rootCmd.AddCommand(completionCmd)
+
+	// CI & Testing
+	ciCmd.GroupID = groupCI
+	testCmd.GroupID = groupCI
+	rootCmd.AddCommand(ciCmd)
+	rootCmd.AddCommand(testCmd)
+
+	// Remote & Sync
+	remoteCmd.GroupID = groupRemote
+	pushCmd.GroupID = groupRemote
+	fetchCmd.GroupID = groupRemote
+	cloneCmd.GroupID = groupRemote
+	authCmd.GroupID = groupRemote
 	rootCmd.AddCommand(remoteCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
 	rootCmd.AddCommand(cloneCmd)
+
+	// Plumbing (advanced/low-level commands)
+	snapshotCmd.GroupID = groupPlumbing
+	snapCmd.GroupID = groupPlumbing
+	analyzeCmd.GroupID = groupPlumbing
+	dumpCmd.GroupID = groupPlumbing
+	listCmd.GroupID = groupPlumbing
+	logCmd.GroupID = groupPlumbing
+	refCmd.GroupID = groupPlumbing
+	modulesCmd.GroupID = groupPlumbing
+	pickCmd.GroupID = groupPlumbing
+	pruneCmd.GroupID = groupPlumbing
+	completionCmd.GroupID = groupPlumbing
+	remoteLogCmd.GroupID = groupPlumbing
+	rootCmd.AddCommand(snapshotCmd)
+	rootCmd.AddCommand(snapCmd)
+	rootCmd.AddCommand(analyzeCmd)
+	rootCmd.AddCommand(dumpCmd)
+	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(logCmd)
+	rootCmd.AddCommand(refCmd)
+	rootCmd.AddCommand(modulesCmd)
+	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(remoteLogCmd)
 
 	// Add auth subcommands
@@ -1574,65 +1703,85 @@ Kai is NOT a replacement for Git. It works alongside Git (or standalone) to prov
 
 Think of it as: Git tracks "line 42 changed from X to Y", Kai tracks "the login function's timeout was reduced from 1 hour to 30 minutes".
 
-## Getting Started from Scratch
+## 2-Minute Quick Start (Recommended)
 
-If this is a new project without Kai, follow these steps:
+Get Kai's value in 6 simple commands:
+
+` + "```" + `bash
+# 1. Initialize Kai
+kai init
+
+# 2. Scan your project (snapshot + analyze in one step)
+kai capture
+
+# 3. Make changes to your code...
+
+# 4. See what changed semantically
+kai diff
+
+# 5. Open a review
+kai review open --title "Fix bug"
+
+# 6. Preview CI impact
+kai ci plan --explain
+
+# 7. Complete the review
+kai review view <id>        # View review details
+kai review approve <id>     # Approve the review
+kai review close <id> --state merged
+` + "```" + `
+
+That's it! You now have semantic diffs, change classification, and selective CI.
+
+## The Core Commands
+
+| Command | What it does |
+|---------|-------------|
+| ` + "`" + `kai capture` + "`" + ` | Snapshot + analyze in one step (recommended) |
+| ` + "`" + `kai diff` + "`" + ` | Show semantic differences |
+| ` + "`" + `kai review open` + "`" + ` | Create a code review |
+| ` + "`" + `kai review view <id>` + "`" + ` | View review details |
+| ` + "`" + `kai review approve <id>` + "`" + ` | Approve a review |
+| ` + "`" + `kai review close <id>` + "`" + ` | Close review (--state merged\|abandoned) |
+| ` + "`" + `kai ci plan` + "`" + ` | Compute affected tests |
+
+## Getting Started (Detailed)
+
+If you want more control, here's the step-by-step approach:
 
 ### Step 1: Initialize Kai
 ` + "```" + `bash
-cd /path/to/your/project
 kai init
 ` + "```" + `
 This creates a ` + "`" + `.kai/` + "`" + ` directory with the database and object storage.
 
-### Step 2: Create Your First Snapshot
+### Step 2: Create a Snapshot
 ` + "```" + `bash
-# Option A: From a Git branch/tag/commit
-kai snapshot main --repo .
+# From directory (recommended)
+kai snap .
 
-# Option B: From a directory (no Git required)
-kai snapshot --dir .
+# Or from Git branch/tag/commit
+kai snapshot --git main
 ` + "```" + `
-This captures the current state of your codebase. Output shows a snapshot ID like ` + "`" + `abc123...` + "`" + `
 
-### Step 3: Analyze Symbols
-` + "```" + `bash
-kai analyze symbols @snap:last
-` + "```" + `
-This parses your code and extracts functions, classes, and variables.
-
-### Step 4: Make Changes and Snapshot Again
+### Step 3: Make Changes and Diff
 After modifying code:
 ` + "```" + `bash
-kai snapshot --dir .
-kai analyze symbols @snap:last
+kai capture                    # Re-capture with changes
+kai diff                    # See semantic differences
 ` + "```" + `
 
-### Step 5: Create a ChangeSet
+### Step 4: Review and CI
 ` + "```" + `bash
-kai changeset create @snap:prev @snap:last
+kai review open --title "Fix login bug"
+kai ci plan --explain       # See what tests to run
 ` + "```" + `
-This compares the two snapshots and classifies what changed.
 
-### Step 6: Generate Intent
+### Step 5: Complete the Review
 ` + "```" + `bash
-kai intent render @cs:last
-` + "```" + `
-Output: ` + "`" + `Intent: Update Auth login` + "`" + ` (auto-generated summary)
-
-### Step 7: Export as JSON (Optional)
-` + "```" + `bash
-kai dump @cs:last --json
-` + "```" + `
-Get full structured data about the changeset.
-
-## The Flow (Summary)
-
-` + "```" + `
-[Code Changes] → snapshot → analyze → changeset → intent
-     ↓              ↓          ↓          ↓          ↓
-  Your edits    Capture    Extract    Compare    Summarize
-                 state     symbols    changes    in English
+kai review view <id>        # View the review details
+kai review approve <id>     # Approve the review
+kai review close <id> --state merged  # Close as merged
 ` + "```" + `
 
 ## Quick Reference
@@ -1683,33 +1832,41 @@ kai fetch origin              # Download from server
 
 ### "I want to see what changed in my code"
 ` + "```" + `bash
-# Quick semantic diff (recommended)
-kai diff @snap:last --semantic
-
-# Or create a full changeset for detailed analysis
-kai snapshot --dir .
-kai analyze symbols @snap:last
-kai changeset create @snap:prev @snap:last
-kai dump @cs:last --json | jq '.nodes[] | select(.kind == "ChangeType")'
-` + "```" + `
-
-### "I want a semantic diff showing function/class changes"
-` + "```" + `bash
-kai diff @snap:prev @snap:last --semantic
+# Semantic diff (default) - shows function/class/variable changes
+kai diff
 # Output shows:
 #   ~ auth/login.ts
 #     ~ function login(user) -> login(user, token)
 #     + function validateMFA(code)
 #   Summary: 1 file, 2 units changed
 
+# Line-level diff like git (with colors)
+kai diff -p
+
+# Just file paths
+kai diff --name-only
+
 # JSON output for programmatic use
-kai diff @snap:prev @snap:last --json
+kai diff --json
+` + "```" + `
+
+### "I want a git-style line diff"
+` + "```" + `bash
+kai diff -p
+# Output shows:
+#   diff --kai a/src/auth.ts b/src/auth.ts
+#   --- a/src/auth.ts
+#   +++ b/src/auth.ts
+#   @@ -42 +42 @@
+#   -  const timeout = 3600;
+#   +  const timeout = 1800;
 ` + "```" + `
 
 ### "I want to compare two Git branches"
 ` + "```" + `bash
-kai snapshot main --repo .
-kai snapshot feature-branch --repo .
+# Must use explicit --git flag (no positional args)
+kai snapshot --git main
+kai snapshot --git feature-branch
 kai analyze symbols @snap:prev
 kai analyze symbols @snap:last
 kai changeset create @snap:prev @snap:last
@@ -1896,7 +2053,19 @@ CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
 		return fmt.Errorf("committing schema: %w", err)
 	}
 
-	fmt.Println("Initialized Kai in .kai/")
+	fmt.Println()
+	fmt.Println("╭─────────────────────────────────────────────")
+	fmt.Println("│  ✓ Initialized Kai in .kai/")
+	fmt.Println("│")
+	fmt.Println("│  Next steps:")
+	fmt.Println("│    1. kai capture              # Create baseline snapshot")
+	fmt.Println("│    2. (make changes)")
+	fmt.Println("│    3. kai diff              # See what changed")
+	fmt.Println("│    4. kai capture              # Capture changes")
+	fmt.Println("│    5. kai review open       # Commit & review")
+	fmt.Println("│")
+	fmt.Println("│  Use --explain on any command to learn more.")
+	fmt.Println("╰─────────────────────────────────────────────")
 	return nil
 }
 
@@ -1909,6 +2078,165 @@ func runSnap(cmd *cobra.Command, args []string) error {
 	}
 	// Delegate to runSnapshot which handles dirPath mode
 	return runSnapshot(cmd, args)
+}
+
+// runCapture is the "2-minute value" macro command that performs:
+// 1. Snapshot the directory
+// 2. Analyze symbols
+// 3. Analyze calls (build call graph)
+// This is the recommended starting point for new users.
+func runCapture(cmd *cobra.Command, args []string) error {
+	// Determine path to capture
+	capturePath := "."
+	if len(args) > 0 {
+		capturePath = args[0]
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Load modules
+	fmt.Print("Loading module configuration... ")
+	matcher, err := loadMatcher()
+	if err != nil {
+		fmt.Println("failed")
+		return err
+	}
+	moduleCount := len(matcher.GetAllModules())
+	fmt.Printf("found %d modules\n", moduleCount)
+
+	// Show explanation if requested
+	if captureExplain {
+		ctx := explain.ExplainCapture(capturePath, moduleCount)
+		ctx.Print(os.Stdout)
+	}
+
+	// Step 1: Create snapshot
+	fmt.Println()
+	fmt.Println("Step 1/3: Creating snapshot...")
+	fmt.Printf("Capturing directory: %s\n", capturePath)
+	source, err := dirio.OpenDirectory(capturePath)
+	if err != nil {
+		return fmt.Errorf("opening directory: %w", err)
+	}
+
+	fmt.Print("Reading files... ")
+	files, err := source.GetFiles()
+	if err != nil {
+		fmt.Println("failed")
+		return fmt.Errorf("getting files: %w", err)
+	}
+	fmt.Printf("found %d files\n", len(files))
+
+	fmt.Print("Creating snapshot... ")
+	creator := snapshot.NewCreator(db, matcher)
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		fmt.Println("failed")
+		return fmt.Errorf("creating snapshot: %w", err)
+	}
+	fmt.Println("done")
+
+	// Step 2: Analyze symbols
+	fmt.Println()
+	fmt.Println("Step 2/3: Analyzing symbols...")
+	progress := func(current, total int, filename string) {
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rAnalyzing... %d/%d %s", current, total, display)
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
+		fmt.Print("\rAnalyzing symbols... ")
+		fmt.Println("warning: some files failed")
+		fmt.Fprintf(os.Stderr, "  %v\n", err)
+	} else {
+		fmt.Print("\rAnalyzing symbols... done")
+		fmt.Print("\033[K")
+		fmt.Println()
+	}
+
+	// Step 3: Analyze calls (build call graph)
+	fmt.Println()
+	fmt.Println("Step 3/3: Building call graph...")
+	callProgress := func(current, total int, filename string) {
+		display := filename
+		if len(display) > 40 {
+			display = "..." + display[len(display)-37:]
+		}
+		fmt.Printf("\rBuilding graph... %d/%d %s", current, total, display)
+		fmt.Print("\033[K")
+	}
+	if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
+		fmt.Print("\rBuilding call graph... ")
+		fmt.Println("warning: some files failed")
+		fmt.Fprintf(os.Stderr, "  %v\n", err)
+	} else {
+		fmt.Print("\rBuilding call graph... done")
+		fmt.Print("\033[K")
+		fmt.Println()
+	}
+
+	// Update auto-refs
+	// Use @snap:working (ephemeral) instead of @snap:last (committed)
+	// This prevents snapshot accumulation - old working snapshots are GC'd
+	fmt.Print("Updating refs... ")
+	autoRefMgr := ref.NewAutoRefManager(db)
+
+	// Check if this is the first scan (no snap.latest ref exists)
+	// We check the ref directly, not @snap:last, because @snap:last has a fallback
+	// to created_at ordering which would find the snapshot we just created.
+	refMgr := ref.NewRefManager(db)
+	existingLatest, _ := refMgr.Get("snap.latest")
+	isFirstScan := existingLatest == nil
+
+	if isFirstScan {
+		// First scan: commit as baseline (@snap:last) AND set as working
+		if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+			fmt.Println("failed")
+			fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
+		}
+	}
+	// Always update working snapshot
+	if err := autoRefMgr.OnWorkingSnapshotUpdated(snapshotID); err != nil {
+		fmt.Println("failed")
+		fmt.Fprintf(os.Stderr, "warning: failed to update working ref: %v\n", err)
+	} else {
+		fmt.Println("done")
+	}
+
+	// Summary
+	fmt.Println()
+	fmt.Println("╭─────────────────────────────────────────────")
+	fmt.Println("│  ✓ Scan complete!")
+	fmt.Println("│")
+	fmt.Printf("│  Snapshot: %s\n", util.BytesToHex(snapshotID)[:12])
+	fmt.Printf("│  Files: %d\n", len(files))
+	fmt.Printf("│  Modules: %d\n", moduleCount)
+	fmt.Println("│")
+	if isFirstScan {
+		fmt.Println("│  This is your baseline snapshot (@snap:last).")
+		fmt.Println("│")
+		fmt.Println("│  Next steps:")
+		fmt.Println("│    • Make changes to your code")
+		fmt.Println("│    • Run 'kai diff' to see semantic differences")
+		fmt.Println("│    • Run 'kai capture' to capture changes")
+		fmt.Println("│    • Run 'kai review open --title \"...\"' to commit & review")
+	} else {
+		fmt.Println("│  Working snapshot updated (@snap:working).")
+		fmt.Println("│")
+		fmt.Println("│  Next steps:")
+		fmt.Println("│    • Run 'kai diff' to see changes since baseline")
+		fmt.Println("│    • Run 'kai review open --title \"...\"' to commit & review")
+	}
+	fmt.Println("╰─────────────────────────────────────────────")
+
+	return nil
 }
 
 // createSnapshotFromDir creates a snapshot from the given directory and returns its ID.
@@ -1995,24 +2323,72 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 
 	var source filesource.FileSource
 
-	if dirPath != "" {
+	// Require explicit --git or --dir (no positional args allowed)
+	hasExplicitGit := snapshotGitRef != ""
+	hasExplicitDir := dirPath != ""
+	hasPositionalArg := len(args) > 0
+
+	// Reject positional arguments - must be explicit
+	if hasPositionalArg {
+		arg := args[0]
+		fmt.Println()
+		fmt.Println("╭─ Positional arguments not allowed")
+		fmt.Println("│")
+		fmt.Printf("│  'kai snapshot %s' is ambiguous.\n", arg)
+		fmt.Println("│")
+		fmt.Println("│  Please be explicit about the source:")
+		fmt.Println("│")
+		fmt.Printf("│    kai snapshot --git %s    # Snapshot from Git commit/branch\n", arg)
+		fmt.Printf("│    kai snapshot --dir %s    # Snapshot from directory\n", arg)
+		fmt.Println("│")
+		fmt.Println("│  Or use 'kai snap' for quick directory snapshots:")
+		fmt.Println("│")
+		fmt.Printf("│    kai snap %s\n", arg)
+		fmt.Println("│")
+		fmt.Println("╰────────────────────────────────────────────")
+		return fmt.Errorf("positional arguments not allowed: use --git or --dir")
+	}
+
+	// Handle the explicit modes
+	if hasExplicitDir {
 		// Directory mode - no Git required
-		fmt.Printf("Scanning directory: %s\n", dirPath)
-		source, err = dirio.OpenDirectory(dirPath)
+		path := dirPath
+		if path == "" {
+			path = "."
+		}
+		fmt.Printf("Scanning directory: %s\n", path)
+		source, err = dirio.OpenDirectory(path)
 		if err != nil {
 			return fmt.Errorf("opening directory: %w", err)
 		}
-	} else {
-		// Git mode - requires a git ref argument
-		if len(args) < 1 {
-			return fmt.Errorf("git ref required (use --dir for directory mode)")
-		}
-		gitRef := args[0]
-		fmt.Printf("Opening git ref: %s\n", gitRef)
-		source, err = gitio.OpenSource(repoPath, gitRef)
+	} else if hasExplicitGit {
+		// Explicit Git mode
+		fmt.Printf("Opening git ref: %s\n", snapshotGitRef)
+		source, err = gitio.OpenSource(repoPath, snapshotGitRef)
 		if err != nil {
 			return fmt.Errorf("opening git source: %w", err)
 		}
+	} else {
+		// No source specified - show helpful usage
+		fmt.Println()
+		fmt.Println("╭─ No snapshot source specified")
+		fmt.Println("│")
+		fmt.Println("│  Choose one of:")
+		fmt.Println("│")
+		fmt.Println("│    kai snapshot --git main        # From Git commit/branch/tag")
+		fmt.Println("│    kai snapshot --dir .           # From directory")
+		fmt.Println("│")
+		fmt.Println("│  Or use 'kai snap' for quick directory snapshots:")
+		fmt.Println("│")
+		fmt.Println("│    kai snap                       # Snapshot current directory")
+		fmt.Println("│    kai snap src/                  # Snapshot specific path")
+		fmt.Println("│")
+		fmt.Println("│  For the full workflow, use 'kai capture':")
+		fmt.Println("│")
+		fmt.Println("│    kai capture                       # Snapshot + analyze in one step")
+		fmt.Println("│")
+		fmt.Println("╰────────────────────────────────────────────")
+		return fmt.Errorf("snapshot source required: use --git <ref> or --dir <path>")
 	}
 
 	fmt.Print("Reading files... ")
@@ -3549,14 +3925,29 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 	creator := snapshot.NewCreator(db, matcher)
 
 	// Resolve the selector - could be changeset, workspace, or snapshot pair
-	selector := args[0]
+	// Default to @cs:last if no argument given
+	selector := "@cs:last"
+	if len(args) > 0 {
+		selector = args[0]
+	}
 
 	var baseSnapshotID, headSnapshotID []byte
 	var changesetID []byte // Track for provenance
 	var changedFiles []string
 
 	// Try to resolve as changeset first
-	if strings.HasPrefix(selector, "@cs:") {
+	// Accept both @cs: prefix and raw hex IDs
+	isChangesetSelector := strings.HasPrefix(selector, "@cs:")
+	if !isChangesetSelector && len(selector) >= 8 && !strings.HasPrefix(selector, "@") {
+		// Try to resolve as raw changeset ID
+		if csID, err := util.HexToBytes(selector); err == nil {
+			if node, _ := db.GetNode(csID); node != nil && node.Kind == graph.KindChangeSet {
+				isChangesetSelector = true
+				selector = "@cs:" + selector // Normalize for resolver
+			}
+		}
+	}
+	if isChangesetSelector {
 		csID, err := resolveChangeSetID(db, selector)
 		changesetID = csID // Save for provenance
 		if err != nil {
@@ -4245,6 +4636,15 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 
 	// Handle --explain flag for human-readable output
 	if ciExplain {
+		// First show concept explanations
+		ctx := explain.ExplainCIPlan(
+			args[0],
+			plan.Policy.Strategy,
+			len(plan.Impact.FilesChanged),
+			len(plan.Targets.Run),
+		)
+		ctx.Print(os.Stdout)
+		// Then show the detailed table
 		printExplainTable(plan)
 		return nil
 	}
@@ -5519,38 +5919,23 @@ func getChangedFiles(db *graph.DB, creator *snapshot.Creator, baseID, headID []b
 	return changed, nil
 }
 
-func runChangesetCreate(cmd *cobra.Command, args []string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	baseSnapID, err := resolveSnapshotID(db, args[0])
-	if err != nil {
-		return fmt.Errorf("resolving base snapshot: %w", err)
-	}
-
-	headSnapID, err := resolveSnapshotID(db, args[1])
-	if err != nil {
-		return fmt.Errorf("resolving head snapshot: %w", err)
-	}
-
+// createChangesetFromSnapshots creates a changeset between two snapshots and returns its ID
+func createChangesetFromSnapshots(db *graph.DB, baseSnapID, headSnapID []byte, message string) ([]byte, error) {
 	matcher, err := loadMatcher()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Get files from both snapshots
 	creator := snapshot.NewCreator(db, matcher)
 	baseFiles, err := creator.GetSnapshotFiles(baseSnapID)
 	if err != nil {
-		return fmt.Errorf("getting base files: %w", err)
+		return nil, fmt.Errorf("getting base files: %w", err)
 	}
 
 	headFiles, err := creator.GetSnapshotFiles(headSnapID)
 	if err != nil {
-		return fmt.Errorf("getting head files: %w", err)
+		return nil, fmt.Errorf("getting head files: %w", err)
 	}
 
 	// Build file maps
@@ -5593,7 +5978,7 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 	// Start transaction
 	tx, err := db.BeginTx()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 
@@ -5602,13 +5987,13 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 		"base":        util.BytesToHex(baseSnapID),
 		"head":        util.BytesToHex(headSnapID),
 		"title":       "",
-		"description": changesetMessage,
+		"description": message,
 		"intent":      "",
 		"createdAt":   util.NowMs(),
 	}
 	changeSetID, err := db.InsertNode(tx, graph.KindChangeSet, changeSetPayload)
 	if err != nil {
-		return fmt.Errorf("inserting changeset: %w", err)
+		return nil, fmt.Errorf("inserting changeset: %w", err)
 	}
 
 	// Detect change types
@@ -5674,7 +6059,7 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 
 		// Create MODIFIES edge to file
 		if err := db.InsertEdge(tx, changeSetID, graph.EdgeModifies, changedFileIDs[i], nil); err != nil {
-			return fmt.Errorf("inserting MODIFIES edge: %w", err)
+			return nil, fmt.Errorf("inserting MODIFIES edge: %w", err)
 		}
 
 		// Map to modules
@@ -5692,10 +6077,10 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 		payload := classify.GetCategoryPayload(ct)
 		ctID, err := db.InsertNode(tx, graph.KindChangeType, payload)
 		if err != nil {
-			return fmt.Errorf("inserting change type: %w", err)
+			return nil, fmt.Errorf("inserting change type: %w", err)
 		}
 		if err := db.InsertEdge(tx, changeSetID, graph.EdgeHas, ctID, nil); err != nil {
-			return fmt.Errorf("inserting HAS edge: %w", err)
+			return nil, fmt.Errorf("inserting HAS edge: %w", err)
 		}
 
 		// Create MODIFIES edges to symbols
@@ -5715,16 +6100,16 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 		if payload != nil {
 			modID, err := db.InsertNode(tx, graph.KindModule, payload)
 			if err != nil {
-				return fmt.Errorf("inserting module: %w", err)
+				return nil, fmt.Errorf("inserting module: %w", err)
 			}
 			if err := db.InsertEdge(tx, changeSetID, graph.EdgeAffects, modID, nil); err != nil {
-				return fmt.Errorf("inserting AFFECTS edge: %w", err)
+				return nil, fmt.Errorf("inserting AFFECTS edge: %w", err)
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
+		return nil, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	// Update auto-refs
@@ -5733,10 +6118,60 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
 	}
 
+	return changeSetID, nil
+}
+
+func runChangesetCreate(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	baseSnapID, err := resolveSnapshotID(db, args[0])
+	if err != nil {
+		return fmt.Errorf("resolving base snapshot: %w", err)
+	}
+
+	headSnapID, err := resolveSnapshotID(db, args[1])
+	if err != nil {
+		return fmt.Errorf("resolving head snapshot: %w", err)
+	}
+
+	changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, changesetMessage)
+	if err != nil {
+		return err
+	}
+
+	// Get stats for output by querying edges
+	modifiedFiles, _ := db.GetEdges(changeSetID, graph.EdgeModifies)
+	changeTypes, _ := db.GetEdges(changeSetID, graph.EdgeHas)
+	affectedModulesEdges, _ := db.GetEdges(changeSetID, graph.EdgeAffects)
+
+	// Count unique files (filter out symbols from MODIFIES)
+	fileCount := 0
+	for _, edge := range modifiedFiles {
+		node, err := db.GetNode(edge.Dst)
+		if err == nil && node.Kind == graph.KindFile {
+			fileCount++
+		}
+	}
+
+	// Get module names
+	var moduleNames []string
+	for _, edge := range affectedModulesEdges {
+		node, err := db.GetNode(edge.Dst)
+		if err == nil && node.Kind == graph.KindModule {
+			if name, ok := node.Payload["name"].(string); ok {
+				moduleNames = append(moduleNames, name)
+			}
+		}
+	}
+
 	fmt.Printf("Created changeset: %s\n", util.BytesToHex(changeSetID))
-	fmt.Printf("Changed files: %d\n", len(changedPaths))
-	fmt.Printf("Change types detected: %d\n", len(allChangeTypes))
-	fmt.Printf("Affected modules: %v\n", affectedModules)
+	fmt.Printf("Changed files: %d\n", fileCount)
+	fmt.Printf("Change types detected: %d\n", len(changeTypes))
+	fmt.Printf("Affected modules: %v\n", moduleNames)
 
 	return nil
 }
@@ -6258,10 +6693,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		if result.NoBaseline {
 			fmt.Println("Create your first snapshot with:")
+			fmt.Println("  kai capture")
 		} else {
-			fmt.Println("Create a new snapshot to capture these changes:")
+			fmt.Println("To see semantic differences:")
+			fmt.Println("  kai diff")
+			fmt.Println()
+			fmt.Println("To capture these changes:")
+			fmt.Println("  kai capture")
 		}
-		fmt.Printf("  kai snapshot --dir %s\n", statusDir)
 	}
 
 	return nil
@@ -6274,14 +6713,33 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	// JSON implies semantic
+	// Semantic is the default unless --name-only or --patch is specified
+	// JSON also implies semantic
+	if !diffNameOnly && !diffPatch {
+		diffSemantic = true
+	}
 	if diffJSON {
 		diffSemantic = true
 	}
 
+	// Default to @snap:last if no args provided (simple mode friendly)
+	baseRef := "@snap:last"
+	if len(args) >= 1 {
+		baseRef = args[0]
+	}
+
 	// Resolve base snapshot
-	baseSnapID, err := resolveSnapshotID(db, args[0])
+	baseSnapID, err := resolveSnapshotID(db, baseRef)
 	if err != nil {
+		// Friendly error for simple mode users
+		if baseRef == "@snap:last" {
+			fmt.Println()
+			fmt.Println("No snapshots found. Create one first:")
+			fmt.Println()
+			fmt.Println("  kai capture    # Recommended: capture and analyze in one step")
+			fmt.Println()
+			return fmt.Errorf("no snapshots available")
+		}
 		return fmt.Errorf("resolving base snapshot: %w", err)
 	}
 
@@ -6293,13 +6751,16 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting base files: %w", err)
 	}
 
+	// Load content if needed for semantic or patch mode
+	needContent := diffSemantic || diffPatch
+
 	baseFileMap := make(map[string]string)   // path -> digest
-	baseContent := make(map[string][]byte)   // path -> content (for semantic diff)
+	baseContent := make(map[string][]byte)   // path -> content (for semantic/patch diff)
 	for _, f := range baseFiles {
 		path, _ := f.Payload["path"].(string)
 		digest, _ := f.Payload["digest"].(string)
 		baseFileMap[path] = digest
-		if diffSemantic {
+		if needContent {
 			content, _ := creator.GetFileContent(digest)
 			baseContent[path] = content
 		}
@@ -6327,7 +6788,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			path, _ := f.Payload["path"].(string)
 			digest, _ := f.Payload["digest"].(string)
 			headFileMap[path] = digest
-			if diffSemantic {
+			if needContent {
 				content, _ := creator.GetFileContent(digest)
 				headContent[path] = content
 			}
@@ -6350,7 +6811,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		headContent = make(map[string][]byte)
 		for _, f := range currentFiles {
 			headFileMap[f.Path] = util.Blake3HashHex(f.Content)
-			if diffSemantic {
+			if needContent {
 				headContent[f.Path] = f.Content
 			}
 		}
@@ -6378,6 +6839,23 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	sort.Strings(added)
 	sort.Strings(modified)
 	sort.Strings(deleted)
+
+	// Show explain if requested (for both semantic and simple mode)
+	fileCount := len(added) + len(modified) + len(deleted)
+	if diffExplain {
+		var changeTypes []string
+		if len(added) > 0 {
+			changeTypes = append(changeTypes, fmt.Sprintf("%d added", len(added)))
+		}
+		if len(modified) > 0 {
+			changeTypes = append(changeTypes, fmt.Sprintf("%d modified", len(modified)))
+		}
+		if len(deleted) > 0 {
+			changeTypes = append(changeTypes, fmt.Sprintf("%d deleted", len(deleted)))
+		}
+		ctx := explain.ExplainDiff(baseRef, headLabel, fileCount, changeTypes)
+		ctx.Print(os.Stdout)
+	}
 
 	// No differences
 	if len(added) == 0 && len(modified) == 0 && len(deleted) == 0 {
@@ -6432,6 +6910,58 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("Diff: %s → %s\n\n", sd.Base, sd.Head)
 			fmt.Print(sd.FormatText())
+		}
+
+		return nil
+	}
+
+	// Patch mode - line-level diff like git
+	if diffPatch {
+		fmt.Printf("Diff: %s → %s\n\n", util.BytesToHex(baseSnapID)[:12], headLabel)
+
+		// Show added files
+		for _, path := range added {
+			fmt.Printf("\033[1mdiff --kai a/%s b/%s\033[0m\n", path, path)
+			fmt.Println("--- /dev/null")
+			fmt.Printf("+++ b/%s\n", path)
+			content := headContent[path]
+			if content != nil {
+				lines := strings.Split(string(content), "\n")
+				fmt.Printf("@@ -0,0 +1,%d @@\n", len(lines))
+				for _, line := range lines {
+					fmt.Printf("\033[32m+%s\033[0m\n", line)
+				}
+			}
+			fmt.Println()
+		}
+
+		// Show modified files
+		for _, path := range modified {
+			fmt.Printf("\033[1mdiff --kai a/%s b/%s\033[0m\n", path, path)
+			fmt.Printf("--- a/%s\n", path)
+			fmt.Printf("+++ b/%s\n", path)
+			before := baseContent[path]
+			after := headContent[path]
+			if before != nil && after != nil {
+				showUnifiedDiff(string(before), string(after))
+			}
+			fmt.Println()
+		}
+
+		// Show deleted files
+		for _, path := range deleted {
+			fmt.Printf("\033[1mdiff --kai a/%s b/%s\033[0m\n", path, path)
+			fmt.Printf("--- a/%s\n", path)
+			fmt.Println("+++ /dev/null")
+			content := baseContent[path]
+			if content != nil {
+				lines := strings.Split(string(content), "\n")
+				fmt.Printf("@@ -1,%d +0,0 @@\n", len(lines))
+				for _, line := range lines {
+					fmt.Printf("\033[31m-%s\033[0m\n", line)
+				}
+			}
+			fmt.Println()
 		}
 
 		return nil
@@ -6500,15 +7030,76 @@ func runWsCreate(cmd *cobra.Command, args []string) error {
 
 	var baseID []byte
 
+	// Count how many base sources are specified
+	sourceCount := 0
 	if wsBase != "" {
+		sourceCount++
+	}
+	if wsFromDir != "" {
+		sourceCount++
+	}
+	if wsFromGit != "" {
+		sourceCount++
+	}
+
+	// Check for conflicting options
+	if sourceCount > 1 {
+		fmt.Println()
+		fmt.Println("╭─ Conflicting base options")
+		fmt.Println("│")
+		fmt.Println("│  You specified multiple base sources. Use only one of:")
+		fmt.Println("│")
+		fmt.Println("│    --from-dir <path>    # From directory snapshot")
+		fmt.Println("│    --from-git <ref>     # From Git commit/branch/tag")
+		fmt.Println("│    --base <selector>    # From existing snapshot")
+		fmt.Println("│")
+		fmt.Println("╰────────────────────────────────────────────")
+		return fmt.Errorf("conflicting base options: use only one of --from-dir, --from-git, or --base")
+	}
+
+	if wsFromDir != "" {
+		// Create base from directory
+		fmt.Printf("Creating base snapshot from directory: %s\n", wsFromDir)
+		fmt.Println()
+		baseID, err = createSnapshotFromDir(db, wsFromDir)
+		if err != nil {
+			return fmt.Errorf("creating directory snapshot: %w", err)
+		}
+		fmt.Println()
+	} else if wsFromGit != "" {
+		// Create base from Git ref
+		fmt.Printf("Creating base snapshot from Git ref: %s\n", wsFromGit)
+		matcher, err := loadMatcher()
+		if err != nil {
+			return err
+		}
+		source, err := gitio.OpenSource(".", wsFromGit)
+		if err != nil {
+			return fmt.Errorf("opening git ref: %w", err)
+		}
+		creator := snapshot.NewCreator(db, matcher)
+		baseID, err = creator.CreateSnapshot(source)
+		if err != nil {
+			return fmt.Errorf("creating git snapshot: %w", err)
+		}
+		// Analyze symbols
+		progress := func(current, total int, filename string) {}
+		_ = creator.AnalyzeSymbols(baseID, progress)
+
+		// Update refs
+		autoRefMgr := ref.NewAutoRefManager(db)
+		_ = autoRefMgr.OnSnapshotCreated(baseID)
+		fmt.Printf("Created base snapshot: %s\n", util.BytesToHex(baseID)[:12])
+		fmt.Println()
+	} else if wsBase != "" {
 		// Explicit base snapshot provided
 		baseID, err = resolveSnapshotID(db, wsBase)
 		if err != nil {
 			return fmt.Errorf("resolving base snapshot: %w", err)
 		}
 	} else {
-		// Auto-snapshot current directory
-		fmt.Println("No --base provided, auto-snapshotting current directory...")
+		// Auto-snapshot current directory (default behavior)
+		fmt.Println("No base specified, auto-snapshotting current directory...")
 		fmt.Println()
 		baseID, err = createSnapshotFromDir(db, ".")
 		if err != nil {
@@ -8458,16 +9049,59 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	// Resolve the target (changeset or workspace)
-	resolver := ref.NewResolver(db)
-	result, err := resolver.Resolve(args[0], nil)
-	if err != nil {
-		return fmt.Errorf("resolving target: %w", err)
-	}
+	var targetID []byte
+	var targetKind string
 
-	// Validate target kind
-	if result.Kind != ref.KindChangeSet && result.Kind != ref.KindWorkspace {
-		return fmt.Errorf("target must be a changeset or workspace, got %s", result.Kind)
+	if len(args) == 0 {
+		// No args - auto-create changeset from @snap:last (baseline) to @snap:working (current)
+		baseSnapID, err := resolveSnapshotID(db, "@snap:last")
+		if err != nil {
+			return fmt.Errorf("resolving @snap:last: %w (run 'kai capture' first to create a baseline)", err)
+		}
+
+		headSnapID, err := resolveSnapshotID(db, "@snap:working")
+		if err != nil {
+			return fmt.Errorf("resolving @snap:working: %w (run 'kai capture' to capture your changes)", err)
+		}
+
+		// Check if baseline and working are the same (no changes)
+		if string(baseSnapID) == string(headSnapID) {
+			return fmt.Errorf("no changes to review: @snap:last and @snap:working are the same\n  Make changes and run 'kai capture' to capture them")
+		}
+
+		fmt.Println("Creating changeset from @snap:last to @snap:working...")
+		changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, reviewTitle)
+		if err != nil {
+			return fmt.Errorf("creating changeset: %w", err)
+		}
+
+		targetID = changeSetID
+		targetKind = string(ref.KindChangeSet)
+		fmt.Printf("Changeset created: %s\n", util.BytesToHex(changeSetID)[:12])
+
+		// Promote @snap:working to @snap:last (commit the working snapshot)
+		autoRefMgr := ref.NewAutoRefManager(db)
+		if err := autoRefMgr.PromoteWorkingSnapshot(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to promote working snapshot: %v\n", err)
+		} else {
+			fmt.Println("Working snapshot promoted to @snap:last")
+		}
+		fmt.Println()
+	} else {
+		// Resolve the target (changeset or workspace)
+		resolver := ref.NewResolver(db)
+		result, err := resolver.Resolve(args[0], nil)
+		if err != nil {
+			return fmt.Errorf("resolving target: %w", err)
+		}
+
+		// Validate target kind
+		if result.Kind != ref.KindChangeSet && result.Kind != ref.KindWorkspace {
+			return fmt.Errorf("target must be a changeset or workspace, got %s", result.Kind)
+		}
+
+		targetID = result.ID
+		targetKind = string(result.Kind)
 	}
 
 	// Get author (use system user for now)
@@ -8476,19 +9110,40 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 		author = "unknown"
 	}
 
+	// Show explain if requested
+	if reviewExplain {
+		targetRef := "@cs:last"
+		if len(args) > 0 {
+			targetRef = args[0]
+		}
+		ctx := explain.ExplainReviewOpen(targetRef, reviewTitle)
+		ctx.Print(os.Stdout)
+	}
+
 	mgr := review.NewManager(db)
-	rev, err := mgr.Open(result.ID, reviewTitle, reviewDesc, author, reviewReviewers)
+	rev, err := mgr.Open(targetID, reviewTitle, reviewDesc, author, reviewReviewers)
 	if err != nil {
 		return fmt.Errorf("opening review: %w", err)
 	}
 
-	fmt.Printf("Review opened: %s\n", review.IDToHex(rev.ID)[:12])
+	reviewID := review.IDToHex(rev.ID)[:12]
+	fmt.Printf("Review opened: %s\n", reviewID)
 	fmt.Printf("Title:         %s\n", rev.Title)
 	fmt.Printf("State:         %s\n", rev.State)
-	fmt.Printf("Target:        %s (%s)\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
+	fmt.Printf("Target:        %s (%s)\n", util.BytesToHex(rev.TargetID)[:12], targetKind)
 	if len(rev.Reviewers) > 0 {
 		fmt.Printf("Reviewers:     %s\n", strings.Join(rev.Reviewers, ", "))
 	}
+
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Printf("  kai review view %s       # View the review\n", reviewID)
+	fmt.Printf("  kai review approve %s    # Approve the review\n", reviewID)
+	fmt.Printf("  kai review close %s      # Close (--state merged|abandoned)\n", reviewID)
+	fmt.Println()
+	fmt.Println("Other commands:")
+	fmt.Println("  kai ci plan              # See which tests to run")
+	fmt.Println("  kai review export <id>   # Export as markdown/HTML")
 
 	return nil
 }
@@ -8571,23 +9226,43 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 
 						switch kind {
 						case "File":
-							path, _ := payload["path"].(string)
-							digest, _ := payload["digest"].(string)
-							fileChanges = append(fileChanges, fileChangeInfo{
-								ID:     nodeID,
-								Path:   path,
-								Digest: digest,
-							})
+							// Deduplicate by node ID
+							isDuplicateFile := false
+							for _, existing := range fileChanges {
+								if existing.ID == nodeID {
+									isDuplicateFile = true
+									break
+								}
+							}
+							if !isDuplicateFile {
+								path, _ := payload["path"].(string)
+								digest, _ := payload["digest"].(string)
+								fileChanges = append(fileChanges, fileChangeInfo{
+									ID:     nodeID,
+									Path:   path,
+									Digest: digest,
+								})
+							}
 						case "Symbol":
-							fqName, _ := payload["fqName"].(string)
-							symKind, _ := payload["kind"].(string)
-							sig, _ := payload["signature"].(string)
-							symbolChanges = append(symbolChanges, symbolChangeInfo{
-								ID:        nodeID,
-								FQName:    fqName,
-								Kind:      symKind,
-								Signature: sig,
-							})
+							// Deduplicate by node ID
+							isDuplicate := false
+							for _, existing := range symbolChanges {
+								if existing.ID == nodeID {
+									isDuplicate = true
+									break
+								}
+							}
+							if !isDuplicate {
+								fqName, _ := payload["fqName"].(string)
+								symKind, _ := payload["kind"].(string)
+								sig, _ := payload["signature"].(string)
+								symbolChanges = append(symbolChanges, symbolChangeInfo{
+									ID:        nodeID,
+									FQName:    fqName,
+									Kind:      symKind,
+									Signature: sig,
+								})
+							}
 						case "ChangeType":
 							if category, ok := payload["category"].(string); ok {
 								changeTypes = append(changeTypes, category)
@@ -8826,6 +9501,44 @@ func showSimpleDiff(before, after string) {
 
 	if shown >= maxLines {
 		fmt.Println("  ... (diff truncated)")
+	}
+}
+
+// showUnifiedDiff displays a unified diff using the system diff command
+func showUnifiedDiff(before, after string) {
+	// Create temp files for diff
+	beforeFile, err := os.CreateTemp("", "kai-diff-before-*")
+	if err != nil {
+		fmt.Printf("  (diff unavailable: %v)\n", err)
+		return
+	}
+	defer os.Remove(beforeFile.Name())
+
+	afterFile, err := os.CreateTemp("", "kai-diff-after-*")
+	if err != nil {
+		fmt.Printf("  (diff unavailable: %v)\n", err)
+		return
+	}
+	defer os.Remove(afterFile.Name())
+
+	beforeFile.WriteString(before)
+	beforeFile.Close()
+	afterFile.WriteString(after)
+	afterFile.Close()
+
+	// Run diff -u
+	cmd := exec.Command("diff", "-u", "--color=always", beforeFile.Name(), afterFile.Name())
+	output, _ := cmd.Output() // diff returns exit code 1 when files differ, ignore error
+
+	// Skip the first two lines (temp file names) and print the rest
+	lines := strings.Split(string(output), "\n")
+	for i, line := range lines {
+		if i < 2 {
+			continue // Skip --- and +++ lines with temp file paths
+		}
+		if line != "" {
+			fmt.Println(line)
+		}
 	}
 }
 

@@ -274,6 +274,102 @@ func TestResolver_SelectorRelative(t *testing.T) {
 	}
 }
 
+func TestResolver_SelectorWorking(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create a snapshot
+	snapID := createTestSnapshot(t, db)
+
+	// Set it as the working snapshot
+	refMgr := NewRefManager(db)
+	if err := refMgr.Set("snap.working", snapID, KindSnapshot); err != nil {
+		t.Fatalf("setting snap.working: %v", err)
+	}
+
+	resolver := NewResolver(db)
+
+	// Resolve @snap:working
+	result, err := resolver.Resolve("@snap:working", nil)
+	if err != nil {
+		t.Fatalf("resolving @snap:working: %v", err)
+	}
+
+	if util.BytesToHex(result.ID) != util.BytesToHex(snapID) {
+		t.Errorf("expected ID %s, got %s", util.BytesToHex(snapID), util.BytesToHex(result.ID))
+	}
+
+	if result.Kind != KindSnapshot {
+		t.Errorf("expected kind Snapshot, got %s", result.Kind)
+	}
+}
+
+func TestAutoRefManager_WorkingSnapshot(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Create snapshots
+	snap1 := createTestSnapshot(t, db)
+	snap2 := createTestSnapshot(t, db)
+
+	autoRef := NewAutoRefManager(db)
+	resolver := NewResolver(db)
+
+	// First scan: should set both @snap:last and @snap:working
+	if err := autoRef.OnSnapshotCreated(snap1); err != nil {
+		t.Fatalf("OnSnapshotCreated: %v", err)
+	}
+	if err := autoRef.OnWorkingSnapshotUpdated(snap1); err != nil {
+		t.Fatalf("OnWorkingSnapshotUpdated: %v", err)
+	}
+
+	// Verify @snap:last is snap1
+	result, err := resolver.Resolve("@snap:last", nil)
+	if err != nil {
+		t.Fatalf("resolving @snap:last: %v", err)
+	}
+	if util.BytesToHex(result.ID) != util.BytesToHex(snap1) {
+		t.Errorf("@snap:last should be snap1")
+	}
+
+	// Second scan: update working only
+	if err := autoRef.OnWorkingSnapshotUpdated(snap2); err != nil {
+		t.Fatalf("OnWorkingSnapshotUpdated: %v", err)
+	}
+
+	// @snap:last should still be snap1
+	result, err = resolver.Resolve("@snap:last", nil)
+	if err != nil {
+		t.Fatalf("resolving @snap:last: %v", err)
+	}
+	if util.BytesToHex(result.ID) != util.BytesToHex(snap1) {
+		t.Errorf("@snap:last should still be snap1 after updating working")
+	}
+
+	// @snap:working should be snap2
+	result, err = resolver.Resolve("@snap:working", nil)
+	if err != nil {
+		t.Fatalf("resolving @snap:working: %v", err)
+	}
+	if util.BytesToHex(result.ID) != util.BytesToHex(snap2) {
+		t.Errorf("@snap:working should be snap2")
+	}
+
+	// Promote working to last
+	if err := autoRef.PromoteWorkingSnapshot(); err != nil {
+		t.Fatalf("PromoteWorkingSnapshot: %v", err)
+	}
+
+	// @snap:last should now be snap2
+	result, err = resolver.Resolve("@snap:last", nil)
+	if err != nil {
+		t.Fatalf("resolving @snap:last after promote: %v", err)
+	}
+	if util.BytesToHex(result.ID) != util.BytesToHex(snap2) {
+		t.Errorf("@snap:last should be snap2 after promote")
+	}
+}
+
 func TestResolver_KindMismatch(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()

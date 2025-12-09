@@ -202,92 +202,64 @@
     </section>
 
     <section id="quickstart">
-      <h2>Quick Start</h2>
+      <h2>Quick Start (2 Minutes)</h2>
 
-      <h3>Add Kai to an Existing Git Repository</h3>
-      <pre><code><span class="dim"># Navigate to your git repo root</span>
-cd /path/to/existing-repo
+      <h3>Get Started</h3>
+      <pre><code><span class="dim"># 1. Navigate to your project</span>
+cd /path/to/your-repo
 
-<span class="dim"># Initialize kai (creates .kai directory)</span>
+<span class="dim"># 2. Initialize Kai</span>
 kai init
 
-<span class="dim"># Add .kai to .gitignore (kai manages its own history)</span>
-echo ".kai/" >> .gitignore
+<span class="dim"># 3. Scan your project (creates baseline snapshot)</span>
+kai capture
 
-<span class="dim"># Create initial snapshot of your source code</span>
-kai snapshot --dir ./src -m "Baseline from current git HEAD"
+<span class="dim"># 4. Make some changes to your code...</span>
 
-<span class="dim"># Configure modules to match your project structure</span>
-cat > kai.modules.yaml << 'EOF'
-modules:
-  - name: API
-    paths: ["src/routes/**", "src/controllers/**"]
-  - name: Models
-    paths: ["src/models/**"]
-  - name: Utils
-    paths: ["src/utils/**", "lib/**"]
-  - name: Frontend
-    paths: ["src/components/**", "src/pages/**"]
-EOF
+<span class="dim"># 5. See what changed semantically</span>
+kai diff
 
-<span class="dim"># Commit the kai config to git</span>
-git add kai.modules.yaml .gitignore
-git commit -m "Add kai version control"
+<span class="dim"># 6. Scan again to capture changes</span>
+kai capture
 
-<span class="dim"># Verify setup</span>
-kai log
-kai status --dir ./src</code></pre>
+<span class="dim"># 7. Open a review</span>
+kai review open --title "Add new feature"
 
-      <h3>Basic Workflow</h3>
-      <pre><code><span class="dim"># Check what's changed</span>
-kai status --dir ./src
+<span class="dim"># 8. Preview CI impact</span>
+kai ci plan
 
-<span class="dim"># Create a snapshot after making changes</span>
-kai snapshot --dir ./src -m "Add new feature"
+<span class="dim"># 9. Complete the review</span>
+kai review view &lt;id&gt;
+kai review approve &lt;id&gt;
+kai review close &lt;id&gt; --state merged</code></pre>
 
-<span class="dim"># Compare two snapshots</span>
-kai diff @snap:prev @snap:last
+      <h3>Core Commands</h3>
+      <pre><code>kai capture              <span class="dim"># Snapshot + analyze in one step</span>
+kai diff              <span class="dim"># Show semantic differences</span>
+kai review open       <span class="dim"># Create a code review</span>
+kai review view &lt;id&gt;  <span class="dim"># View review details</span>
+kai review approve    <span class="dim"># Approve a review</span>
+kai review close      <span class="dim"># Close (--state merged|abandoned)</span>
+kai ci plan           <span class="dim"># Compute affected tests</span></code></pre>
 
-<span class="dim"># Create a changeset with semantic analysis</span>
-kai changeset create @snap:prev @snap:last -m "Implemented user auth"
+      <h3>Learn More</h3>
+      <pre><code><span class="dim"># Use --explain on any command to understand what it does</span>
+kai capture --explain
+kai diff --explain
+kai ci plan --explain</code></pre>
 
-<span class="dim"># View the auto-generated intent</span>
-kai intent render @cs:last
-<span class="highlight">Intent: Add formatDate and formatTime in Utils</span>
-
-<span class="dim"># View history</span>
-kai log</code></pre>
-
-      <h3>Workspace Workflow (Branching)</h3>
-      <pre><code><span class="dim"># Create a workspace for a feature</span>
+      <h3>Workspace Workflow (Advanced)</h3>
+      <pre><code><span class="dim"># Create a workspace for isolated work</span>
 kai ws create --name feature/login --base @snap:last
 
 <span class="dim"># Make changes, then stage them</span>
-kai ws stage --ws feature/login --dir ./src -m "Work in progress"
+kai ws stage --ws feature/login --dir ./src
 
-<span class="dim"># View workspace history</span>
-kai ws log --ws feature/login
+<span class="dim"># View workspace status</span>
+kai ws list
 
-<span class="dim"># List all workspaces</span>
-kai ws list</code></pre>
-
-      <h3>Starting a New Project</h3>
-      <pre><code><span class="dim"># Create and enter your project directory</span>
-mkdir my-project && cd my-project
-
-<span class="dim"># Initialize kai</span>
-kai init
-
-<span class="dim"># Create your source files</span>
-mkdir src
-<span class="dim"># ... add your code ...</span>
-
-<span class="dim"># Create your first snapshot</span>
-kai snapshot --dir ./src -m "Initial version"
-
-<span class="dim"># Verify setup</span>
-kai log
-kai status --dir ./src</code></pre>
+<span class="dim"># Integrate changes when ready</span>
+kai integrate --ws feature/login --into @snap:last</code></pre>
     </section>
 
     <footer>
