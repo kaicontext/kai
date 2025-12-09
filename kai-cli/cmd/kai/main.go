@@ -52,7 +52,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.5.1"
+var Version = "0.5.2"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -3973,33 +3973,19 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("resolving changeset: %w", err)
 		}
 
-		// Get the changeset's base and head snapshots
+		// Get the changeset's base and head snapshots from payload
 		cs, err := db.GetNode(csID)
 		if err != nil {
 			return fmt.Errorf("getting changeset: %w", err)
 		}
 
-		// Get base and head from changeset edges
-		baseEdges, _ := db.GetEdges(csID, graph.EdgeBasedOn)
-		if len(baseEdges) > 0 {
-			baseSnapshotID = baseEdges[0].Dst
+		// Get base and head from changeset payload
+		// Note: EdgeHas edges point to ChangeType nodes, not snapshots
+		if headHex, ok := cs.Payload["head"].(string); ok {
+			headSnapshotID, _ = util.HexToBytes(headHex)
 		}
-
-		headEdges, _ := db.GetEdges(csID, graph.EdgeHas)
-		if len(headEdges) > 0 {
-			headSnapshotID = headEdges[0].Dst
-		}
-
-		// If no edges, try payload (uses "head" and "base" keys)
-		if headSnapshotID == nil {
-			if headHex, ok := cs.Payload["head"].(string); ok {
-				headSnapshotID, _ = util.HexToBytes(headHex)
-			}
-		}
-		if baseSnapshotID == nil {
-			if baseHex, ok := cs.Payload["base"].(string); ok {
-				baseSnapshotID, _ = util.HexToBytes(baseHex)
-			}
+		if baseHex, ok := cs.Payload["base"].(string); ok {
+			baseSnapshotID, _ = util.HexToBytes(baseHex)
 		}
 	}
 
