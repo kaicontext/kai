@@ -2,13 +2,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
@@ -52,7 +53,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.5.2"
+var Version = "0.7.0"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -63,12 +64,11 @@ var rootCmd = &cobra.Command{
 
 // Command groups for organized help output
 const (
-	groupStart     = "start"
-	groupDiff      = "diff"
-	groupWorkspace = "workspace"
-	groupCI        = "ci"
-	groupRemote    = "remote"
-	groupPlumbing  = "plumbing"
+	groupStart    = "start"
+	groupDiff     = "diff"
+	groupCI       = "ci"
+	groupRemote   = "remote"
+	groupAdvanced = "advanced"
 )
 
 var initCmd = &cobra.Command{
@@ -970,22 +970,25 @@ var remoteDelCmd = &cobra.Command{
 
 var pushCmd = &cobra.Command{
 	Use:   "push [remote] [target...]",
-	Short: "Push workspaces, changesets, or snapshots to a remote server",
-	Long: `Push workspaces, changesets, or snapshots to a remote Kailab server.
+	Short: "Push workspaces, changesets, reviews, or snapshots to a remote server",
+	Long: `Push workspaces, changesets, reviews, or snapshots to a remote Kailab server.
 
 In Kai, you primarily push workspaces (the unit of collaboration). Changesets
 within the workspace are the meaningful units that collaborators review.
+Reviews can be pushed to share code review state with collaborators.
 Snapshots travel automatically as infrastructure.
 
 Targets can use prefixes:
-  cs:<ref>    Push a changeset (+ its base/head snapshots)
-  snap:<ref>  Push a snapshot (advanced/plumbing)
-  <ref>       Legacy: push a ref directly
+  cs:<ref>      Push a changeset (+ its base/head snapshots)
+  review:<id>   Push a review (+ its target changeset)
+  snap:<ref>    Push a snapshot (advanced/plumbing)
+  <ref>         Legacy: push a ref directly
 
 Examples:
   kai push                         # Push current workspace to origin
   kai push origin --ws feature/auth # Push specific workspace
   kai push origin cs:login_fix     # Push single changeset for review
+  kai push origin review:abc123    # Push a code review
   kai push origin snap:abc123      # Push snapshot (rarely needed)
   kai push --all                   # Push all refs (legacy)`,
 	RunE: runPush,
@@ -998,10 +1001,15 @@ var fetchCmd = &cobra.Command{
 
 By default, fetches from the 'origin' remote.
 
+Use --ws to fetch a specific workspace and recreate it locally.
+Use --review to fetch a specific review and recreate it locally.
+
 Examples:
   kai fetch                       # Fetch all refs from origin
   kai fetch origin                # Fetch all refs
-  kai fetch origin snap.main      # Fetch specific ref`,
+  kai fetch origin snap.main      # Fetch specific ref
+  kai fetch --ws feature/auth     # Fetch and recreate workspace
+  kai fetch --review abc123       # Fetch and recreate review`,
 	RunE: runFetch,
 }
 
@@ -1115,10 +1123,12 @@ var reviewOpenCmd = &cobra.Command{
 With no arguments, automatically creates a changeset from your last two snapshots
 (@snap:prev → @snap:last) and opens a review for it.
 
+The title is auto-generated from semantic analysis if not provided (like git commit).
+
 Examples:
-  kai review open --title "Fix bug"                    # Auto-create changeset
-  kai review open @cs:last --title "Reduce timeout"    # Explicit changeset
-  kai review open @ws:feature/auth:head --title "Auth" # From workspace`,
+  kai review open                                      # Auto-title from changes
+  kai review open -m "Fix login bug"                   # Explicit title
+  kai review open @cs:last --title "Reduce timeout"    # Explicit changeset`,
 	Args: cobra.RangeArgs(0, 1),
 	RunE: runReviewOpen,
 }
@@ -1208,6 +1218,8 @@ var (
 	pruneDryRun      bool
 	pruneSinceDays   int
 	pruneAggressive  bool
+	pruneYes         bool
+	pruneKeep        []string
 
 	// Review flags
 	reviewTitle       string
@@ -1219,12 +1231,15 @@ var (
 	reviewJSON        bool
 	reviewViewMode    string
 	reviewExplain     bool
+	reviewBase        string
+	reviewPromoteLast bool
 
 	statusDir      string
 	statusAgainst  string
 	statusNameOnly bool
 	statusJSON     bool
 	statusSemantic bool
+	statusExplain  bool
 	logLimit       int
 	repoPath      string
 	dirPath       string
@@ -1250,6 +1265,7 @@ var (
 	diffJSON     bool
 	diffExplain  bool
 	diffPatch    bool // git-style line-level diff
+	diffForce    bool // skip stale baseline warning
 
 	// Snapshot flags
 	snapshotMessage string
@@ -1257,6 +1273,7 @@ var (
 
 	// Capture flags
 	captureExplain bool
+	capturePromote bool
 
 	// Global explain flag
 	explainFlag bool
@@ -1266,6 +1283,7 @@ var (
 	pushAll       bool
 	pushWorkspace string
 	pushDryRun    bool
+	pushExplain   bool
 	remoteLogRef  string
 	remoteLogLimit int
 
@@ -1279,6 +1297,8 @@ var (
 
 	// Fetch flags
 	fetchWorkspace string
+	fetchReview    string
+	fetchExplain   bool
 
 	// Merge flags
 	mergeLang   string
@@ -1302,6 +1322,7 @@ func init() {
 
 	// Capture command flags
 	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
+	captureCmd.Flags().BoolVar(&capturePromote, "promote", false, "Also update @snap:last (commit as new baseline)")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
 	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
@@ -1311,6 +1332,7 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
 	statusCmd.Flags().BoolVar(&statusSemantic, "semantic", false, "Include semantic change type analysis for modified files")
+	statusCmd.Flags().BoolVar(&statusExplain, "explain", false, "Show detailed explanation of what this command does")
 
 	// Changeset command flags
 	changesetCreateCmd.Flags().StringVarP(&changesetMessage, "message", "m", "", "Changeset message describing the intent")
@@ -1322,6 +1344,7 @@ func init() {
 	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Output diff as JSON (implies --semantic)")
 	diffCmd.Flags().BoolVar(&diffExplain, "explain", false, "Show detailed explanation of what this command does")
 	diffCmd.Flags().BoolVarP(&diffPatch, "patch", "p", false, "Show line-level diff (like git diff)")
+	diffCmd.Flags().BoolVar(&diffForce, "force", false, "Skip stale baseline warning")
 
 	// Workspace command flags
 	wsCreateCmd.Flags().StringVar(&wsName, "name", "", "Workspace name (or pass as positional arg)")
@@ -1376,6 +1399,7 @@ func init() {
 	pushCmd.Flags().BoolVar(&pushAll, "all", false, "Push all refs (legacy)")
 	pushCmd.Flags().StringVar(&pushWorkspace, "ws", "", "Workspace to push")
 	pushCmd.Flags().BoolVar(&pushDryRun, "dry-run", false, "Show what would be transferred without pushing")
+	pushCmd.Flags().BoolVar(&pushExplain, "explain", false, "Show detailed explanation of what this command does")
 	remoteLogCmd.Flags().StringVar(&remoteLogRef, "ref", "", "Filter by ref name")
 	remoteLogCmd.Flags().IntVarP(&remoteLogLimit, "limit", "n", 20, "Number of entries to show")
 
@@ -1389,18 +1413,23 @@ func init() {
 
 	// Fetch flags
 	fetchCmd.Flags().StringVar(&fetchWorkspace, "ws", "", "Fetch a specific workspace by name and recreate it locally")
+	fetchCmd.Flags().StringVar(&fetchReview, "review", "", "Fetch a specific review by ID and recreate it locally")
+	fetchCmd.Flags().BoolVar(&fetchExplain, "explain", false, "Show detailed explanation of what this command does")
 
 	// Prune flags
-	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Show what would be deleted without actually deleting")
+	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Show what would be deleted without actually deleting (default behavior)")
 	pruneCmd.Flags().IntVar(&pruneSinceDays, "since", 0, "Only delete content older than N days (0 = no limit)")
 	pruneCmd.Flags().BoolVar(&pruneAggressive, "aggressive", false, "Also sweep orphaned Symbols and Modules")
+	pruneCmd.Flags().BoolVar(&pruneYes, "yes", false, "Actually perform the deletion (required for non-dry-run)")
+	pruneCmd.Flags().StringArrayVar(&pruneKeep, "keep", nil, "Glob patterns for paths to keep (can be repeated)")
 
 	// Review flags
-	reviewOpenCmd.Flags().StringVar(&reviewTitle, "title", "", "Review title (required)")
+	reviewOpenCmd.Flags().StringVarP(&reviewTitle, "title", "m", "", "Review title (auto-generated from changes if not provided)")
 	reviewOpenCmd.Flags().StringVar(&reviewDesc, "desc", "", "Review description")
+	reviewOpenCmd.Flags().StringVar(&reviewBase, "base", "", "Base ref for changeset (default: @snap:last or snap.main if set)")
+	reviewOpenCmd.Flags().BoolVar(&reviewPromoteLast, "promote-last", false, "Promote @snap:working to @snap:last after review")
 	reviewOpenCmd.Flags().StringArrayVar(&reviewReviewers, "reviewers", nil, "Reviewers (can be specified multiple times)")
 	reviewOpenCmd.Flags().BoolVar(&reviewExplain, "explain", false, "Show detailed explanation of what this command does")
-	reviewOpenCmd.MarkFlagRequired("title")
 
 	reviewViewCmd.Flags().BoolVar(&reviewJSON, "json", false, "Output as JSON")
 	reviewViewCmd.Flags().StringVar(&reviewViewMode, "view", "semantic", "View mode: semantic, text, or mixed")
@@ -1529,18 +1558,19 @@ func init() {
 	ciAnnotatePlanCmd.Flags().IntVar(&ciFallbackExitCode, "fallback.exitCode", 0, "Exit code that triggered fallback")
 
 	// Define command groups for organized help output
+	// Note: Workspaces are intentionally in Advanced to reduce cognitive load for new users
 	rootCmd.AddGroup(
 		&cobra.Group{ID: groupStart, Title: "Getting Started:"},
 		&cobra.Group{ID: groupDiff, Title: "Diff & Review:"},
-		&cobra.Group{ID: groupWorkspace, Title: "Workspaces:"},
 		&cobra.Group{ID: groupCI, Title: "CI & Testing:"},
 		&cobra.Group{ID: groupRemote, Title: "Remote & Sync:"},
-		&cobra.Group{ID: groupPlumbing, Title: "Plumbing:"},
+		&cobra.Group{ID: groupAdvanced, Title: "Advanced:"},
 	)
 
 	// Getting Started
 	initCmd.GroupID = groupStart
 	captureCmd.GroupID = groupStart
+	initCmd.Flags().BoolVar(&initExplain, "explain", false, "Show detailed explanation of what this command does")
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(captureCmd)
 
@@ -1555,11 +1585,11 @@ func init() {
 	rootCmd.AddCommand(changesetCmd)
 	rootCmd.AddCommand(intentCmd)
 
-	// Workspaces
-	wsCmd.GroupID = groupWorkspace
-	integrateCmd.GroupID = groupWorkspace
-	mergeCmd.GroupID = groupWorkspace
-	checkoutCmd.GroupID = groupWorkspace
+	// Workspaces (in Advanced group to reduce PLG cognitive load)
+	wsCmd.GroupID = groupAdvanced
+	integrateCmd.GroupID = groupAdvanced
+	mergeCmd.GroupID = groupAdvanced
+	checkoutCmd.GroupID = groupAdvanced
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
 	rootCmd.AddCommand(mergeCmd)
@@ -1582,19 +1612,19 @@ func init() {
 	rootCmd.AddCommand(fetchCmd)
 	rootCmd.AddCommand(cloneCmd)
 
-	// Plumbing (advanced/low-level commands)
-	snapshotCmd.GroupID = groupPlumbing
-	snapCmd.GroupID = groupPlumbing
-	analyzeCmd.GroupID = groupPlumbing
-	dumpCmd.GroupID = groupPlumbing
-	listCmd.GroupID = groupPlumbing
-	logCmd.GroupID = groupPlumbing
-	refCmd.GroupID = groupPlumbing
-	modulesCmd.GroupID = groupPlumbing
-	pickCmd.GroupID = groupPlumbing
-	pruneCmd.GroupID = groupPlumbing
-	completionCmd.GroupID = groupPlumbing
-	remoteLogCmd.GroupID = groupPlumbing
+	// Advanced (low-level/plumbing commands)
+	snapshotCmd.GroupID = groupAdvanced
+	snapCmd.GroupID = groupAdvanced
+	analyzeCmd.GroupID = groupAdvanced
+	dumpCmd.GroupID = groupAdvanced
+	listCmd.GroupID = groupAdvanced
+	logCmd.GroupID = groupAdvanced
+	refCmd.GroupID = groupAdvanced
+	modulesCmd.GroupID = groupAdvanced
+	pickCmd.GroupID = groupAdvanced
+	pruneCmd.GroupID = groupAdvanced
+	completionCmd.GroupID = groupAdvanced
+	remoteLogCmd.GroupID = groupAdvanced
 	rootCmd.AddCommand(snapshotCmd)
 	rootCmd.AddCommand(snapCmd)
 	rootCmd.AddCommand(analyzeCmd)
@@ -1644,8 +1674,16 @@ func shortID(s string) string {
 
 // skipModulesFile is set by clone to skip creating kai.modules.yaml
 var skipModulesFile bool
+var initExplain bool
 
 func runInit(cmd *cobra.Command, args []string) error {
+	// Show explain if requested
+	if initExplain {
+		cwd, _ := os.Getwd()
+		ctx := explain.ExplainInit(cwd)
+		ctx.Print(os.Stdout)
+	}
+
 	// Create .kai directory
 	if err := os.MkdirAll(kaiDir, 0755); err != nil {
 		return fmt.Errorf("creating .kai directory: %w", err)
@@ -1962,6 +2000,41 @@ kai test affected @snap:prev @snap:last
 | ` + "`" + `no_test_mapping` + "`" + ` | Medium | Changed files have no test coverage |
 | ` + "`" + `cross_module_change` + "`" + ` | Medium | Changes span 3+ modules |
 
+## Working Snapshot Model
+
+Kai uses a two-tier snapshot model to prevent database bloat:
+
+| Ref | Purpose | GC Root? |
+|-----|---------|----------|
+| ` + "`" + `@snap:working` + "`" + ` | Current working directory state | No (ephemeral) |
+| ` + "`" + `@snap:last` + "`" + ` | Last committed baseline | No (ephemeral) |
+| ` + "`" + `snap.main` + "`" + `, etc. | Named refs you create | Yes (permanent) |
+
+### How it works:
+
+1. **` + "`" + `kai capture` + "`" + `** updates ` + "`" + `@snap:working` + "`" + ` (your current state)
+2. **` + "`" + `kai capture --promote` + "`" + `** also updates ` + "`" + `@snap:last` + "`" + ` (new baseline)
+3. **` + "`" + `kai review open` + "`" + `** creates a changeset from baseline to working
+4. **` + "`" + `kai prune` + "`" + `** cleans up unreferenced snapshots
+
+### Garbage Collection
+
+` + "```" + `bash
+kai prune              # Dry-run (shows what would be deleted)
+kai prune --yes        # Actually delete unreachable content
+kai prune --since 7    # Only delete content older than 7 days
+kai prune --keep "src/**"  # Preserve files matching pattern
+` + "```" + `
+
+**What stays alive:**
+- Snapshots referenced by workspaces
+- Snapshots referenced by reviews
+- Snapshots with named refs (` + "`" + `snap.main` + "`" + `, etc.)
+
+**What gets cleaned up:**
+- Old ` + "`" + `@snap:working` + "`" + ` snapshots (replaced by newer ones)
+- Orphaned changesets with no review
+
 ## Troubleshooting
 
 | Error | Fix |
@@ -1969,6 +2042,7 @@ kai test affected @snap:prev @snap:last
 | "Kai not initialized" | Run ` + "`" + `kai init` + "`" + ` first |
 | "No snapshots found" | Create one with ` + "`" + `kai snapshot --dir .` + "`" + ` |
 | "ambiguous prefix" | Use more characters of the ID, or use ` + "`" + `@snap:last` + "`" + ` |
+| "Last capture was X minutes ago" | Run ` + "`" + `kai capture` + "`" + ` or use ` + "`" + `--force` + "`" + ` |
 
 ## More Information
 
@@ -2039,6 +2113,21 @@ CREATE TABLE IF NOT EXISTS logs (
   PRIMARY KEY (kind, seq)
 );
 CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
+
+-- Ref change log for auditability (append-only)
+CREATE TABLE IF NOT EXISTS ref_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  old_target BLOB,
+  new_target BLOB NOT NULL,
+  actor TEXT,
+  moved_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name);
+CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
+
+-- Index for prune --since filtering
+CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
 `
 	// Apply schema in a transaction
 	tx, err := db.BeginTx()
@@ -2057,12 +2146,13 @@ CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
 	fmt.Println("╭─────────────────────────────────────────────")
 	fmt.Println("│  ✓ Initialized Kai in .kai/")
 	fmt.Println("│")
-	fmt.Println("│  Next steps:")
-	fmt.Println("│    1. kai capture              # Create baseline snapshot")
-	fmt.Println("│    2. (make changes)")
-	fmt.Println("│    3. kai diff              # See what changed")
-	fmt.Println("│    4. kai capture              # Capture changes")
-	fmt.Println("│    5. kai review open       # Commit & review")
+	fmt.Println("│  Quickstart:")
+	fmt.Println("│    kai capture        # Snapshot your code")
+	fmt.Println("│    kai diff           # See what changed")
+	fmt.Println("│    kai review open    # Commit & review")
+	fmt.Println("│    kai ci plan        # Get selective test plan")
+	fmt.Println("│")
+	fmt.Println("│  That's it. Semantic commits + safe selective CI.")
 	fmt.Println("│")
 	fmt.Println("│  Use --explain on any command to learn more.")
 	fmt.Println("╰─────────────────────────────────────────────")
@@ -2195,8 +2285,8 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	existingLatest, _ := refMgr.Get("snap.latest")
 	isFirstScan := existingLatest == nil
 
-	if isFirstScan {
-		// First scan: commit as baseline (@snap:last) AND set as working
+	if isFirstScan || capturePromote {
+		// First scan or --promote: commit as baseline (@snap:last) AND set as working
 		if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
 			fmt.Println("failed")
 			fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
@@ -2210,6 +2300,15 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println("done")
 	}
 
+	// Compute change summary if not first scan
+	var changeSummary *captureSummary
+	if !isFirstScan {
+		fmt.Println()
+		fmt.Print("Computing changes... ")
+		changeSummary = computeCaptureSummary(db, snapshotID, matcher)
+		fmt.Println("done")
+	}
+
 	// Summary
 	fmt.Println()
 	fmt.Println("╭─────────────────────────────────────────────")
@@ -2218,25 +2317,235 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	fmt.Printf("│  Snapshot: %s\n", util.BytesToHex(snapshotID)[:12])
 	fmt.Printf("│  Files: %d\n", len(files))
 	fmt.Printf("│  Modules: %d\n", moduleCount)
+
+	// Show change summary if available
+	if changeSummary != nil && changeSummary.hasChanges {
+		fmt.Println("│")
+		fmt.Println("│  Changes detected:")
+		fmt.Printf("│    %d file(s) modified\n", changeSummary.filesChanged)
+		if len(changeSummary.changeTypes) > 0 {
+			// Group into 3 buckets for cleaner display
+			buckets := bucketChangeTypes(changeSummary.changeTypes)
+
+			// Display buckets in consistent order: Structural, Behavioral, API/Contract
+			bucketOrder := []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract}
+			for _, bucket := range bucketOrder {
+				paths := buckets[bucket]
+				if len(paths) == 0 {
+					continue
+				}
+				if len(paths) == 1 {
+					fmt.Printf("│      %s: %s\n", bucket, paths[0])
+				} else if len(paths) <= 3 {
+					fmt.Printf("│      %s: %s\n", bucket, strings.Join(paths, ", "))
+				} else {
+					fmt.Printf("│      %s: %d files\n", bucket, len(paths))
+				}
+			}
+		}
+		if len(changeSummary.modules) > 0 {
+			fmt.Printf("│    Modules: %s\n", strings.Join(changeSummary.modules, ", "))
+		}
+	} else if changeSummary != nil {
+		fmt.Println("│")
+		fmt.Println("│  No changes since baseline.")
+	}
+
 	fmt.Println("│")
 	if isFirstScan {
-		fmt.Println("│  This is your baseline snapshot (@snap:last).")
+		fmt.Println("│  Baseline created (@snap:last).")
 		fmt.Println("│")
-		fmt.Println("│  Next steps:")
-		fmt.Println("│    • Make changes to your code")
-		fmt.Println("│    • Run 'kai diff' to see semantic differences")
-		fmt.Println("│    • Run 'kai capture' to capture changes")
-		fmt.Println("│    • Run 'kai review open --title \"...\"' to commit & review")
+		fmt.Println("│  Next: make changes, then:")
+		fmt.Println("│    kai diff           # See what changed")
+		fmt.Println("│    kai capture        # Capture changes")
+		fmt.Println("│    kai review open    # Commit & review")
+		fmt.Println("│    kai ci plan        # Get selective test plan")
+	} else if capturePromote {
+		fmt.Println("│  Baseline updated (@snap:last) via --promote.")
+		fmt.Println("│")
+		fmt.Println("│  Next: make changes, then:")
+		fmt.Println("│    kai diff           # See differences from new baseline")
+		fmt.Println("│    kai capture        # Capture working changes")
+	} else if changeSummary != nil && changeSummary.hasChanges {
+		fmt.Println("│  Working snapshot updated (@snap:working).")
+		fmt.Println("│")
+		fmt.Println("│  Next:")
+		fmt.Println("│    kai diff           # See detailed changes")
+		fmt.Println("│    kai review open    # Commit & review")
+		fmt.Println("│    kai ci plan        # Get selective test plan")
 	} else {
 		fmt.Println("│  Working snapshot updated (@snap:working).")
 		fmt.Println("│")
-		fmt.Println("│  Next steps:")
-		fmt.Println("│    • Run 'kai diff' to see changes since baseline")
-		fmt.Println("│    • Run 'kai review open --title \"...\"' to commit & review")
+		fmt.Println("│  No changes to review.")
 	}
 	fmt.Println("╰─────────────────────────────────────────────")
 
 	return nil
+}
+
+// captureSummary holds a summary of changes detected during capture
+type captureSummary struct {
+	hasChanges   bool
+	filesChanged int
+	changeTypes  map[string][]string // category -> list of paths
+	modules      []string
+}
+
+// ChangeBucket represents a high-level category of changes for simpler UX
+type ChangeBucket string
+
+const (
+	BucketStructural  ChangeBucket = "Structural"  // Things added/removed/moved
+	BucketBehavioral  ChangeBucket = "Behavioral"  // Logic/values changed
+	BucketAPIContract ChangeBucket = "API/Contract" // Interface/contract changed
+)
+
+// categorizeToBucket maps a raw change category to one of 3 user-friendly buckets
+func categorizeToBucket(category string) ChangeBucket {
+	switch category {
+	// Structural: things were added/removed/moved
+	case "FILE_ADDED", "FILE_DELETED", "FUNCTION_ADDED", "FUNCTION_REMOVED",
+		"JSON_FIELD_ADDED", "JSON_FIELD_REMOVED", "YAML_KEY_ADDED", "YAML_KEY_REMOVED":
+		return BucketStructural
+	// Behavioral: logic/values changed
+	case "CONDITION_CHANGED", "CONSTANT_UPDATED", "JSON_VALUE_CHANGED",
+		"JSON_ARRAY_CHANGED", "YAML_VALUE_CHANGED", "FILE_CONTENT_CHANGED":
+		return BucketBehavioral
+	// API/Contract: interface/contract changed
+	case "API_SURFACE_CHANGED":
+		return BucketAPIContract
+	default:
+		// Unknown categories go to Behavioral as fallback
+		return BucketBehavioral
+	}
+}
+
+// bucketChangeTypes groups raw change types into 3 buckets for simpler display
+func bucketChangeTypes(changeTypes map[string][]string) map[ChangeBucket][]string {
+	buckets := make(map[ChangeBucket][]string)
+	seen := make(map[ChangeBucket]map[string]bool)
+
+	for category, paths := range changeTypes {
+		bucket := categorizeToBucket(category)
+		if seen[bucket] == nil {
+			seen[bucket] = make(map[string]bool)
+		}
+		for _, path := range paths {
+			if !seen[bucket][path] {
+				seen[bucket][path] = true
+				buckets[bucket] = append(buckets[bucket], path)
+			}
+		}
+	}
+
+	return buckets
+}
+
+// computeCaptureSummary computes a quick summary of changes between @snap:last and new snapshot
+func computeCaptureSummary(db *graph.DB, newSnapshotID []byte, matcher *module.Matcher) *captureSummary {
+	summary := &captureSummary{
+		changeTypes: make(map[string][]string),
+	}
+
+	// Get baseline snapshot
+	baseSnapID, err := resolveSnapshotID(db, "@snap:last")
+	if err != nil {
+		return summary
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+
+	// Get files from both snapshots
+	baseFiles, err := creator.GetSnapshotFiles(baseSnapID)
+	if err != nil {
+		return summary
+	}
+	newFiles, err := creator.GetSnapshotFiles(newSnapshotID)
+	if err != nil {
+		return summary
+	}
+
+	// Build maps
+	baseFileMap := make(map[string]*graph.Node)
+	for _, f := range baseFiles {
+		path, _ := f.Payload["path"].(string)
+		baseFileMap[path] = f
+	}
+	newFileMap := make(map[string]*graph.Node)
+	for _, f := range newFiles {
+		path, _ := f.Payload["path"].(string)
+		newFileMap[path] = f
+	}
+
+	// Find changed files
+	var changedPaths []string
+	modulesSet := make(map[string]bool)
+
+	// Check for modified and added files
+	for path, newFile := range newFileMap {
+		baseFile, exists := baseFileMap[path]
+		newDigest, _ := newFile.Payload["digest"].(string)
+
+		if !exists {
+			// Added file
+			changedPaths = append(changedPaths, path)
+			summary.changeTypes["FILE_ADDED"] = append(summary.changeTypes["FILE_ADDED"], path)
+		} else {
+			baseDigest, _ := baseFile.Payload["digest"].(string)
+			if newDigest != baseDigest {
+				// Modified file
+				changedPaths = append(changedPaths, path)
+
+				// Try to detect semantic changes
+				lang, _ := newFile.Payload["lang"].(string)
+				beforeContent, _ := db.ReadObject(baseDigest)
+				afterContent, _ := db.ReadObject(newDigest)
+
+				if len(beforeContent) > 0 && len(afterContent) > 0 {
+					detector := classify.NewDetector()
+					var changes []*classify.ChangeType
+
+					switch lang {
+					case "json":
+						changes, _ = classify.DetectJSONChanges(path, beforeContent, afterContent)
+					case "ts", "js", "tsx", "jsx", "go", "py":
+						changes, _ = detector.DetectChanges(path, beforeContent, afterContent, "")
+					default:
+						changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
+					}
+
+					for _, ct := range changes {
+						category := string(ct.Category)
+						summary.changeTypes[category] = append(summary.changeTypes[category], path)
+					}
+				}
+			}
+		}
+
+		// Track modules
+		if matcher != nil {
+			for _, mod := range matcher.MatchPath(path) {
+				modulesSet[mod] = true
+			}
+		}
+	}
+
+	// Check for deleted files
+	for path := range baseFileMap {
+		if _, exists := newFileMap[path]; !exists {
+			changedPaths = append(changedPaths, path)
+			summary.changeTypes["FILE_DELETED"] = append(summary.changeTypes["FILE_DELETED"], path)
+		}
+	}
+
+	summary.filesChanged = len(changedPaths)
+	summary.hasChanges = len(changedPaths) > 0
+
+	for mod := range modulesSet {
+		summary.modules = append(summary.modules, mod)
+	}
+
+	return summary
 }
 
 // createSnapshotFromDir creates a snapshot from the given directory and returns its ID.
@@ -6691,6 +7000,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Show explain if requested
+	if statusExplain {
+		hasBaseline := !result.NoBaseline
+		ctx := explain.ExplainStatus(hasBaseline, len(result.Modified), len(result.Added), len(result.Deleted))
+		ctx.Print(os.Stdout)
+	}
+
 	// Determine output format
 	var format status.OutputFormat
 	if statusJSON {
@@ -6744,6 +7060,22 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	baseRef := "@snap:last"
 	if len(args) >= 1 {
 		baseRef = args[0]
+	}
+
+	// Check for stale baseline warning (unless --force or comparing two explicit snapshots)
+	if !diffForce && len(args) < 2 {
+		refMgr := ref.NewRefManager(db)
+		workingRef, _ := refMgr.Get("snap.working")
+		if workingRef != nil {
+			staleThreshold := int64(10 * 60 * 1000) // 10 minutes in ms
+			age := util.NowMs() - workingRef.UpdatedAt
+			if age > staleThreshold {
+				ageMinutes := age / 60000
+				fmt.Fprintf(os.Stderr, "Warning: Last capture was %d minutes ago.\n", ageMinutes)
+				fmt.Fprintf(os.Stderr, "  Your working directory may have changed since then.\n")
+				fmt.Fprintf(os.Stderr, "  Run 'kai capture' for an accurate diff, or use --force to continue.\n\n")
+			}
+		}
 	}
 
 	// Resolve base snapshot
@@ -6863,15 +7195,29 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if diffExplain {
 		var changeTypes []string
 		if len(added) > 0 {
-			changeTypes = append(changeTypes, fmt.Sprintf("%d added", len(added)))
+			changeTypes = append(changeTypes, fmt.Sprintf("%d file(s) added", len(added)))
 		}
 		if len(modified) > 0 {
-			changeTypes = append(changeTypes, fmt.Sprintf("%d modified", len(modified)))
+			changeTypes = append(changeTypes, fmt.Sprintf("%d file(s) modified", len(modified)))
 		}
 		if len(deleted) > 0 {
-			changeTypes = append(changeTypes, fmt.Sprintf("%d deleted", len(deleted)))
+			changeTypes = append(changeTypes, fmt.Sprintf("%d file(s) deleted", len(deleted)))
 		}
-		ctx := explain.ExplainDiff(baseRef, headLabel, fileCount, changeTypes)
+		// Get affected modules
+		var modules []string
+		if matcher, err := loadMatcher(); err == nil {
+			modulesSet := make(map[string]bool)
+			allPaths := append(append(added, modified...), deleted...)
+			for _, path := range allPaths {
+				for _, mod := range matcher.MatchPath(path) {
+					modulesSet[mod] = true
+				}
+			}
+			for mod := range modulesSet {
+				modules = append(modules, mod)
+			}
+		}
+		ctx := explain.ExplainDiffFull(baseRef, headLabel, fileCount, changeTypes, modules)
 		ctx.Print(os.Stdout)
 	}
 
@@ -8077,6 +8423,20 @@ func runRemoteDel(cmd *cobra.Command, args []string) error {
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
+	// Show explain if requested
+	if pushExplain {
+		remoteName := "origin"
+		refSpec := "*"
+		if len(args) > 0 {
+			remoteName = args[0]
+		}
+		if len(args) > 1 {
+			refSpec = args[1]
+		}
+		ctx := explain.ExplainPush(remoteName, refSpec, 0) // 0 refs - count determined later
+		ctx.Print(os.Stdout)
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -8112,8 +8472,10 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Get refs to push
 	refMgr := ref.NewRefManager(db)
 	wsMgr := workspace.NewManager(db)
+	reviewMgr := review.NewManager(db)
 	var refsToSync []*ref.Ref
 	var workspaceToPush *workspace.Workspace
+	var reviewToPush *review.Review
 
 	if pushAll {
 		// Legacy: push all refs
@@ -8167,6 +8529,14 @@ func runPush(cmd *cobra.Command, args []string) error {
 				if r != nil {
 					refsToSync = append(refsToSync, r)
 				}
+			} else if strings.HasPrefix(target, "review:") {
+				// Review target
+				reviewRef := strings.TrimPrefix(target, "review:")
+				rev, err := reviewMgr.GetByShortID(reviewRef)
+				if err != nil {
+					return fmt.Errorf("getting review '%s': %w", reviewRef, err)
+				}
+				reviewToPush = rev
 			} else {
 				// Legacy: direct ref name
 				r, err := refMgr.Get(target)
@@ -8265,6 +8635,98 @@ func runPush(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Base: %s\n", hex.EncodeToString(workspaceToPush.BaseSnapshot)[:12])
 		fmt.Printf("  Head: %s\n", hex.EncodeToString(workspaceToPush.HeadSnapshot)[:12])
 		fmt.Printf("  Changesets: %d\n", len(workspaceToPush.OpenChangeSets))
+	}
+
+	// If pushing a review, collect it and its target changeset
+	if reviewToPush != nil {
+		fmt.Printf("Pushing review '%s'...\n", reviewToPush.Title)
+
+		// Get review node to compute content-addressed digest
+		reviewNode, err := db.GetNode(reviewToPush.ID)
+		if err != nil || reviewNode == nil {
+			return fmt.Errorf("getting review node: %w", err)
+		}
+
+		// Compute content-addressed digest for review
+		// Include UUID in payload so it can be reconstructed on fetch
+		reviewPayload := make(map[string]interface{})
+		for k, v := range reviewNode.Payload {
+			reviewPayload[k] = v
+		}
+		reviewPayload["_uuid"] = hex.EncodeToString(reviewToPush.ID)
+		reviewPayloadJSON, err := util.CanonicalJSON(reviewPayload)
+		if err != nil {
+			return fmt.Errorf("serializing review payload: %w", err)
+		}
+		reviewContent := append([]byte(string(graph.KindReview)+"\n"), reviewPayloadJSON...)
+		reviewContentDigest := util.Blake3Hash(reviewContent)
+
+		// Store pre-computed pack object for review
+		precomputedPackObjects[hex.EncodeToString(reviewContentDigest)] = remote.PackObject{
+			Digest:  reviewContentDigest,
+			Kind:    string(graph.KindReview),
+			Content: reviewContent,
+		}
+
+		// Add review ref
+		reviewShortID := hex.EncodeToString(reviewToPush.ID)[:12]
+		reviewNodeRef := &ref.Ref{
+			Name:       fmt.Sprintf("review.%s", reviewShortID),
+			TargetID:   reviewContentDigest,
+			TargetKind: ref.KindReview,
+		}
+		refsToSync = append(refsToSync, reviewNodeRef)
+
+		// Also push the target changeset (if it's a changeset)
+		if reviewToPush.TargetKind == graph.KindChangeSet {
+			targetRef := &ref.Ref{
+				Name:       fmt.Sprintf("review.%s.target", reviewShortID),
+				TargetID:   reviewToPush.TargetID,
+				TargetKind: ref.KindChangeSet,
+			}
+			refsToSync = append(refsToSync, targetRef)
+
+			// Also create a top-level cs ref so it shows up in changesets list
+			csShortID := hex.EncodeToString(reviewToPush.TargetID)[:12]
+			csRef := &ref.Ref{
+				Name:       fmt.Sprintf("cs.%s", csShortID),
+				TargetID:   reviewToPush.TargetID,
+				TargetKind: ref.KindChangeSet,
+			}
+			refsToSync = append(refsToSync, csRef)
+
+			// Also push the base and head snapshots for the changeset
+			// These are stored in the changeset payload as hex strings
+			csNode, err := db.GetNode(reviewToPush.TargetID)
+			if err == nil && csNode != nil {
+				if baseHex, ok := csNode.Payload["base"].(string); ok {
+					if baseID, err := hex.DecodeString(baseHex); err == nil {
+						snapShortID := baseHex[:12]
+						snapRef := &ref.Ref{
+							Name:       fmt.Sprintf("snap.%s", snapShortID),
+							TargetID:   baseID,
+							TargetKind: ref.KindSnapshot,
+						}
+						refsToSync = append(refsToSync, snapRef)
+					}
+				}
+				if headHex, ok := csNode.Payload["head"].(string); ok {
+					if headID, err := hex.DecodeString(headHex); err == nil {
+						snapShortID := headHex[:12]
+						snapRef := &ref.Ref{
+							Name:       fmt.Sprintf("snap.%s", snapShortID),
+							TargetID:   headID,
+							TargetKind: ref.KindSnapshot,
+						}
+						refsToSync = append(refsToSync, snapRef)
+					}
+				}
+			}
+		}
+
+		fmt.Printf("  Review ID: %s\n", reviewShortID)
+		fmt.Printf("  State: %s\n", reviewToPush.State)
+		fmt.Printf("  Target: %s (%s)\n", hex.EncodeToString(reviewToPush.TargetID)[:12], reviewToPush.TargetKind)
 	}
 
 	if len(refsToSync) == 0 {
@@ -8555,6 +9017,16 @@ func runPush(cmd *cobra.Command, args []string) error {
 }
 
 func runFetch(cmd *cobra.Command, args []string) error {
+	// Show explain if requested
+	if fetchExplain {
+		remoteName := "origin"
+		if len(args) > 0 {
+			remoteName = args[0]
+		}
+		ctx := explain.ExplainFetch(remoteName, 0) // 0 refs - count determined later
+		ctx.Print(os.Stdout)
+	}
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -8592,6 +9064,11 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	// Handle workspace fetch if --ws flag is set
 	if fetchWorkspace != "" {
 		return fetchWorkspaceFromRemote(db, client, remoteName, fetchWorkspace)
+	}
+
+	// Handle review fetch if --review flag is set
+	if fetchReview != "" {
+		return fetchReviewFromRemote(db, client, remoteName, fetchReview)
 	}
 
 	// Get refs from remote
@@ -8885,10 +9362,15 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
+	// Dry-run is the default unless --yes is specified
+	// --dry-run can also be explicitly set
+	isDryRun := !pruneYes || pruneDryRun
+
 	opts := graph.GCOptions{
 		SinceDays:  pruneSinceDays,
 		Aggressive: pruneAggressive,
-		DryRun:     pruneDryRun,
+		DryRun:     isDryRun,
+		Keep:       pruneKeep,
 	}
 
 	plan, err := db.BuildGCPlan(opts)
@@ -8903,7 +9385,7 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if pruneDryRun {
+	if isDryRun {
 		fmt.Println("Would sweep:")
 	} else {
 		fmt.Println("Sweeping:")
@@ -8929,8 +9411,8 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Objects:    %d (~%.2f MiB)\n", len(plan.ObjectsToDelete), float64(plan.BytesReclaimed)/(1024*1024))
 	}
 
-	if pruneDryRun {
-		fmt.Println("\nRun `kai prune` to proceed.")
+	if isDryRun {
+		fmt.Println("\nRun `kai prune --yes` to proceed.")
 		return nil
 	}
 
@@ -9071,40 +9553,118 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 	var targetKind string
 
 	if len(args) == 0 {
-		// No args - auto-create changeset from @snap:last (baseline) to @snap:working (current)
-		baseSnapID, err := resolveSnapshotID(db, "@snap:last")
+		// Check if there's a current workspace
+		currentWsName, err := getCurrentWorkspace()
 		if err != nil {
-			return fmt.Errorf("resolving @snap:last: %w (run 'kai capture' first to create a baseline)", err)
+			return fmt.Errorf("checking current workspace: %w", err)
 		}
 
-		headSnapID, err := resolveSnapshotID(db, "@snap:working")
-		if err != nil {
-			return fmt.Errorf("resolving @snap:working: %w (run 'kai capture' to capture your changes)", err)
-		}
+		if currentWsName != "" {
+			// Use the current workspace
+			wsMgr := workspace.NewManager(db)
+			ws, err := wsMgr.Get(currentWsName)
+			if err != nil {
+				return fmt.Errorf("getting workspace %q: %w", currentWsName, err)
+			}
+			if ws == nil {
+				return fmt.Errorf("workspace %q not found (clear with 'kai ws switch')", currentWsName)
+			}
 
-		// Check if baseline and working are the same (no changes)
-		if string(baseSnapID) == string(headSnapID) {
-			return fmt.Errorf("no changes to review: @snap:last and @snap:working are the same\n  Make changes and run 'kai capture' to capture them")
-		}
+			// Create changeset from workspace's head to working snapshot
+			headSnapID, err := resolveSnapshotID(db, "@snap:working")
+			if err != nil {
+				return fmt.Errorf("resolving @snap:working: %w", err)
+			}
 
-		fmt.Println("Creating changeset from @snap:last to @snap:working...")
-		changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, reviewTitle)
-		if err != nil {
-			return fmt.Errorf("creating changeset: %w", err)
-		}
+			// Check if there are changes
+			if string(ws.HeadSnapshot) == string(headSnapID) {
+				return fmt.Errorf("no changes to review in workspace %q\n  Make changes and run 'kai capture' to capture them", currentWsName)
+			}
 
-		targetID = changeSetID
-		targetKind = string(ref.KindChangeSet)
-		fmt.Printf("Changeset created: %s\n", util.BytesToHex(changeSetID)[:12])
+			fmt.Printf("Using workspace: %s\n", currentWsName)
+			fmt.Printf("Creating changeset from workspace head to @snap:working...\n")
 
-		// Promote @snap:working to @snap:last (commit the working snapshot)
-		autoRefMgr := ref.NewAutoRefManager(db)
-		if err := autoRefMgr.PromoteWorkingSnapshot(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to promote working snapshot: %v\n", err)
+			changeSetID, err := createChangesetFromSnapshots(db, ws.HeadSnapshot, headSnapID, reviewTitle)
+			if err != nil {
+				return fmt.Errorf("creating changeset: %w", err)
+			}
+			fmt.Printf("Changeset created: %s\n", util.BytesToHex(changeSetID)[:12])
+
+			// Add changeset to workspace
+			if err := wsMgr.AddChangeSet(ws.ID, changeSetID); err != nil {
+				return fmt.Errorf("adding changeset to workspace: %w", err)
+			}
+
+			// Update workspace head
+			if err := wsMgr.UpdateHead(ws.ID, headSnapID); err != nil {
+				return fmt.Errorf("updating workspace head: %w", err)
+			}
+
+			// Review targets the workspace (which contains the changeset stack)
+			targetID = ws.ID
+			targetKind = string(ref.KindWorkspace)
+			fmt.Printf("Changeset added to workspace stack\n\n")
 		} else {
-			fmt.Println("Working snapshot promoted to @snap:last")
+			// No workspace - auto-create standalone changeset from base to @snap:working
+			// Determine base: --base flag > snap.main (if exists) > @snap:last
+			var baseSnapID []byte
+			var baseLabel string
+			refMgr := ref.NewRefManager(db)
+
+			if reviewBase != "" {
+				// User specified --base
+				baseSnapID, err = resolveSnapshotID(db, reviewBase)
+				if err != nil {
+					return fmt.Errorf("resolving --base %q: %w", reviewBase, err)
+				}
+				baseLabel = reviewBase
+			} else {
+				// Check for snap.main as default base
+				snapMain, _ := refMgr.Get("snap.main")
+				if snapMain != nil {
+					baseSnapID = snapMain.TargetID
+					baseLabel = "snap.main"
+				} else {
+					// Fall back to @snap:last
+					baseSnapID, err = resolveSnapshotID(db, "@snap:last")
+					if err != nil {
+						return fmt.Errorf("resolving @snap:last: %w (run 'kai capture' first to create a baseline)", err)
+					}
+					baseLabel = "@snap:last"
+				}
+			}
+
+			headSnapID, err := resolveSnapshotID(db, "@snap:working")
+			if err != nil {
+				return fmt.Errorf("resolving @snap:working: %w (run 'kai capture' to capture your changes)", err)
+			}
+
+			// Check if baseline and working are the same (no changes)
+			if string(baseSnapID) == string(headSnapID) {
+				return fmt.Errorf("no changes to review: %s and @snap:working are the same\n  Make changes and run 'kai capture' to capture them", baseLabel)
+			}
+
+			fmt.Printf("Creating changeset from %s to @snap:working...\n", baseLabel)
+			changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, reviewTitle)
+			if err != nil {
+				return fmt.Errorf("creating changeset: %w", err)
+			}
+
+			targetID = changeSetID
+			targetKind = string(ref.KindChangeSet)
+			fmt.Printf("Changeset created: %s\n", util.BytesToHex(changeSetID)[:12])
+
+			// Promote @snap:working to @snap:last only if --promote-last is specified
+			if reviewPromoteLast {
+				autoRefMgr := ref.NewAutoRefManager(db)
+				if err := autoRefMgr.PromoteWorkingSnapshot(); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to promote working snapshot: %v\n", err)
+				} else {
+					fmt.Println("Working snapshot promoted to @snap:last")
+				}
+			}
+			fmt.Println()
 		}
-		fmt.Println()
 	} else {
 		// Resolve the target (changeset or workspace)
 		resolver := ref.NewResolver(db)
@@ -9128,13 +9688,29 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 		author = "unknown"
 	}
 
+	// Auto-generate title from intent if not provided
+	autoTitle := reviewTitle == ""
+	if autoTitle {
+		gen := intent.NewGenerator(db)
+		generatedTitle, err := gen.RenderIntent(targetID, "", false)
+		if err != nil {
+			// Fall back to generic title if intent generation fails
+			generatedTitle = "Review of changes"
+		}
+		reviewTitle = generatedTitle
+		fmt.Printf("Auto-generated title: %s\n", reviewTitle)
+	}
+
 	// Show explain if requested
 	if reviewExplain {
 		targetRef := "@cs:last"
 		if len(args) > 0 {
 			targetRef = args[0]
 		}
-		ctx := explain.ExplainReviewOpen(targetRef, reviewTitle)
+		// Check if we have a workspace
+		currentWsName, _ := getCurrentWorkspace()
+		hasWorkspace := currentWsName != "" && len(args) == 0
+		ctx := explain.ExplainReviewOpenFull(targetRef, reviewTitle, hasWorkspace, currentWsName, autoTitle)
 		ctx.Print(os.Stdout)
 	}
 
@@ -9371,12 +9947,25 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Show change types
+	// Show change types grouped into 3 buckets
 	if len(changeTypes) > 0 {
 		fmt.Println()
-		fmt.Println("Change Types:")
+		fmt.Println("Changes:")
+
+		// Group raw categories into buckets
+		bucketCounts := make(map[ChangeBucket]int)
 		for _, ct := range changeTypes {
-			fmt.Printf("  • %s\n", ct)
+			bucket := categorizeToBucket(ct)
+			bucketCounts[bucket]++
+		}
+
+		// Display in consistent order
+		bucketOrder := []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract}
+		for _, bucket := range bucketOrder {
+			count := bucketCounts[bucket]
+			if count > 0 {
+				fmt.Printf("  • %s: %d\n", bucket, count)
+			}
 		}
 	}
 
@@ -9522,41 +10111,116 @@ func showSimpleDiff(before, after string) {
 	}
 }
 
-// showUnifiedDiff displays a unified diff using the system diff command
+// showUnifiedDiff displays a unified diff using pure Go (no system dependency)
 func showUnifiedDiff(before, after string) {
-	// Create temp files for diff
-	beforeFile, err := os.CreateTemp("", "kai-diff-before-*")
-	if err != nil {
-		fmt.Printf("  (diff unavailable: %v)\n", err)
-		return
+	dmp := diffmatchpatch.New()
+
+	// Convert to line-based diff for better unified output
+	beforeLines := strings.Split(before, "\n")
+	afterLines := strings.Split(after, "\n")
+
+	// Use line mode for cleaner diffs
+	chars1, chars2, lineArray := dmp.DiffLinesToChars(before, after)
+	diffs := dmp.DiffMain(chars1, chars2, false)
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
+	diffs = dmp.DiffCleanupSemantic(diffs)
+
+	// ANSI color codes
+	const (
+		colorReset  = "\033[0m"
+		colorRed    = "\033[31m"
+		colorGreen  = "\033[32m"
+		colorCyan   = "\033[36m"
+	)
+
+	// Track line numbers for hunk headers
+	oldLine := 1
+	newLine := 1
+
+	// Collect hunks
+	type hunk struct {
+		oldStart, oldCount int
+		newStart, newCount int
+		lines              []string
 	}
-	defer os.Remove(beforeFile.Name())
+	var hunks []hunk
+	var currentHunk *hunk
 
-	afterFile, err := os.CreateTemp("", "kai-diff-after-*")
-	if err != nil {
-		fmt.Printf("  (diff unavailable: %v)\n", err)
-		return
-	}
-	defer os.Remove(afterFile.Name())
-
-	beforeFile.WriteString(before)
-	beforeFile.Close()
-	afterFile.WriteString(after)
-	afterFile.Close()
-
-	// Run diff -u
-	cmd := exec.Command("diff", "-u", "--color=always", beforeFile.Name(), afterFile.Name())
-	output, _ := cmd.Output() // diff returns exit code 1 when files differ, ignore error
-
-	// Skip the first two lines (temp file names) and print the rest
-	lines := strings.Split(string(output), "\n")
-	for i, line := range lines {
-		if i < 2 {
-			continue // Skip --- and +++ lines with temp file paths
+	for _, d := range diffs {
+		lines := strings.Split(strings.TrimSuffix(d.Text, "\n"), "\n")
+		if d.Text == "" {
+			continue
 		}
-		if line != "" {
+
+		switch d.Type {
+		case diffmatchpatch.DiffEqual:
+			// Context lines - start new hunk if needed, include up to 3 lines
+			contextLines := lines
+			if len(contextLines) > 6 && currentHunk != nil {
+				// End current hunk with 3 trailing context lines
+				for i := 0; i < 3 && i < len(contextLines); i++ {
+					currentHunk.lines = append(currentHunk.lines, " "+contextLines[i])
+					currentHunk.oldCount++
+					currentHunk.newCount++
+				}
+				hunks = append(hunks, *currentHunk)
+				currentHunk = nil
+				// Skip middle, advance line counters
+				oldLine += len(contextLines) - 3
+				newLine += len(contextLines) - 3
+				contextLines = contextLines[len(contextLines)-3:]
+			}
+			if currentHunk != nil {
+				for _, line := range contextLines {
+					currentHunk.lines = append(currentHunk.lines, " "+line)
+					currentHunk.oldCount++
+					currentHunk.newCount++
+				}
+			}
+			oldLine += len(lines)
+			newLine += len(lines)
+
+		case diffmatchpatch.DiffDelete:
+			if currentHunk == nil {
+				// Start new hunk with up to 3 lines of previous context
+				currentHunk = &hunk{oldStart: oldLine, newStart: newLine}
+			}
+			for _, line := range lines {
+				currentHunk.lines = append(currentHunk.lines, colorRed+"-"+line+colorReset)
+				currentHunk.oldCount++
+			}
+			oldLine += len(lines)
+
+		case diffmatchpatch.DiffInsert:
+			if currentHunk == nil {
+				currentHunk = &hunk{oldStart: oldLine, newStart: newLine}
+			}
+			for _, line := range lines {
+				currentHunk.lines = append(currentHunk.lines, colorGreen+"+"+line+colorReset)
+				currentHunk.newCount++
+			}
+			newLine += len(lines)
+		}
+	}
+
+	// Flush last hunk
+	if currentHunk != nil {
+		hunks = append(hunks, *currentHunk)
+	}
+
+	// Print hunks
+	for _, h := range hunks {
+		// Print hunk header
+		fmt.Printf("%s@@ -%d,%d +%d,%d @@%s\n", colorCyan, h.oldStart, h.oldCount, h.newStart, h.newCount, colorReset)
+		for _, line := range h.lines {
 			fmt.Println(line)
 		}
+	}
+
+	// Handle edge case: no differences
+	if len(hunks) == 0 && len(beforeLines) != len(afterLines) {
+		// Fallback for edge cases
+		fmt.Printf("%s@@ -1,%d +1,%d @@%s\n", colorCyan, len(beforeLines), len(afterLines), colorReset)
 	}
 }
 
@@ -9977,6 +10641,182 @@ func fetchWorkspaceFromRemote(db *graph.DB, client *remote.Client, remoteName, w
 
 	fmt.Printf("  Created workspace: %s\n", wsName)
 	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(wsRef.Target)[:12])
+	fmt.Println("Fetch complete.")
+	return nil
+}
+
+func fetchReviewFromRemote(db *graph.DB, client *remote.Client, remoteName, reviewID string) error {
+	// Construct the review ref name
+	refName := "review." + reviewID
+
+	// Fetch the review ref
+	reviewRef, err := client.GetRef(refName)
+	if err != nil {
+		return fmt.Errorf("getting review ref: %w", err)
+	}
+	if reviewRef == nil {
+		return fmt.Errorf("review '%s' not found on remote", reviewID)
+	}
+
+	fmt.Printf("  Found review ref: %s -> %s\n", refName, hex.EncodeToString(reviewRef.Target)[:12])
+
+	// Fetch the review object
+	reviewContent, reviewKind, err := client.GetObject(reviewRef.Target)
+	if err != nil {
+		return fmt.Errorf("fetching review object: %w", err)
+	}
+	if reviewContent == nil {
+		return fmt.Errorf("review object not found on remote")
+	}
+	if reviewKind != "Review" {
+		return fmt.Errorf("expected Review, got %s", reviewKind)
+	}
+
+	var reviewPayload map[string]interface{}
+	if err := json.Unmarshal(reviewContent, &reviewPayload); err != nil {
+		return fmt.Errorf("parsing review payload: %w", err)
+	}
+
+	fmt.Printf("  Fetching review: %s\n", reviewPayload["title"])
+
+	// Extract target changeset to fetch
+	var objectsToFetch [][]byte
+	seenObjects := make(map[string]bool)
+
+	// Add target (changeset or workspace)
+	if targetHex, ok := reviewPayload["targetId"].(string); ok && targetHex != "" {
+		if targetID, err := util.HexToBytes(targetHex); err == nil {
+			objectsToFetch = append(objectsToFetch, targetID)
+			seenObjects[string(targetID)] = true
+		}
+	}
+
+	// Fetch the target and its dependencies (BFS)
+	fetchedCount := 0
+	for len(objectsToFetch) > 0 {
+		objID := objectsToFetch[0]
+		objectsToFetch = objectsToFetch[1:]
+
+		// Skip if already exists locally
+		exists, _ := db.HasNode(objID)
+		if exists {
+			continue
+		}
+
+		content, kind, err := client.GetObject(objID)
+		if err != nil {
+			fmt.Printf("  Warning: failed to fetch object %s: %v\n", hex.EncodeToString(objID)[:12], err)
+			continue
+		}
+		if content == nil {
+			fmt.Printf("  Warning: object %s not found on remote\n", hex.EncodeToString(objID)[:12])
+			continue
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(content, &payload); err != nil {
+			fmt.Printf("  Warning: failed to parse object %s: %v\n", hex.EncodeToString(objID)[:12], err)
+			continue
+		}
+
+		// Insert the node
+		tx, err := db.BeginTx()
+		if err != nil {
+			continue
+		}
+		_, err = db.InsertNode(tx, graph.NodeKind(kind), payload)
+		if err != nil {
+			tx.Rollback()
+			continue
+		}
+		tx.Commit()
+		fetchedCount++
+
+		// If this is a ChangeSet, queue its base/head snapshots
+		if kind == "ChangeSet" {
+			if baseHex, ok := payload["base"].(string); ok && baseHex != "" {
+				if baseID, err := util.HexToBytes(baseHex); err == nil {
+					if !seenObjects[string(baseID)] {
+						objectsToFetch = append(objectsToFetch, baseID)
+						seenObjects[string(baseID)] = true
+					}
+				}
+			}
+			if headHex, ok := payload["head"].(string); ok && headHex != "" {
+				if headID, err := util.HexToBytes(headHex); err == nil {
+					if !seenObjects[string(headID)] {
+						objectsToFetch = append(objectsToFetch, headID)
+						seenObjects[string(headID)] = true
+					}
+				}
+			}
+		}
+
+		// If this is a Snapshot, queue its files (via HAS edges on server, or payload)
+		// Snapshots store file references that may need to be fetched
+	}
+
+	if fetchedCount > 0 {
+		fmt.Printf("  Fetched %d object(s)\n", fetchedCount)
+	}
+
+	// Create the review locally
+	tx, err := db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Extract the original UUID from the payload
+	var revID []byte
+	if uuidHex, ok := reviewPayload["_uuid"].(string); ok && uuidHex != "" {
+		revID, err = util.HexToBytes(uuidHex)
+		if err != nil {
+			return fmt.Errorf("parsing review UUID: %w", err)
+		}
+		// Remove _uuid from payload - it was only for transport
+		delete(reviewPayload, "_uuid")
+	} else {
+		// Legacy fallback: generate new UUID
+		revID = make([]byte, 16)
+		if _, err := rand.Read(revID); err != nil {
+			return fmt.Errorf("generating review ID: %w", err)
+		}
+	}
+
+	// Insert review node
+	if err := db.InsertReview(tx, revID, reviewPayload); err != nil {
+		return fmt.Errorf("inserting review: %w", err)
+	}
+
+	// Create REVIEW_OF edge to target
+	if targetHex, ok := reviewPayload["targetId"].(string); ok && targetHex != "" {
+		if targetID, err := util.HexToBytes(targetHex); err == nil {
+			if err := db.InsertEdge(tx, revID, graph.EdgeReviewOf, targetID, nil); err != nil {
+				fmt.Printf("  Warning: failed to insert REVIEW_OF edge: %v\n", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	// Create local review ref
+	refMgr := ref.NewRefManager(db)
+	if err := refMgr.Set(refName, reviewRef.Target, ref.KindReview); err != nil {
+		return fmt.Errorf("setting local ref: %w", err)
+	}
+
+	// Also store remote tracking ref
+	remoteRefName := fmt.Sprintf("remote/%s/%s", remoteName, refName)
+	if err := refMgr.Set(remoteRefName, reviewRef.Target, ref.KindReview); err != nil {
+		fmt.Printf("  Warning: failed to set remote tracking ref: %v\n", err)
+	}
+
+	title, _ := reviewPayload["title"].(string)
+	fmt.Printf("  Created review: %s (%s)\n", hex.EncodeToString(revID)[:12], title)
+	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(reviewRef.Target)[:12])
 	fmt.Println("Fetch complete.")
 	return nil
 }

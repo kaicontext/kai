@@ -190,43 +190,49 @@ sudo ln -s /path/to/kai/kai-cli/kai /usr/local/bin/kai
 
 ## Quick Start
 
-### 2-Minute Value Path (Recommended)
+### The 4-Command Mental Model
 
-Get Kai's value in 7 simple commands:
+Kai's core workflow:
 
 ```bash
-# 1. Navigate to your project
-cd your-typescript-project
+kai capture        # Snapshot your code
+kai diff           # See what changed
+kai review open    # Commit & review
+kai ci plan        # Get selective test plan
+```
 
-# 2. Initialize Kai
+That's it. **Semantic commits + safe selective CI.**
+
+### Full Workflow Example
+
+```bash
+# 1. Navigate to your project and initialize
+cd your-project
 kai init
 
-# 3. Scan your project (creates baseline snapshot)
+# 2. Capture your project (creates baseline)
 kai capture
 
-# 4. Make some changes to your code...
+# 3. Make changes to your code...
 
-# 5. See what changed semantically
+# 4. See what changed semantically
 kai diff
 
-# 6. Scan again to capture your changes (updates working snapshot)
+# 5. Capture changes and open review
 kai capture
-
-# 7. Open a review (commits working snapshot, creates changeset)
 kai review open --title "Fix login bug"
 
-# 8. Preview CI impact (which tests to run)
+# 6. Preview CI impact (which tests to run)
 kai ci plan --explain
 
-# 9. Complete the review
-kai review view <id>        # View review details
-kai review approve <id>     # Approve the review
+# 7. Complete the review
+kai review approve <id>
 kai review close <id> --state merged
 ```
 
 That's it! You now have semantic diffs, change classification, and selective CI.
 
-**How snapshots work:** The first `kai capture` creates a baseline (`@snap:last`). Subsequent scans update a working snapshot (`@snap:working`) without creating garbage. When you `kai review open`, the working snapshot is committed as the new baseline. Old working snapshots are automatically cleaned up by `kai prune`.
+**How snapshots work:** The first `kai capture` creates a baseline (`@snap:last`). Subsequent captures update a working snapshot (`@snap:working`) without creating garbage. When you `kai review open`, the working snapshot is committed as the new baseline. Old working snapshots are automatically cleaned up by `kai prune`.
 
 Use `--explain` on any command to learn what concepts are involved:
 ```bash

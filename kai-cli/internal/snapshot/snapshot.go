@@ -272,8 +272,8 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		path, _ := fileNode.Payload["path"].(string)
 		lang, _ := fileNode.Payload["lang"].(string)
 
-		// Only process JS/TS files
-		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" {
+		// Only process supported languages
+		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" && lang != "go" && lang != "py" {
 			continue
 		}
 

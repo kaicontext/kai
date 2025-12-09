@@ -41,6 +41,10 @@ type GCOptions struct {
 
 	// DryRun computes plan without executing
 	DryRun bool
+
+	// Keep is a list of glob patterns for paths to preserve
+	// Nodes referencing files matching these patterns will not be deleted
+	Keep []string
 }
 
 // BuildGCPlan computes what would be deleted by garbage collection.
@@ -128,6 +132,27 @@ func (db *DB) BuildGCPlan(opts GCOptions) (*GCPlan, error) {
 			continue
 		}
 
+		// Check keep filters - if path matches any keep pattern, preserve node
+		if len(opts.Keep) > 0 {
+			if path, ok := node.Payload["path"].(string); ok && path != "" {
+				shouldKeep := false
+				for _, pattern := range opts.Keep {
+					if matched, _ := filepath.Match(pattern, path); matched {
+						shouldKeep = true
+						break
+					}
+					// Also try glob-style matching with ** support
+					if matchGlob(pattern, path) {
+						shouldKeep = true
+						break
+					}
+				}
+				if shouldKeep {
+					continue
+				}
+			}
+		}
+
 		plan.NodesToDelete = append(plan.NodesToDelete, node)
 
 		switch node.Kind {
@@ -211,15 +236,21 @@ func (db *DB) ExecuteGC(plan *GCPlan) error {
 
 // collectRoots gathers all root node IDs that should not be garbage collected.
 // Roots are:
-// - All ref targets
+// - Named refs (snap.*, cs.*, ws.*, review.*, remote/*)
 // - All workspace nodes (and their base/head snapshots)
+//
+// NOT roots (ephemeral movable pointers):
+// - snap.working (working directory snapshot, overwritten by each capture)
+// - snap.latest (convenience pointer to last committed snapshot)
 func (db *DB) collectRoots() (map[string]bool, error) {
 	roots := make(map[string]bool)
 
-	// 1. All ref targets EXCEPT snap.working (ephemeral working snapshot)
-	// snap.working is not a root because it's meant to be overwritten by each kai scan.
-	// This allows old working snapshots to be GC'd when replaced.
-	rows, err := db.Query(`SELECT target_id FROM refs WHERE name != 'snap.working'`)
+	// 1. All ref targets EXCEPT ephemeral movable pointers
+	// snap.working and snap.latest are not roots because:
+	// - snap.working is overwritten by each kai capture
+	// - snap.latest is a convenience pointer, not a named root
+	// Snapshots become roots when referenced by workspaces, reviews, or named refs (snap.main, etc.)
+	rows, err := db.Query(`SELECT target_id FROM refs WHERE name NOT IN ('snap.working', 'snap.latest')`)
 	if err != nil {
 		return nil, fmt.Errorf("querying refs: %w", err)
 	}
@@ -264,6 +295,15 @@ func (db *DB) collectRoots() (map[string]bool, error) {
 				}
 			}
 		}
+	}
+
+	// 3. All review nodes (reviews keep their targets alive)
+	reviews, err := db.GetNodesByKind(KindReview)
+	if err != nil {
+		return nil, fmt.Errorf("getting reviews: %w", err)
+	}
+	for _, review := range reviews {
+		roots[string(review.ID)] = true
 	}
 
 	return roots, nil
@@ -355,4 +395,58 @@ func hexToBytes(s string) ([]byte, error) {
 		b[i] = v
 	}
 	return b, nil
+}
+
+// matchGlob provides simple glob matching with ** support.
+// ** matches any number of path segments.
+func matchGlob(pattern, path string) bool {
+	// Handle ** patterns by converting to prefix/suffix matching
+	if pattern == "**" {
+		return true
+	}
+
+	// Handle prefix patterns like "src/**"
+	if len(pattern) > 3 && pattern[len(pattern)-3:] == "/**" {
+		prefix := pattern[:len(pattern)-3]
+		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+	}
+
+	// Handle suffix patterns like "**/*.js"
+	if len(pattern) > 3 && pattern[:3] == "**/" {
+		suffix := pattern[3:]
+		// Match if path ends with suffix or basename matches
+		if len(path) >= len(suffix) && path[len(path)-len(suffix):] == suffix {
+			return true
+		}
+		// Check if basename matches
+		base := filepath.Base(path)
+		if matched, _ := filepath.Match(suffix, base); matched {
+			return true
+		}
+	}
+
+	// Handle middle ** patterns like "src/**/test.js"
+	for i := 0; i < len(pattern)-2; i++ {
+		if pattern[i:i+3] == "/**" && i+3 < len(pattern) && pattern[i+3] == '/' {
+			prefix := pattern[:i]
+			suffix := pattern[i+4:]
+			if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
+				// Check if any suffix of the remaining path matches the suffix pattern
+				remaining := path[len(prefix):]
+				for j := 0; j < len(remaining); j++ {
+					if remaining[j] == '/' {
+						subpath := remaining[j+1:]
+						if matched, _ := filepath.Match(suffix, subpath); matched {
+							return true
+						}
+						if matchGlob(suffix, subpath) {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false
 }

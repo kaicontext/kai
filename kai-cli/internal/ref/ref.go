@@ -21,6 +21,7 @@ const (
 	KindSnapshot  Kind = "Snapshot"
 	KindChangeSet Kind = "ChangeSet"
 	KindWorkspace Kind = "Workspace"
+	KindReview    Kind = "Review"
 	KindFile      Kind = "File"
 	KindSymbol    Kind = "Symbol"
 	KindModule    Kind = "Module"
@@ -420,11 +421,33 @@ func (m *RefManager) ensureTables() {
 		)
 	`)
 	m.db.Exec(`CREATE INDEX IF NOT EXISTS refs_kind ON refs(target_kind)`)
+	// Ref log for auditability
+	m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS ref_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			old_target BLOB,
+			new_target BLOB NOT NULL,
+			actor TEXT,
+			moved_at INTEGER NOT NULL
+		)
+	`)
+	m.db.Exec(`CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name)`)
 }
 
 // Set creates or updates a ref.
 func (m *RefManager) Set(name string, targetID []byte, targetKind Kind) error {
+	return m.SetWithActor(name, targetID, targetKind, "")
+}
+
+// SetWithActor creates or updates a ref with actor attribution.
+func (m *RefManager) SetWithActor(name string, targetID []byte, targetKind Kind, actor string) error {
 	now := util.NowMs()
+
+	// Get old target for logging (may be nil for new refs)
+	var oldTarget []byte
+	m.db.QueryRow(`SELECT target_id FROM refs WHERE name = ?`, name).Scan(&oldTarget)
+
 	query := `
 		INSERT INTO refs (name, target_id, target_kind, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -434,6 +457,15 @@ func (m *RefManager) Set(name string, targetID []byte, targetKind Kind) error {
 			updated_at = excluded.updated_at
 	`
 	_, err := m.db.Exec(query, name, targetID, string(targetKind), now, now)
+	if err != nil {
+		return err
+	}
+
+	// Log the change for auditability
+	_, err = m.db.Exec(`
+		INSERT INTO ref_log (name, old_target, new_target, actor, moved_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, name, oldTarget, targetID, actor, now)
 	return err
 }
 

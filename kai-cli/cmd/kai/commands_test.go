@@ -627,15 +627,16 @@ func TestCommandsHaveGroups(t *testing.T) {
 	}
 
 	// Check key commands have group assignments
+	// Note: "workspace" and "plumbing" groups were merged into "advanced" to simplify PLG UX
 	groupedCommands := map[string]string{
-		"init":    "start",
-		"capture": "start",
+		"init":     "start",
+		"capture":  "start",
 		"diff":     "diff",
 		"review":   "diff",
-		"ws":       "workspace",
+		"ws":       "advanced", // Workspaces are advanced to reduce cognitive load
 		"ci":       "ci",
 		"push":     "remote",
-		"snapshot": "plumbing",
+		"snapshot": "advanced", // Plumbing commands are in advanced
 	}
 
 	for cmdName, expectedGroup := range groupedCommands {
@@ -674,5 +675,139 @@ func TestFlagsHaveDefaults(t *testing.T) {
 	flag = remoteSetCmd.Flags().Lookup("repo")
 	if flag != nil && flag.DefValue != "main" {
 		t.Errorf("remote set --repo should default to 'main', got %s", flag.DefValue)
+	}
+}
+
+// TestShowUnifiedDiff tests the pure Go unified diff implementation
+func TestShowUnifiedDiff(t *testing.T) {
+	tests := []struct {
+		name     string
+		before   string
+		after    string
+		wantAdd  bool
+		wantDel  bool
+	}{
+		{
+			name:    "single line addition",
+			before:  "line1\nline2\n",
+			after:   "line1\nline2\nline3\n",
+			wantAdd: true,
+			wantDel: false,
+		},
+		{
+			name:    "single line deletion",
+			before:  "line1\nline2\nline3\n",
+			after:   "line1\nline2\n",
+			wantAdd: false,
+			wantDel: true,
+		},
+		{
+			name:    "modification",
+			before:  "line1\nold\nline3\n",
+			after:   "line1\nnew\nline3\n",
+			wantAdd: true,
+			wantDel: true,
+		},
+		{
+			name:    "no change",
+			before:  "line1\nline2\n",
+			after:   "line1\nline2\n",
+			wantAdd: false,
+			wantDel: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Capture stdout
+			oldStdout := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			showUnifiedDiff(tt.before, tt.after)
+
+			w.Close()
+			os.Stdout = oldStdout
+
+			var buf bytes.Buffer
+			buf.ReadFrom(r)
+			output := buf.String()
+
+			hasAdd := strings.Contains(output, "+")
+			hasDel := strings.Contains(output, "-")
+
+			if tt.wantAdd && !hasAdd {
+				t.Errorf("expected additions in output, got: %s", output)
+			}
+			if tt.wantDel && !hasDel {
+				t.Errorf("expected deletions in output, got: %s", output)
+			}
+			if !tt.wantAdd && !tt.wantDel && len(output) > 0 {
+				// No changes expected, but some edge case output is OK
+			}
+		})
+	}
+}
+
+// TestCapturePromoteFlag verifies --promote flag exists on capture command
+func TestCapturePromoteFlag(t *testing.T) {
+	flag := captureCmd.Flags().Lookup("promote")
+	if flag == nil {
+		t.Fatal("capture command should have --promote flag")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--promote should default to false, got %s", flag.DefValue)
+	}
+}
+
+// TestReviewOpenBaseFlag verifies --base flag exists on review open command
+func TestReviewOpenBaseFlag(t *testing.T) {
+	flag := reviewOpenCmd.Flags().Lookup("base")
+	if flag == nil {
+		t.Fatal("review open command should have --base flag")
+	}
+	if flag.DefValue != "" {
+		t.Errorf("--base should default to empty, got %s", flag.DefValue)
+	}
+}
+
+// TestReviewOpenPromoteLastFlag verifies --promote-last flag exists on review open command
+func TestReviewOpenPromoteLastFlag(t *testing.T) {
+	flag := reviewOpenCmd.Flags().Lookup("promote-last")
+	if flag == nil {
+		t.Fatal("review open command should have --promote-last flag")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--promote-last should default to false, got %s", flag.DefValue)
+	}
+}
+
+// TestDiffForceFlag verifies --force flag exists on diff command
+func TestDiffForceFlag(t *testing.T) {
+	flag := diffCmd.Flags().Lookup("force")
+	if flag == nil {
+		t.Fatal("diff command should have --force flag")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--force should default to false, got %s", flag.DefValue)
+	}
+}
+
+// TestPruneYesFlag verifies --yes flag exists on prune command
+func TestPruneYesFlag(t *testing.T) {
+	flag := pruneCmd.Flags().Lookup("yes")
+	if flag == nil {
+		t.Fatal("prune command should have --yes flag")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--yes should default to false, got %s", flag.DefValue)
+	}
+}
+
+// TestPruneKeepFlag verifies --keep flag exists on prune command
+func TestPruneKeepFlag(t *testing.T) {
+	flag := pruneCmd.Flags().Lookup("keep")
+	if flag == nil {
+		t.Fatal("prune command should have --keep flag")
 	}
 }
