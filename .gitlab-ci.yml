@@ -20,6 +20,7 @@ variables:
   - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
 .gke_auth: &gke_auth
+  - gcloud components install kubectl gke-gcloud-auth-plugin --quiet
   - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
 
 # Test kai-cli (needs CGO for tree-sitter)
