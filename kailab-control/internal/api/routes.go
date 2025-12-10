@@ -151,19 +151,16 @@ func webConsoleFallback(next http.Handler) http.Handler {
 		if r.Method == http.MethodGet {
 			path := r.URL.Path
 
-			// Serve static assets directly
+			// Serve static assets directly (only from /_app/ directory)
 			if strings.HasPrefix(path, "/_app/") ||
 				strings.HasPrefix(path, "/favicon") ||
-				strings.HasSuffix(path, ".js") ||
-				strings.HasSuffix(path, ".css") ||
-				strings.HasSuffix(path, ".png") ||
-				strings.HasSuffix(path, ".svg") ||
-				strings.HasSuffix(path, ".ico") {
+				path == "/favicon.ico" {
 				webFileServer.ServeHTTP(w, r)
 				return
 			}
 
 			// For root or SPA routes that don't match API/proxy patterns, serve index.html
+			// This handles routes like /orgs/slug/repo/files/snap.latest/path/to/file.js
 			if path == "/" || (!strings.HasPrefix(path, "/api/") &&
 				!strings.HasPrefix(path, "/health") &&
 				!strings.HasPrefix(path, "/.well-known/") &&
