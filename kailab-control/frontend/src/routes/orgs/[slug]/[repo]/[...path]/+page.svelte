@@ -162,15 +162,40 @@
 		currentRepo.set($page.params.repo);
 	});
 
-	// Parse path segments: /orgs/[slug]/[repo]/[tab]/[snapshot]/[...filepath]
+	// Handle URL path changes (for browser back/forward, clicking reviews, etc.)
+	$effect(() => {
+		const { tab, changesetId } = parsePathSegments();
+
+		// Update active tab if it changed
+		if (['changes', 'workspaces', 'files', 'snapshots', 'setup', 'reviews'].includes(tab) && activeTab !== tab) {
+			activeTab = tab;
+		}
+
+		// Handle changeset selection from URL
+		if (tab === 'changes' && changesetId && refs.length > 0) {
+			const csRef = refs.find(r => r.name === `cs.${changesetId}` || r.name.startsWith(`cs.${changesetId}`));
+			if (csRef && selectedChangeset?.name !== csRef.name) {
+				selectedChangeset = csRef;
+				loadChangesetDiff(csRef);
+			}
+		} else if (tab === 'changes' && !changesetId && selectedChangeset) {
+			// Clear selection when navigating back to changes list
+			selectedChangeset = null;
+			changesetFiles = { added: [], removed: [], modified: [] };
+		}
+	});
+
+	// Parse path segments: /orgs/[slug]/[repo]/[tab]/[id]/[...rest]
 	// Examples:
 	//   /orgs/kailab/blog-engine → snapshots
+	//   /orgs/kailab/blog-engine/changes → changes tab, list view
+	//   /orgs/kailab/blog-engine/changes/abc123 → changes tab, changeset abc123 selected
 	//   /orgs/kailab/blog-engine/files/snap.latest → files tab, snap.latest selected
 	//   /orgs/kailab/blog-engine/files/snap.latest/src/index.js → files tab, snap.latest, src/index.js file
 	function parsePathSegments() {
 		const pathParam = $page.params.path;
 		if (!pathParam) {
-			return { tab: 'snapshots', snapshot: null, filePath: null };
+			return { tab: 'snapshots', snapshot: null, filePath: null, changesetId: null };
 		}
 
 		const segments = Array.isArray(pathParam) ? pathParam : pathParam.split('/');
@@ -179,10 +204,15 @@
 		if (tab === 'files' && segments.length > 1) {
 			const snapshot = segments[1];
 			const filePath = segments.length > 2 ? segments.slice(2).join('/') : null;
-			return { tab, snapshot, filePath };
+			return { tab, snapshot, filePath, changesetId: null };
 		}
 
-		return { tab, snapshot: null, filePath: null };
+		if (tab === 'changes' && segments.length > 1) {
+			const changesetId = segments[1];
+			return { tab, snapshot: null, filePath: null, changesetId };
+		}
+
+		return { tab, snapshot: null, filePath: null, changesetId: null };
 	}
 
 	// Build URL path for navigation
@@ -202,6 +232,12 @@
 		activeTab = tab;
 		const path = buildPath(tab, tab === 'files' ? selectedSnapshot : null);
 		goto(path, { replaceState: true });
+
+		// Clear selected changeset when going back to changes list
+		if (tab === 'changes') {
+			selectedChangeset = null;
+			changesetFiles = { added: [], removed: [], modified: [] };
+		}
 
 		// Auto-load files and select README when switching to files tab
 		if (tab === 'files' && selectedSnapshot && files.length === 0) {
@@ -307,10 +343,10 @@
 			return;
 		}
 
-		const { tab, snapshot, filePath } = parsePathSegments();
+		const { tab, snapshot, filePath, changesetId } = parsePathSegments();
 		const lineSelection = parseLineHash();
 
-		if (['changes', 'workspaces', 'files', 'snapshots', 'setup'].includes(tab)) {
+		if (['changes', 'workspaces', 'files', 'snapshots', 'setup', 'reviews'].includes(tab)) {
 			activeTab = tab;
 		}
 		if (snapshot) {
@@ -322,6 +358,20 @@
 
 		// Load changeset payloads to get intents
 		await loadChangesetPayloads();
+
+		// If URL has changeset ID, select it
+		if (changesetId && activeTab === 'changes') {
+			const csRef = refs.find(r => r.name === `cs.${changesetId}` || r.name.startsWith(`cs.${changesetId}`));
+			if (csRef) {
+				selectedChangeset = csRef;
+				await loadChangesetDiff(csRef);
+			}
+		}
+
+		// If on reviews tab, load reviews
+		if (activeTab === 'reviews') {
+			await loadReviews();
+		}
 
 		// If URL had snapshot, load files
 		if (snapshot && activeTab === 'files') {
