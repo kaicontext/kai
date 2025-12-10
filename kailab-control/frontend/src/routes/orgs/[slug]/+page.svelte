@@ -25,9 +25,17 @@
 		await loadRepos();
 	});
 
+	let error = $state(null);
+
 	async function loadRepos() {
 		loading = true;
+		error = null;
 		const data = await api('GET', `/api/v1/orgs/${$page.params.slug}/repos`);
+		if (data.error) {
+			error = data.error;
+			loading = false;
+			return;
+		}
 		repos = data.repos || [];
 		loading = false;
 	}
@@ -63,6 +71,13 @@
 
 	{#if loading}
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
+	{:else if error}
+		<div class="card text-center py-12">
+			<div class="text-5xl mb-4">🔒</div>
+			<p class="text-kai-text-muted mb-2">Organization not found or access denied</p>
+			<p class="text-sm text-kai-text-muted mb-4">{error}</p>
+			<a href="/" class="btn btn-primary">Go Home</a>
+		</div>
 	{:else if repos.length === 0}
 		<div class="card text-center py-12">
 			<div class="text-5xl mb-4">📦</div>
