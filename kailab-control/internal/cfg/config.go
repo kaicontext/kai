@@ -48,7 +48,7 @@ func FromEnv() *Config {
 		AccessTokenTTL:  getEnvDuration("KLC_ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL: getEnvDuration("KLC_REFRESH_TOKEN_TTL", 7*24*time.Hour),
 		MagicLinkTTL:    getEnvDuration("KLC_MAGIC_LINK_TTL", 15*time.Minute),
-		MagicLinkFrom:   getEnv("KLC_MAGICLINK_FROM", "noreply@1medium.ai"),
+		MagicLinkFrom:   getEnv("KLC_MAGICLINK_FROM", "notifications@1medium.ai"),
 		PostmarkToken:   getEnv("KLC_POSTMARK_TOKEN", ""),
 		BaseURL:         getEnv("KLC_BASE_URL", "http://localhost:8080"),
 		Debug:           getEnvBool("KLC_DEBUG", false),
