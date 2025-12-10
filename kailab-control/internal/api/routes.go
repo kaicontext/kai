@@ -46,27 +46,7 @@ func NewRouter(h *Handler) http.Handler {
 
 	// Data plane proxy: /{org}/{repo}/v1/*
 	// This handles all kailabd passthrough requests
-	// Must be registered before the web console to avoid pattern conflicts
 	mux.Handle("/{org}/{repo}/v1/", h.ProxyHandler())
-
-	// Web console - serve SvelteKit static files
-	webFileServer := http.FileServer(getWebFS())
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		// Serve static assets directly
-		if strings.HasPrefix(r.URL.Path, "/_app/") ||
-		   strings.HasPrefix(r.URL.Path, "/favicon") ||
-		   strings.HasSuffix(r.URL.Path, ".js") ||
-		   strings.HasSuffix(r.URL.Path, ".css") ||
-		   strings.HasSuffix(r.URL.Path, ".png") ||
-		   strings.HasSuffix(r.URL.Path, ".svg") ||
-		   strings.HasSuffix(r.URL.Path, ".ico") {
-			webFileServer.ServeHTTP(w, r)
-			return
-		}
-		// For all other routes, serve index.html (SPA routing)
-		r.URL.Path = "/"
-		webFileServer.ServeHTTP(w, r)
-	})
 
 	// Health
 	mux.HandleFunc("GET /health", h.Health)
@@ -147,7 +127,45 @@ func NewRouter(h *Handler) http.Handler {
 	mux.Handle("POST /api/v1/tokens", h.WithAuth(http.HandlerFunc(h.CreateToken)))
 	mux.Handle("DELETE /api/v1/tokens/{id}", h.WithAuth(http.HandlerFunc(h.DeleteToken)))
 
-	return mux
+	// Wrap mux with web console fallback
+	return webConsoleFallback(mux)
+}
+
+// webConsoleFallback wraps a handler and serves the web console for unmatched GET requests
+func webConsoleFallback(next http.Handler) http.Handler {
+	webFileServer := http.FileServer(getWebFS())
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if this is a request for static assets or SPA routes
+		if r.Method == http.MethodGet {
+			path := r.URL.Path
+
+			// Serve static assets directly
+			if strings.HasPrefix(path, "/_app/") ||
+				strings.HasPrefix(path, "/favicon") ||
+				strings.HasSuffix(path, ".js") ||
+				strings.HasSuffix(path, ".css") ||
+				strings.HasSuffix(path, ".png") ||
+				strings.HasSuffix(path, ".svg") ||
+				strings.HasSuffix(path, ".ico") {
+				webFileServer.ServeHTTP(w, r)
+				return
+			}
+
+			// For root or SPA routes that don't match API/proxy patterns, serve index.html
+			if path == "/" || (!strings.HasPrefix(path, "/api/") &&
+				!strings.HasPrefix(path, "/health") &&
+				!strings.HasPrefix(path, "/.well-known/") &&
+				!strings.Contains(path, "/v1/")) {
+				r.URL.Path = "/"
+				webFileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// Otherwise, pass to the main mux
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ----- Health -----
