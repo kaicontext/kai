@@ -22,29 +22,35 @@ variables:
 .gke_auth: &gke_auth
   - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
 
-# Test kai-cli
+# Test kai-cli (needs CGO for tree-sitter)
 test:kai-cli:
   stage: test
   image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev
   script:
     - cd kai-cli
-    - go test ./...
+    - CGO_ENABLED=1 go test ./...
 
-# Test kai-core
+# Test kai-core (needs CGO for tree-sitter)
 test:kai-core:
   stage: test
   image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev
   script:
     - cd kai-core
-    - go test ./...
+    - CGO_ENABLED=1 go test ./...
 
-# Test kailab
+# Test kailab (needs CGO for sqlite)
 test:kailab:
   stage: test
   image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev
   script:
     - cd kailab
-    - go test ./...
+    - CGO_ENABLED=1 go test ./...
 
 # Test kailab-control
 test:kailab-control:
