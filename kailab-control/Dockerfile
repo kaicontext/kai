@@ -47,10 +47,5 @@ RUN mkdir -p /data
 # Expose port
 EXPOSE 8080
 
-# Set environment variables
-ENV KAILAB_CONTROL_LISTEN=:8080
-ENV KAILAB_CONTROL_DB=/data/kailab-control.db
-
-# Run the server
+# Run the server (config via env vars: KLC_LISTEN, KLC_DB_URL, etc.)
 ENTRYPOINT ["./kailab-control"]
-CMD ["--listen=:8080", "--db=/data/kailab-control.db"]
