@@ -255,7 +255,7 @@ set -e
 
 INSTALL_DIR="${KAI_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${KAI_VERSION:-latest}"
-BASE_URL="https://gitlab.com/api/v4/projects/preplan%2Fkai/packages/generic/kai-cli/${VERSION}"
+BASE_URL="https://gitlab.com/api/v4/projects/rite-day%2Fivcs/packages/generic/kai-cli/${VERSION}"
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -287,29 +287,48 @@ echo ""
 TMP_DIR=$(mktemp -d)
 trap "rm -rf $TMP_DIR" EXIT
 
-# Download and extract
+# Try to download binary
+DOWNLOAD_OK=0
 if command -v curl > /dev/null; then
-    curl -fsSL "$URL" -o "$TMP_DIR/kai.gz"
+    if curl -fsSL "$URL" -o "$TMP_DIR/kai.gz" 2>/dev/null; then
+        DOWNLOAD_OK=1
+    fi
 elif command -v wget > /dev/null; then
-    wget -q "$URL" -O "$TMP_DIR/kai.gz"
-else
-    echo "Error: curl or wget required"
-    exit 1
+    if wget -q "$URL" -O "$TMP_DIR/kai.gz" 2>/dev/null; then
+        DOWNLOAD_OK=1
+    fi
 fi
 
-gzip -d "$TMP_DIR/kai.gz"
-chmod +x "$TMP_DIR/kai"
+if [ "$DOWNLOAD_OK" = "1" ]; then
+    gzip -d "$TMP_DIR/kai.gz"
+    chmod +x "$TMP_DIR/kai"
 
-# Install
-if [ -w "$INSTALL_DIR" ]; then
-    mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+    # Install
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+    else
+        echo "Installing to $INSTALL_DIR (requires sudo)..."
+        sudo mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+    fi
+
+    echo ""
+    echo "Kai CLI installed successfully!"
 else
-    echo "Installing to $INSTALL_DIR (requires sudo)..."
-    sudo mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+    # Fallback to go install
+    echo "Pre-built binary not available for ${OS}/${ARCH}."
+    echo ""
+    if command -v go > /dev/null; then
+        echo "Installing via 'go install'..."
+        CGO_ENABLED=1 go install gitlab.com/rite-day/ivcs/kai-cli/cmd/kai@latest
+        echo ""
+        echo "Kai CLI installed successfully!"
+    else
+        echo "Please install using Go:"
+        echo "  go install gitlab.com/rite-day/ivcs/kai-cli/cmd/kai@latest"
+        exit 1
+    fi
 fi
 
-echo ""
-echo "Kai CLI installed successfully!"
 echo ""
 echo "Get started:"
 echo "  kai init              # Initialize in a project"
