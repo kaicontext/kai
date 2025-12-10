@@ -102,6 +102,29 @@
 	let reviews = $state([]);
 	let reviewsLoading = $state(false);
 
+	// Map changeset target IDs to their reviews (for showing review UI in changeset view)
+	let changesetToReview = $derived(() => {
+		const map = {};
+		for (const review of reviews) {
+			if (review.targetKind === 'ChangeSet' && review.targetId) {
+				map[review.targetId] = review;
+			}
+		}
+		return map;
+	});
+
+	// Get review for selected changeset (if any)
+	let selectedChangesetReview = $derived(() => {
+		if (!selectedChangeset?.target) return null;
+		try {
+			const bytes = atob(selectedChangeset.target);
+			const hex = Array.from(bytes, b => b.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+			return changesetToReview()[hex] || null;
+		} catch {
+			return null;
+		}
+	});
+
 	// File type detection
 	const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tiff', '.tif'];
 	const svgExtension = '.svg';
@@ -364,6 +387,9 @@
 		// Load changeset payloads to get intents
 		await loadChangesetPayloads();
 
+		// Load reviews to show review info on changesets
+		await loadReviews();
+
 		// If URL has changeset ID, select it
 		if (changesetId && activeTab === 'changes') {
 			const csRef = refs.find(r => r.name === `cs.${changesetId}` || r.name.startsWith(`cs.${changesetId}`));
@@ -371,11 +397,6 @@
 				selectedChangeset = csRef;
 				await loadChangesetDiff(csRef);
 			}
-		}
-
-		// If on reviews tab, load reviews
-		if (activeTab === 'reviews') {
-			await loadReviews();
 		}
 
 		// If URL had snapshot, load files
@@ -447,6 +468,22 @@
 			const csId = review.targetId.substring(0, 12);
 			goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${csId}`, { replaceState: false });
 		}
+	}
+
+	// Update review state
+	let reviewUpdating = $state(false);
+	async function updateReviewState(reviewId, newState) {
+		reviewUpdating = true;
+		try {
+			const result = await api('POST', `/${$page.params.slug}/${$page.params.repo}/v1/reviews/${reviewId}/state`, { state: newState });
+			if (result.success) {
+				// Reload reviews to get updated state
+				await loadReviews();
+			}
+		} catch (err) {
+			console.error('Failed to update review state:', err);
+		}
+		reviewUpdating = false;
 	}
 
 	// Load changeset payloads to get intents
@@ -1023,6 +1060,81 @@ kai push origin snap.latest</pre>
 							</div>
 							<span class="text-sm text-kai-text-muted">{formatDate(selectedChangeset.updatedAt)}</span>
 						</div>
+
+						<!-- Review Banner (if this changeset is part of a review) -->
+						{#if selectedChangesetReview()}
+							<div class="bg-kai-bg-tertiary border-b border-kai-border px-4 py-3">
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-3">
+										<svg class="w-5 h-5 text-kai-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+										</svg>
+										<div>
+											<span class="font-semibold text-kai-text">{selectedChangesetReview().title || 'Untitled Review'}</span>
+											<span class="ml-2 px-2 py-0.5 rounded text-xs font-medium
+												{selectedChangesetReview().state === 'draft' ? 'bg-gray-600 text-gray-200' : ''}
+												{selectedChangesetReview().state === 'open' ? 'bg-blue-600 text-blue-100' : ''}
+												{selectedChangesetReview().state === 'approved' ? 'bg-green-600 text-green-100' : ''}
+												{selectedChangesetReview().state === 'changes_requested' ? 'bg-orange-600 text-orange-100' : ''}
+												{selectedChangesetReview().state === 'merged' ? 'bg-purple-600 text-purple-100' : ''}
+												{selectedChangesetReview().state === 'abandoned' ? 'bg-red-600 text-red-100' : ''}
+											">{selectedChangesetReview().state}</span>
+										</div>
+									</div>
+									<div class="flex items-center gap-2">
+										{#if reviewUpdating}
+											<span class="text-sm text-kai-text-muted">Updating...</span>
+										{:else}
+											{#if selectedChangesetReview().state === 'draft'}
+												<button
+													class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'open')}
+												>Open for Review</button>
+											{/if}
+											{#if selectedChangesetReview().state === 'open'}
+												<button
+													class="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'approved')}
+												>Approve</button>
+												<button
+													class="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'changes_requested')}
+												>Request Changes</button>
+											{/if}
+											{#if selectedChangesetReview().state === 'approved'}
+												<button
+													class="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'merged')}
+												>Merge</button>
+												<button
+													class="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'abandoned')}
+												>Abandon</button>
+											{/if}
+											{#if selectedChangesetReview().state === 'changes_requested'}
+												<button
+													class="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'approved')}
+												>Approve</button>
+												<button
+													class="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'abandoned')}
+												>Abandon</button>
+											{/if}
+										{/if}
+									</div>
+								</div>
+								{#if selectedChangesetReview().description}
+									<p class="mt-2 text-sm text-kai-text-muted">{selectedChangesetReview().description}</p>
+								{/if}
+								<div class="mt-2 text-xs text-kai-text-muted">
+									by {selectedChangesetReview().author || 'unknown'}
+									{#if selectedChangesetReview().reviewers && selectedChangesetReview().reviewers.length > 0}
+										· Reviewers: {selectedChangesetReview().reviewers.join(', ')}
+									{/if}
+								</div>
+							</div>
+						{/if}
 
 						<div class="p-4">
 							<!-- Intent and metadata -->

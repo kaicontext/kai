@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"kai-core/cas"
 	"kailab/config"
 	"kailab/pack"
 	"kailab/proto"
@@ -78,6 +79,7 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 
 	// Reviews
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews)))
+	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState)))
 
 	return mux
 }
@@ -1236,6 +1238,149 @@ func (h *Handler) ListReviews(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, proto.ReviewsListResponse{Reviews: reviews})
+}
+
+func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	reviewID := r.PathValue("id")
+	if reviewID == "" {
+		writeError(w, http.StatusBadRequest, "review id required", nil)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Validate state
+	validStates := map[string]bool{
+		"draft": true, "open": true, "approved": true,
+		"changes_requested": true, "merged": true, "abandoned": true,
+	}
+	if !validStates[req.State] {
+		writeError(w, http.StatusBadRequest, "invalid state", nil)
+		return
+	}
+
+	// Find review ref
+	refName := "review." + reviewID
+	ref, err := store.GetRef(rh.DB, refName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "review not found", err)
+		return
+	}
+
+	// Get review object
+	content, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get review", err)
+		return
+	}
+	if kind != "Review" {
+		writeError(w, http.StatusBadRequest, "not a review object", nil)
+		return
+	}
+
+	// Parse existing payload
+	reviewJSON := content
+	if idx := indexOf(content, '\n'); idx >= 0 {
+		reviewJSON = content[idx+1:]
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(reviewJSON, &payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse review", err)
+		return
+	}
+
+	// Update state and timestamp
+	payload["state"] = req.State
+	payload["updatedAt"] = float64(time.Now().UnixMilli())
+
+	// Create new review object content
+	newPayloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to serialize review", err)
+		return
+	}
+	newContent := append([]byte("Review\n"), newPayloadJSON...)
+
+	// Build pack with the single object
+	packData, err := pack.BuildPack([]pack.PackObject{{
+		Digest:  nil, // Will be computed by BuildPack
+		Kind:    "Review",
+		Content: newContent,
+	}})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build pack", err)
+		return
+	}
+
+	// Compute segment checksum
+	segmentChecksum := computeBlake3(packData)
+
+	// Compute object digest
+	newDigest := computeBlake3(newContent)
+
+	// Store in transaction
+	tx, err := rh.DB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// Insert segment
+	segmentID, err := store.InsertSegmentTx(tx, segmentChecksum, packData)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store segment", err)
+		return
+	}
+
+	// Insert object index (offset 0 after header, which BuildPack handles)
+	// For a single-object pack, the object starts right after the header
+	// The header is: 4 bytes length + JSON header
+	// But we stored the whole pack, so we need to compute the offset
+	// Actually, simpler: just store the object content directly with offset 0
+	err = store.InsertObjectTx(tx, newDigest, segmentID, 0, int64(len(newContent)), "Review")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to index object", err)
+		return
+	}
+
+	// Update ref
+	err = store.ForceSetRef(rh.DB, tx, refName, newDigest, "", "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update ref", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"state":   req.State,
+	})
+}
+
+// computeBlake3 computes blake3 hash of data
+func computeBlake3(data []byte) []byte {
+	h := cas.NewBlake3Hasher()
+	h.Write(data)
+	return h.Sum(nil)
 }
 
 // Helper type for unused import
