@@ -196,19 +196,28 @@ type RefreshTokenRequest struct {
 }
 
 func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", err)
-		return
+	var refreshToken string
+
+	// Try to get refresh token from cookie first
+	if cookie, err := r.Cookie(refreshTokenCookie); err == nil && cookie.Value != "" {
+		refreshToken = cookie.Value
+	} else {
+		// Fall back to JSON body
+		var req RefreshTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body", err)
+			return
+		}
+		refreshToken = req.RefreshToken
 	}
 
-	if req.RefreshToken == "" {
+	if refreshToken == "" {
 		writeError(w, http.StatusBadRequest, "refresh_token required", nil)
 		return
 	}
 
 	// Look up session
-	refreshHash := auth.HashToken(req.RefreshToken)
+	refreshHash := auth.HashToken(refreshToken)
 	session, err := h.db.GetSessionByRefreshHash(refreshHash)
 	if err != nil {
 		if err == db.ErrNotFound {
