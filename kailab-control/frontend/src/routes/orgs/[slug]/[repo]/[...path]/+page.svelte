@@ -81,6 +81,11 @@
 	let changesetFiles = $state({ added: [], removed: [], modified: [] });  // Files changed in selected changeset
 	let changesetFilesLoading = $state(false);
 
+	// Diff view state (for changeset file diffs)
+	let selectedDiffFile = $state(null);  // { path, status }
+	let fileDiffData = $state(null);      // API response with hunks
+	let fileDiffLoading = $state(false);
+
 	// Files tab state
 	let selectedSnapshot = $state('');
 	let files = $state([]);
@@ -547,9 +552,39 @@
 	// Close changeset detail view
 	function closeChangesetDetail() {
 		selectedChangeset = null;
+		selectedDiffFile = null;
+		fileDiffData = null;
 		changesetFiles = { added: [], removed: [], modified: [] };
 		// Go back to changes list
 		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes`, { replaceState: false, noScroll: true });
+	}
+
+	// Load diff for a specific file in changeset
+	async function loadFileDiff(path, status) {
+		fileDiffLoading = true;
+		selectedDiffFile = { path, status };
+		fileDiffData = null;
+
+		try {
+			const payload = changesetPayloads[selectedChangeset.name];
+			if (!payload) {
+				fileDiffLoading = false;
+				return;
+			}
+
+			const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/diff/${payload.base}/${payload.head}?path=${encodeURIComponent(path)}`);
+			fileDiffData = data;
+		} catch (err) {
+			console.error('Failed to load diff:', err);
+		}
+
+		fileDiffLoading = false;
+	}
+
+	// Close file diff view and return to file list
+	function closeFileDiff() {
+		selectedDiffFile = null;
+		fileDiffData = null;
 	}
 
 	async function deleteRepo() {
@@ -1013,39 +1048,108 @@ kai push origin snap.latest</pre>
 									</div>
 								{:else}
 									<div class="space-y-3">
-										<div class="text-sm text-kai-text-muted">
-											{totalFiles} file{totalFiles !== 1 ? 's' : ''} changed
-											{#if changesetFiles.added.length > 0}
-												<span class="text-green-400 ml-2">+{changesetFiles.added.length} added</span>
-											{/if}
-											{#if changesetFiles.modified.length > 0}
-												<span class="text-yellow-400 ml-2">~{changesetFiles.modified.length} modified</span>
-											{/if}
-											{#if changesetFiles.removed.length > 0}
-												<span class="text-red-400 ml-2">-{changesetFiles.removed.length} removed</span>
-											{/if}
-										</div>
+										{#if selectedDiffFile}
+											<!-- Diff View -->
+											<div>
+												<button
+													onclick={closeFileDiff}
+													class="flex items-center gap-2 text-sm text-kai-text-muted hover:text-kai-text mb-4"
+												>
+													<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+														<path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+													</svg>
+													Back to file list
+												</button>
+												<div class="flex items-center gap-2 mb-4">
+													<span class="{selectedDiffFile.status === 'added' ? 'text-green-400' : selectedDiffFile.status === 'removed' ? 'text-red-400' : 'text-yellow-400'} font-mono">
+														{selectedDiffFile.status === 'added' ? '+' : selectedDiffFile.status === 'removed' ? '-' : '~'}
+													</span>
+													<span class="font-mono text-kai-text">{selectedDiffFile.path}</span>
+													<span class="text-kai-text-muted text-sm">({selectedDiffFile.status})</span>
+												</div>
+												{#if fileDiffLoading}
+													<div class="text-center py-8 text-kai-text-muted">Loading diff...</div>
+												{:else if fileDiffData && fileDiffData.hunks && fileDiffData.hunks.length > 0}
+													<div class="border border-kai-border rounded-md overflow-hidden bg-kai-bg">
+														{#each fileDiffData.hunks as hunk, hunkIdx}
+															<div class="border-b border-kai-border bg-kai-bg-secondary px-3 py-1 text-xs text-kai-text-muted font-mono">
+																@@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
+															</div>
+															<div class="font-mono text-sm">
+																{#each hunk.lines as line}
+																	<div class="flex {line.type === 'add' ? 'bg-green-900/30' : line.type === 'delete' ? 'bg-red-900/30' : ''}">
+																		<span class="w-12 text-right pr-2 text-kai-text-muted select-none border-r border-kai-border text-xs py-0.5">
+																			{line.oldLine || ''}
+																		</span>
+																		<span class="w-12 text-right pr-2 text-kai-text-muted select-none border-r border-kai-border text-xs py-0.5">
+																			{line.newLine || ''}
+																		</span>
+																		<span class="w-6 text-center select-none {line.type === 'add' ? 'text-green-400' : line.type === 'delete' ? 'text-red-400' : 'text-kai-text-muted'}">
+																			{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
+																		</span>
+																		<span class="flex-1 px-2 py-0.5 whitespace-pre {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text'}">{line.content}</span>
+																	</div>
+																{/each}
+															</div>
+														{/each}
+													</div>
+												{:else}
+													<div class="text-center py-8 text-kai-text-muted">
+														{#if selectedDiffFile.status === 'added'}
+															<p>New file - view in Files tab</p>
+														{:else if selectedDiffFile.status === 'removed'}
+															<p>File deleted</p>
+														{:else}
+															<p>No differences found</p>
+														{/if}
+													</div>
+												{/if}
+											</div>
+										{:else}
+											<!-- File List View -->
+											<div class="text-sm text-kai-text-muted">
+												{totalFiles} file{totalFiles !== 1 ? 's' : ''} changed
+												{#if changesetFiles.added.length > 0}
+													<span class="text-green-400 ml-2">+{changesetFiles.added.length} added</span>
+												{/if}
+												{#if changesetFiles.modified.length > 0}
+													<span class="text-yellow-400 ml-2">~{changesetFiles.modified.length} modified</span>
+												{/if}
+												{#if changesetFiles.removed.length > 0}
+													<span class="text-red-400 ml-2">-{changesetFiles.removed.length} removed</span>
+												{/if}
+											</div>
 
-										<div class="space-y-1">
-											{#each changesetFiles.added as file}
-												<div class="flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary">
-													<span class="text-green-400 font-mono w-4">+</span>
-													<span class="text-kai-text font-mono">{file.path}</span>
-												</div>
-											{/each}
-											{#each changesetFiles.modified as file}
-												<div class="flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary">
-													<span class="text-yellow-400 font-mono w-4">~</span>
-													<span class="text-kai-text font-mono">{file.path}</span>
-												</div>
-											{/each}
-											{#each changesetFiles.removed as file}
-												<div class="flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary">
-													<span class="text-red-400 font-mono w-4">-</span>
-													<span class="text-kai-text font-mono">{file.path}</span>
-												</div>
-											{/each}
-										</div>
+											<div class="space-y-1">
+												{#each changesetFiles.added as file}
+													<button
+														onclick={() => loadFileDiff(file.path, 'added')}
+														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
+													>
+														<span class="text-green-400 font-mono w-4">+</span>
+														<span class="text-kai-text font-mono">{file.path}</span>
+													</button>
+												{/each}
+												{#each changesetFiles.modified as file}
+													<button
+														onclick={() => loadFileDiff(file.path, 'modified')}
+														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
+													>
+														<span class="text-yellow-400 font-mono w-4">~</span>
+														<span class="text-kai-text font-mono">{file.path}</span>
+													</button>
+												{/each}
+												{#each changesetFiles.removed as file}
+													<button
+														onclick={() => loadFileDiff(file.path, 'removed')}
+														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
+													>
+														<span class="text-red-400 font-mono w-4">-</span>
+														<span class="text-kai-text font-mono">{file.path}</span>
+													</button>
+												{/each}
+											</div>
+										{/if}
 									</div>
 								{/if}
 							{/if}

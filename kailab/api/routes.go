@@ -73,6 +73,9 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
 	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent)))
 
+	// Diff
+	mux.Handle("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withRepo(http.HandlerFunc(h.GetFileDiff)))
+
 	// Reviews
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews)))
 
@@ -847,6 +850,260 @@ func isHexString(s string) bool {
 		}
 	}
 	return true
+}
+
+// ----- Diff -----
+
+func (h *Handler) GetFileDiff(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	baseHex := r.PathValue("base")
+	headHex := r.PathValue("head")
+	filePath := r.URL.Query().Get("path")
+
+	if filePath == "" {
+		writeError(w, http.StatusBadRequest, "path query parameter required", nil)
+		return
+	}
+
+	// Fetch content from both snapshots
+	baseContent, err := h.getFileContentFromSnapshot(rh.DB, baseHex, filePath)
+	if err != nil && err != store.ErrObjectNotFound {
+		writeError(w, http.StatusInternalServerError, "failed to get base content", err)
+		return
+	}
+
+	headContent, err := h.getFileContentFromSnapshot(rh.DB, headHex, filePath)
+	if err != nil && err != store.ErrObjectNotFound {
+		writeError(w, http.StatusInternalServerError, "failed to get head content", err)
+		return
+	}
+
+	// Compute diff
+	hunks := computeUnifiedDiff(baseContent, headContent)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path":  filePath,
+		"hunks": hunks,
+	})
+}
+
+func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath string) (string, error) {
+	snapshotID, err := hex.DecodeString(snapshotHex)
+	if err != nil {
+		return "", err
+	}
+
+	// Get snapshot object
+	content, kind, err := pack.ExtractObjectFromDB(db, snapshotID)
+	if err != nil {
+		return "", err
+	}
+	if kind != "Snapshot" {
+		return "", fmt.Errorf("not a snapshot")
+	}
+
+	// Parse snapshot to get files
+	snapshotJSON := content
+	if idx := indexOf(content, '\n'); idx >= 0 {
+		snapshotJSON = content[idx+1:]
+	}
+
+	var snapshot struct {
+		Files []struct {
+			Path          string `json:"path"`
+			Digest        string `json:"digest"`
+			ContentDigest string `json:"contentDigest"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(snapshotJSON, &snapshot); err != nil {
+		return "", err
+	}
+
+	// Find the file
+	var contentDigestHex string
+	for _, f := range snapshot.Files {
+		if f.Path == filePath {
+			contentDigestHex = f.ContentDigest
+			if contentDigestHex == "" {
+				contentDigestHex = f.Digest
+			}
+			break
+		}
+	}
+	if contentDigestHex == "" {
+		return "", store.ErrObjectNotFound
+	}
+
+	// Fetch content
+	contentDigest, err := hex.DecodeString(contentDigestHex)
+	if err != nil {
+		return "", err
+	}
+
+	fileContent, _, err := pack.ExtractObjectFromDB(db, contentDigest)
+	if err != nil {
+		return "", err
+	}
+
+	return string(fileContent), nil
+}
+
+// DiffLine represents a single line in the diff
+type DiffLine struct {
+	Type    string `json:"type"`    // "context", "add", "delete"
+	Content string `json:"content"` // line content without newline
+	OldLine int    `json:"oldLine,omitempty"`
+	NewLine int    `json:"newLine,omitempty"`
+}
+
+// DiffHunk represents a section of changes
+type DiffHunk struct {
+	OldStart int        `json:"oldStart"`
+	OldLines int        `json:"oldLines"`
+	NewStart int        `json:"newStart"`
+	NewLines int        `json:"newLines"`
+	Lines    []DiffLine `json:"lines"`
+}
+
+func computeUnifiedDiff(oldText, newText string) []DiffHunk {
+	oldLines := strings.Split(oldText, "\n")
+	newLines := strings.Split(newText, "\n")
+
+	// Use Myers diff algorithm (simplified LCS-based approach)
+	lcs := longestCommonSubsequence(oldLines, newLines)
+
+	var hunks []DiffHunk
+	var currentHunk *DiffHunk
+
+	oldIdx, newIdx, lcsIdx := 0, 0, 0
+	contextLines := 3
+
+	for oldIdx < len(oldLines) || newIdx < len(newLines) {
+		// Check if current lines match LCS
+		oldMatch := lcsIdx < len(lcs) && oldIdx < len(oldLines) && oldLines[oldIdx] == lcs[lcsIdx]
+		newMatch := lcsIdx < len(lcs) && newIdx < len(newLines) && newLines[newIdx] == lcs[lcsIdx]
+
+		if oldMatch && newMatch {
+			// Context line
+			if currentHunk != nil {
+				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+					Type:    "context",
+					Content: oldLines[oldIdx],
+					OldLine: oldIdx + 1,
+					NewLine: newIdx + 1,
+				})
+				currentHunk.OldLines++
+				currentHunk.NewLines++
+			}
+			oldIdx++
+			newIdx++
+			lcsIdx++
+		} else if !oldMatch && oldIdx < len(oldLines) && (lcsIdx >= len(lcs) || oldLines[oldIdx] != lcs[lcsIdx]) {
+			// Deletion
+			if currentHunk == nil {
+				currentHunk = &DiffHunk{
+					OldStart: max(1, oldIdx+1-contextLines),
+					NewStart: max(1, newIdx+1-contextLines),
+				}
+				// Add leading context
+				for i := max(0, oldIdx-contextLines); i < oldIdx; i++ {
+					if i < len(oldLines) {
+						currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+							Type:    "context",
+							Content: oldLines[i],
+							OldLine: i + 1,
+							NewLine: newIdx - (oldIdx - i) + 1,
+						})
+						currentHunk.OldLines++
+						currentHunk.NewLines++
+					}
+				}
+			}
+			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+				Type:    "delete",
+				Content: oldLines[oldIdx],
+				OldLine: oldIdx + 1,
+			})
+			currentHunk.OldLines++
+			oldIdx++
+		} else if !newMatch && newIdx < len(newLines) {
+			// Addition
+			if currentHunk == nil {
+				currentHunk = &DiffHunk{
+					OldStart: max(1, oldIdx+1-contextLines),
+					NewStart: max(1, newIdx+1-contextLines),
+				}
+				// Add leading context
+				for i := max(0, newIdx-contextLines); i < newIdx; i++ {
+					if i < len(newLines) && i-newIdx+oldIdx >= 0 && i-newIdx+oldIdx < len(oldLines) {
+						currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+							Type:    "context",
+							Content: oldLines[i-newIdx+oldIdx],
+							OldLine: i - newIdx + oldIdx + 1,
+							NewLine: i + 1,
+						})
+						currentHunk.OldLines++
+						currentHunk.NewLines++
+					}
+				}
+			}
+			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
+				Type:    "add",
+				Content: newLines[newIdx],
+				NewLine: newIdx + 1,
+			})
+			currentHunk.NewLines++
+			newIdx++
+		} else {
+			break
+		}
+	}
+
+	if currentHunk != nil && len(currentHunk.Lines) > 0 {
+		hunks = append(hunks, *currentHunk)
+	}
+
+	return hunks
+}
+
+func longestCommonSubsequence(a, b []string) []string {
+	m, n := len(a), len(b)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
+
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else {
+				dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+			}
+		}
+	}
+
+	// Backtrack to find LCS
+	lcs := make([]string, 0, dp[m][n])
+	i, j := m, n
+	for i > 0 && j > 0 {
+		if a[i-1] == b[j-1] {
+			lcs = append([]string{a[i-1]}, lcs...)
+			i--
+			j--
+		} else if dp[i-1][j] > dp[i][j-1] {
+			i--
+		} else {
+			j--
+		}
+	}
+
+	return lcs
 }
 
 // ----- Helpers -----
