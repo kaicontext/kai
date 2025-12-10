@@ -146,7 +146,7 @@ spec:
                   name: kailab-db-secret
                   key: POSTMARK_TOKEN
             - name: KLC_SHARDS_JSON
-              value: '{"default":"kailab:7447"}'
+              value: '{"default":"http://kailab:7447"}'
             - name: KLC_BASE_URL
               value: "https://kaiscm.com"
           resources:
