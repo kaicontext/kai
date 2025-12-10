@@ -167,6 +167,7 @@ func webConsoleFallback(next http.Handler) http.Handler {
 			if path == "/" || (!strings.HasPrefix(path, "/api/") &&
 				!strings.HasPrefix(path, "/health") &&
 				!strings.HasPrefix(path, "/.well-known/") &&
+				!strings.HasPrefix(path, "/install.sh") &&
 				!strings.Contains(path, "/v1/")) {
 				r.URL.Path = "/"
 				webFileServer.ServeHTTP(w, r)
