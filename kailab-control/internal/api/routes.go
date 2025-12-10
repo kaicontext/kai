@@ -10,6 +10,7 @@ import (
 	"kailab-control/internal/auth"
 	"kailab-control/internal/cfg"
 	"kailab-control/internal/db"
+	"kailab-control/internal/email"
 	"kailab-control/internal/routing"
 )
 
@@ -28,15 +29,22 @@ type Handler struct {
 	cfg     *cfg.Config
 	tokens  *auth.TokenService
 	shards  *routing.ShardPicker
+	email   *email.Client
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(database *db.DB, config *cfg.Config, tokens *auth.TokenService, shards *routing.ShardPicker) *Handler {
+	var emailClient *email.Client
+	if config.PostmarkToken != "" {
+		emailClient = email.New(config.PostmarkToken, config.MagicLinkFrom)
+	}
+
 	return &Handler{
 		db:     database,
 		cfg:    config,
 		tokens: tokens,
 		shards: shards,
+		email:  emailClient,
 	}
 }
 

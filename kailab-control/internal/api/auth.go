@@ -48,18 +48,26 @@ func (h *Handler) SendMagicLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build login URL
+	loginURL := h.cfg.BaseURL + "/auth/verify?token=" + token
+
 	// In dev mode, log the token and include in response
 	resp := SendMagicLinkResponse{
 		Message: "Check your email for a login link",
 	}
 	if h.cfg.Debug {
-		loginURL := h.cfg.BaseURL + "/v1/auth/token?token=" + token
 		log.Printf("Magic link for %s: %s", req.Email, loginURL)
 		resp.DevToken = token
 	}
 
-	// TODO: Actually send the email in production
-	// email.Send(req.Email, "Login to Kailab", fmt.Sprintf("Click here to login: %s/v1/auth/token?token=%s", h.cfg.BaseURL, token))
+	// Send email in production (when Postmark is configured)
+	if h.email != nil {
+		if err := h.email.SendMagicLink(req.Email, loginURL); err != nil {
+			log.Printf("Failed to send magic link email to %s: %v", req.Email, err)
+			writeError(w, http.StatusInternalServerError, "failed to send email", err)
+			return
+		}
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }

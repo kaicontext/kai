@@ -140,6 +140,11 @@ spec:
                 secretKeyRef:
                   name: kailab-db-secret
                   key: JWT_SIGNING_KEY
+            - name: KLC_POSTMARK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kailab-db-secret
+                  key: POSTMARK_TOKEN
             - name: KLC_SHARDS_JSON
               value: '{"default":"kailab:7447"}'
             - name: KLC_BASE_URL

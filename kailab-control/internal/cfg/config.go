@@ -26,6 +26,8 @@ type Config struct {
 	MagicLinkTTL time.Duration
 	// MagicLinkFrom is the email sender for magic links.
 	MagicLinkFrom string
+	// PostmarkToken is the Postmark server token for sending emails.
+	PostmarkToken string
 	// BaseURL is the public base URL for this service.
 	BaseURL string
 	// Shards is a map of shard name to URL.
@@ -46,7 +48,8 @@ func FromEnv() *Config {
 		AccessTokenTTL:  getEnvDuration("KLC_ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL: getEnvDuration("KLC_REFRESH_TOKEN_TTL", 7*24*time.Hour),
 		MagicLinkTTL:    getEnvDuration("KLC_MAGIC_LINK_TTL", 15*time.Minute),
-		MagicLinkFrom:   getEnv("KLC_MAGICLINK_FROM", "noreply@kailab.app"),
+		MagicLinkFrom:   getEnv("KLC_MAGICLINK_FROM", "noreply@kaiscm.com"),
+		PostmarkToken:   getEnv("KLC_POSTMARK_TOKEN", ""),
 		BaseURL:         getEnv("KLC_BASE_URL", "http://localhost:8080"),
 		Debug:           getEnvBool("KLC_DEBUG", false),
 		Version:         getEnv("KLC_VERSION", "0.1.0"),
