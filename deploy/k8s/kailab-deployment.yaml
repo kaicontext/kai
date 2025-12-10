@@ -1,0 +1,212 @@
+# Kailab K8s Deployment
+# Data plane (graph storage) + Control plane (UI/API)
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kailab
+
+---
+# PersistentVolumeClaim for kailab data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kailab-data
+  namespace: kailab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard  # Adjust for your GCP storage class
+
+---
+# PersistentVolumeClaim for kailab-control data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kailab-control-data
+  namespace: kailab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
+---
+# Kailab Data Plane Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kailab
+  namespace: kailab
+  labels:
+    app: kailab
+    component: data-plane
+spec:
+  replicas: 1  # SQLite = single replica
+  selector:
+    matchLabels:
+      app: kailab
+  template:
+    metadata:
+      labels:
+        app: kailab
+        component: data-plane
+    spec:
+      containers:
+        - name: kailab
+          image: gcr.io/preplanai/kailab:latest
+          ports:
+            - containerPort: 7447
+              name: grpc
+          env:
+            - name: KAILAB_DATA
+              value: /data
+            - name: KAILAB_LISTEN
+              value: ":7447"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            tcpSocket:
+              port: 7447
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 7447
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kailab-data
+
+---
+# Kailab Data Plane Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kailab
+  namespace: kailab
+spec:
+  selector:
+    app: kailab
+  ports:
+    - port: 7447
+      targetPort: 7447
+      name: grpc
+
+---
+# Kailab Control Plane Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kailab-control
+  namespace: kailab
+  labels:
+    app: kailab-control
+    component: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kailab-control
+  template:
+    metadata:
+      labels:
+        app: kailab-control
+        component: control-plane
+    spec:
+      containers:
+        - name: kailab-control
+          image: gcr.io/preplanai/kailab-control:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KAILAB_CONTROL_LISTEN
+              value: ":8080"
+            - name: KAILAB_CONTROL_DB
+              value: /data/kailab-control.db
+            - name: KAILAB_DATA_PLANE_URL
+              value: "kailab:7447"  # Internal service DNS
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kailab-control-data
+
+---
+# Kailab Control Plane Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kailab-control
+  namespace: kailab
+spec:
+  selector:
+    app: kailab-control
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+
+---
+# Ingress for external access (nginx ingress)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kailab-ingress
+  namespace: kailab
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    # Cloudflare handles SSL termination, but you can also use cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  rules:
+    - host: kaiscm.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kailab-control
+                port:
+                  number: 8080

@@ -7,6 +7,8 @@
 *.test
 *.out
 
+.env
+
 # Go workspace and vendor
 go.work
 go.work.sum

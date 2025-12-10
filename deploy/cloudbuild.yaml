@@ -1,0 +1,91 @@
+# Google Cloud Build configuration for Kailab
+# Builds both data plane and control plane images
+
+steps:
+  # Build kailab (data plane)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/kailab:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/kailab:latest'
+      - '-f'
+      - 'kailab/Dockerfile'
+      - '.'
+    id: 'build-kailab'
+
+  # Build kailab-control (control plane)
+  # Note: context is kailab-control/ directory since Dockerfile expects frontend/ relative path
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/kailab-control:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/kailab-control:latest'
+      - 'kailab-control'
+    id: 'build-kailab-control'
+
+  # Push kailab image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/kailab:$COMMIT_SHA']
+    id: 'push-kailab-sha'
+    waitFor: ['build-kailab']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/kailab:latest']
+    id: 'push-kailab-latest'
+    waitFor: ['build-kailab']
+
+  # Push kailab-control image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/kailab-control:$COMMIT_SHA']
+    id: 'push-kailab-control-sha'
+    waitFor: ['build-kailab-control']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/kailab-control:latest']
+    id: 'push-kailab-control-latest'
+    waitFor: ['build-kailab-control']
+
+  # Deploy to GKE (optional - uncomment to auto-deploy)
+  # - name: 'gcr.io/cloud-builders/kubectl'
+  #   args:
+  #     - 'set'
+  #     - 'image'
+  #     - 'deployment/kailab'
+  #     - 'kailab=gcr.io/$PROJECT_ID/kailab:$COMMIT_SHA'
+  #     - '-n'
+  #     - 'kailab'
+  #   env:
+  #     - 'CLOUDSDK_COMPUTE_ZONE=us-central1-a'
+  #     - 'CLOUDSDK_CONTAINER_CLUSTER=your-cluster-name'
+  #   id: 'deploy-kailab'
+  #   waitFor: ['push-kailab-sha']
+
+  # - name: 'gcr.io/cloud-builders/kubectl'
+  #   args:
+  #     - 'set'
+  #     - 'image'
+  #     - 'deployment/kailab-control'
+  #     - 'kailab-control=gcr.io/$PROJECT_ID/kailab-control:$COMMIT_SHA'
+  #     - '-n'
+  #     - 'kailab'
+  #   env:
+  #     - 'CLOUDSDK_COMPUTE_ZONE=us-central1-a'
+  #     - 'CLOUDSDK_CONTAINER_CLUSTER=your-cluster-name'
+  #   id: 'deploy-kailab-control'
+  #   waitFor: ['push-kailab-control-sha']
+
+images:
+  - 'gcr.io/$PROJECT_ID/kailab:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/kailab:latest'
+  - 'gcr.io/$PROJECT_ID/kailab-control:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/kailab-control:latest'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '1200s'  # 20 minutes

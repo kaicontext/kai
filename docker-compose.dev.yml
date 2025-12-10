@@ -1,0 +1,62 @@
+version: '3.8'
+
+# Development setup with hot-reload frontend
+services:
+  # Data plane
+  kailab:
+    build:
+      context: .
+      dockerfile: kailab/Dockerfile
+    ports:
+      - "7447:7447"
+    volumes:
+      - kailab-data:/data
+    environment:
+      - KAILAB_DATA=/data
+      - KAILAB_LISTEN=:7447
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7447/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Control plane API (without embedded frontend)
+  kailab-control:
+    build:
+      context: kailab-control
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - kailab-control-data:/data
+    environment:
+      - KLC_LISTEN=:8080
+      - KLC_DB_URL=/data/kailab-control.db
+      - KLC_BASE_URL=http://localhost:8080
+      - KLC_JWT_SIGNING_KEY=${KLC_JWT_SIGNING_KEY:-dev-secret-key}
+      - KLC_SHARDS_JSON={"default":"http://kailab:7447"}
+      - KLC_DEBUG=true
+    depends_on:
+      kailab:
+        condition: service_healthy
+
+  # Frontend dev server with hot reload
+  frontend:
+    build:
+      context: kailab-control/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount source for hot reload
+      - ./kailab-control/frontend/src:/app/src
+      - ./kailab-control/frontend/static:/app/static
+    environment:
+      # Override proxy target to use Docker service names
+      - VITE_API_URL=http://kailab-control:8080
+    depends_on:
+      - kailab-control
+
+volumes:
+  kailab-data:
+  kailab-control-data:

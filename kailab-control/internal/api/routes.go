@@ -1,9 +1,11 @@
 package api
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"net/http"
+	"strings"
 
 	"kailab-control/internal/auth"
 	"kailab-control/internal/cfg"
@@ -11,8 +13,14 @@ import (
 	"kailab-control/internal/routing"
 )
 
-//go:embed web/index.html
-var indexHTML []byte
+//go:embed all:web
+var webFS embed.FS
+
+// getWebFS returns the web filesystem rooted at "web"
+func getWebFS() http.FileSystem {
+	sub, _ := fs.Sub(webFS, "web")
+	return http.FS(sub)
+}
 
 // Handler wraps dependencies for HTTP handlers.
 type Handler struct {
@@ -41,10 +49,23 @@ func NewRouter(h *Handler) http.Handler {
 	// Must be registered before the web console to avoid pattern conflicts
 	mux.Handle("/{org}/{repo}/v1/", h.ProxyHandler())
 
-	// Web console (must be after proxy to avoid pattern conflicts)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
+	// Web console - serve SvelteKit static files
+	webFileServer := http.FileServer(getWebFS())
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// Serve static assets directly
+		if strings.HasPrefix(r.URL.Path, "/_app/") ||
+		   strings.HasPrefix(r.URL.Path, "/favicon") ||
+		   strings.HasSuffix(r.URL.Path, ".js") ||
+		   strings.HasSuffix(r.URL.Path, ".css") ||
+		   strings.HasSuffix(r.URL.Path, ".png") ||
+		   strings.HasSuffix(r.URL.Path, ".svg") ||
+		   strings.HasSuffix(r.URL.Path, ".ico") {
+			webFileServer.ServeHTTP(w, r)
+			return
+		}
+		// For all other routes, serve index.html (SPA routing)
+		r.URL.Path = "/"
+		webFileServer.ServeHTTP(w, r)
 	})
 
 	// Health

@@ -190,6 +190,22 @@ func (m *Matcher) LoadDefaults() {
 		".hg/",
 
 		// ------------------------------
+		// Secrets / Environment files
+		// ------------------------------
+		".env",
+		".env.*",
+		"*.env",
+		".envrc",
+		"*.pem",
+		"*.key",
+		"*.p12",
+		"*.pfx",
+		"credentials.json",
+		"secrets.json",
+		"secrets.yaml",
+		"secrets.yml",
+
+		// ------------------------------
 		// Universal junk / OS files
 		// ------------------------------
 		".DS_Store",

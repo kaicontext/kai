@@ -1,22 +1,77 @@
+# GitLab CI for Kailab
+# Builds and deploys to GKE on merge to main
+
 stages:
-  - test
+  - build
   - deploy
 
-test:
-  stage: test
-  image: golang:1.24
-  script:
-    - cd kai-cli
-    - go mod download
-    - go test ./...
+variables:
+  # Image names
+  KAILAB_IMAGE: gcr.io/$GCP_PROJECT_ID/kailab
+  KAILAB_CONTROL_IMAGE: gcr.io/$GCP_PROJECT_ID/kailab-control
 
-pages:
-  stage: deploy
+# Reusable GCP auth (key is base64 encoded)
+.gcp_auth: &gcp_auth
+  - echo "$GCP_SERVICE_KEY" | base64 -d > /tmp/gcp-key.json
+  - gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+  - gcloud config set project $GCP_PROJECT_ID
+  - gcloud auth configure-docker --quiet
+
+.gke_auth: &gke_auth
+  - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
+
+# Build kailab (data plane)
+build:kailab:
+  stage: build
+  image: google/cloud-sdk:alpine
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  before_script:
+    - *gcp_auth
   script:
-    - mkdir -p public
-    - cp -r site/* public/
-  artifacts:
-    paths:
-      - public
+    - docker build -t $KAILAB_IMAGE:$CI_COMMIT_SHA -t $KAILAB_IMAGE:latest -f kailab/Dockerfile .
+    - docker push $KAILAB_IMAGE:$CI_COMMIT_SHA
+    - docker push $KAILAB_IMAGE:latest
   only:
     - main
+    - tags
+
+# Build kailab-control (control plane)
+build:kailab-control:
+  stage: build
+  image: google/cloud-sdk:alpine
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  before_script:
+    - *gcp_auth
+  script:
+    - docker build -t $KAILAB_CONTROL_IMAGE:$CI_COMMIT_SHA -t $KAILAB_CONTROL_IMAGE:latest kailab-control/
+    - docker push $KAILAB_CONTROL_IMAGE:$CI_COMMIT_SHA
+    - docker push $KAILAB_CONTROL_IMAGE:latest
+  only:
+    - main
+    - tags
+
+# Deploy to GKE
+deploy:
+  stage: deploy
+  image: google/cloud-sdk:alpine
+  before_script:
+    - *gcp_auth
+    - *gke_auth
+  script:
+    # Update deployments with new images
+    - kubectl set image deployment/kailab kailab=$KAILAB_IMAGE:$CI_COMMIT_SHA -n kailab
+    - kubectl set image deployment/kailab-control kailab-control=$KAILAB_CONTROL_IMAGE:$CI_COMMIT_SHA -n kailab
+    # Wait for rollout
+    - kubectl rollout status deployment/kailab -n kailab --timeout=300s
+    - kubectl rollout status deployment/kailab-control -n kailab --timeout=300s
+  only:
+    - main
+  environment:
+    name: production
+    url: https://kaiscm.com

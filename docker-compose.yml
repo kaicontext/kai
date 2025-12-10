@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Data plane - handles repository storage and operations
+  kailab:
+    build:
+      context: .
+      dockerfile: kailab/Dockerfile
+    ports:
+      - "7447:7447"
+    volumes:
+      - kailab-data:/data
+    environment:
+      - KAILAB_DATA=/data
+      - KAILAB_LISTEN=:7447
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7447/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Control plane - auth, orgs, repos, and web UI
+  kailab-control:
+    build:
+      context: kailab-control
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - kailab-control-data:/data
+    environment:
+      - KLC_LISTEN=:8080
+      - KLC_DB_URL=/data/kailab-control.db
+      - KLC_BASE_URL=http://localhost:8080
+      - KLC_JWT_SIGNING_KEY=${KLC_JWT_SIGNING_KEY:-dev-secret-key-change-in-production}
+      - KLC_SHARDS_JSON={"default":"http://kailab:7447"}
+      - KLC_DEBUG=${KLC_DEBUG:-false}
+    depends_on:
+      kailab:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  kailab-data:
+  kailab-control-data:
