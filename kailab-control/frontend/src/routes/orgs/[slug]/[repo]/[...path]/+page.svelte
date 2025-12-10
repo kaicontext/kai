@@ -433,17 +433,14 @@
 		changesetFilesLoading = true;
 
 		try {
-			// Find snapshot refs for base and head
-			const baseSnap = refs.find(r => r.target && base64ToHex(r.target) === payload.base);
-			const headSnap = refs.find(r => r.target && base64ToHex(r.target) === payload.head);
+			// Use raw snapshot IDs directly - API accepts both ref names and hex IDs
+			const baseId = payload.base;
+			const headId = payload.head;
 
-			const baseRef = baseSnap?.name || `snap.${payload.base.substring(0, 8)}`;
-			const headRef = headSnap?.name || `snap.${payload.head.substring(0, 8)}`;
-
-			// Load files from both snapshots
+			// Load files from both snapshots using raw hex IDs
 			const [baseData, headData] = await Promise.all([
-				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${baseRef}`).catch(() => ({ files: [] })),
-				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${headRef}`).catch(() => ({ files: [] }))
+				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${baseId}`).catch(() => ({ files: [] })),
+				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${headId}`).catch(() => ({ files: [] }))
 			]);
 
 			const baseFiles = new Map((baseData.files || []).map(f => [f.path, f]));

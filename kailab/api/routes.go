@@ -566,19 +566,34 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 	// Optional: filter by path to get single file
 	pathFilter := r.URL.Query().Get("path")
 
-	// Get ref to find snapshot digest
-	ref, err := store.GetRef(rh.DB, refName)
-	if err != nil {
-		if err == store.ErrRefNotFound {
-			writeError(w, http.StatusNotFound, "ref not found", nil)
+	// Determine target - either from ref lookup or raw hex ID
+	var target []byte
+
+	// Check if refName looks like a raw hex digest (64 hex chars)
+	if len(refName) == 64 && isHexString(refName) {
+		// Use raw snapshot ID directly
+		var err error
+		target, err = hex.DecodeString(refName)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid snapshot ID", err)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "failed to get ref", err)
-		return
+	} else {
+		// Get ref to find snapshot digest
+		ref, err := store.GetRef(rh.DB, refName)
+		if err != nil {
+			if err == store.ErrRefNotFound {
+				writeError(w, http.StatusNotFound, "ref not found", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to get ref", err)
+			return
+		}
+		target = ref.Target
 	}
 
 	// Fetch snapshot object
-	snapshotContent, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+	snapshotContent, kind, err := pack.ExtractObjectFromDB(rh.DB, target)
 	if err != nil {
 		if err == store.ErrObjectNotFound {
 			writeError(w, http.StatusNotFound, "snapshot object not found", nil)
@@ -626,7 +641,7 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 			if pathFilter != "" {
 				if f.Path == pathFilter {
 					writeJSON(w, http.StatusOK, proto.FilesListResponse{
-						SnapshotDigest: hex.EncodeToString(ref.Target),
+						SnapshotDigest: hex.EncodeToString(target),
 						Files: []*proto.FileEntry{{
 							Path:          f.Path,
 							Digest:        f.Digest,
@@ -653,7 +668,7 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 		}
 
 		writeJSON(w, http.StatusOK, proto.FilesListResponse{
-			SnapshotDigest: hex.EncodeToString(ref.Target),
+			SnapshotDigest: hex.EncodeToString(target),
 			Files:          files,
 		})
 		return
@@ -695,7 +710,7 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 			if filePayload.Path == pathFilter {
 				// Return just this file
 				writeJSON(w, http.StatusOK, proto.FilesListResponse{
-					SnapshotDigest: hex.EncodeToString(ref.Target),
+					SnapshotDigest: hex.EncodeToString(target),
 					Files: []*proto.FileEntry{{
 						Path:          filePayload.Path,
 						Digest:        fileDigestHex,
@@ -725,7 +740,7 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, proto.FilesListResponse{
-		SnapshotDigest: hex.EncodeToString(ref.Target),
+		SnapshotDigest: hex.EncodeToString(target),
 		Files:          files,
 	})
 }
@@ -810,6 +825,16 @@ func indexOf(data []byte, b byte) int {
 		}
 	}
 	return -1
+}
+
+// isHexString checks if a string contains only hex characters
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // ----- Helpers -----
