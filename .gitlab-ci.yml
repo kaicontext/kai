@@ -2,6 +2,7 @@
 # Builds and deploys to GKE on merge to main
 
 stages:
+  - test
   - build
   - deploy
 
@@ -12,6 +13,7 @@ variables:
 
 # Reusable GCP auth (key is base64 encoded)
 .gcp_auth: &gcp_auth
+  - apk add --no-cache docker-cli
   - echo "$GCP_SERVICE_KEY" | base64 -d > /tmp/gcp-key.json
   - gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
   - gcloud config set project $GCP_PROJECT_ID
@@ -19,6 +21,38 @@ variables:
 
 .gke_auth: &gke_auth
   - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
+
+# Test kai-cli
+test:kai-cli:
+  stage: test
+  image: golang:1.24-alpine
+  script:
+    - cd kai-cli
+    - go test ./...
+
+# Test kai-core
+test:kai-core:
+  stage: test
+  image: golang:1.24-alpine
+  script:
+    - cd kai-core
+    - go test ./...
+
+# Test kailab
+test:kailab:
+  stage: test
+  image: golang:1.24-alpine
+  script:
+    - cd kailab
+    - go test ./...
+
+# Test kailab-control
+test:kailab-control:
+  stage: test
+  image: golang:1.24-alpine
+  script:
+    - cd kailab-control
+    - go test ./...
 
 # Build kailab (data plane)
 build:kailab:
