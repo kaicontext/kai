@@ -778,12 +778,6 @@ kai push origin snap.latest`;
 					<span class="badge badge-{repo.visibility} ml-2">{repo.visibility}</span>
 				</h2>
 			</div>
-			<button
-				class="btn btn-danger text-sm"
-				onclick={() => showDeleteConfirm = true}
-			>
-				Delete
-			</button>
 		</div>
 
 		<!-- Delete Confirmation Modal -->
@@ -902,15 +896,6 @@ kai push origin snap.latest</pre>
 						onclick={() => setTab('files')}
 					>
 						Files
-					</button>
-					<button
-						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'snapshots' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
-						onclick={() => setTab('snapshots')}
-					>
-						Snapshots
-						{#if snapshots.length > 0}
-							<span class="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-kai-bg-tertiary">{snapshots.length}</span>
-						{/if}
 					</button>
 					<button
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'setup' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
@@ -1136,39 +1121,6 @@ kai push origin snap.latest</pre>
 					</div>
 				{/if}
 
-			{:else if activeTab === 'snapshots'}
-				{#if snapshots.length === 0}
-					<div class="text-center py-8 text-kai-text-muted">
-						<p>No snapshots yet</p>
-					</div>
-				{:else}
-					<div class="border border-kai-border rounded-md overflow-hidden">
-						<table class="w-full">
-							<thead class="bg-kai-bg-secondary">
-								<tr class="text-left text-sm text-kai-text-muted">
-									<th class="px-4 py-3 font-medium">Name</th>
-									<th class="px-4 py-3 font-medium">Target</th>
-									<th class="px-4 py-3 font-medium">Actor</th>
-									<th class="px-4 py-3 font-medium">Updated</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each snapshots as ref}
-									<tr class="border-t border-kai-border hover:bg-kai-bg-secondary">
-										<td class="px-4 py-3">
-											<span class="font-mono text-kai-accent">{ref.name}</span>
-										</td>
-										<td class="px-4 py-3">
-											<code class="text-xs bg-kai-bg px-1.5 py-0.5 rounded font-mono">{shortHash(ref.target)}</code>
-										</td>
-										<td class="px-4 py-3 text-kai-text-muted text-sm">{ref.actor || '-'}</td>
-										<td class="px-4 py-3 text-kai-text-muted text-sm">{formatDate(ref.updatedAt)}</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				{/if}
 			{:else if activeTab === 'files'}
 				<div class="border border-kai-border rounded-md">
 					<!-- Snapshot selector -->
@@ -1411,24 +1363,43 @@ kai push origin snap.latest</pre>
 					{/if}
 				</div>
 			{:else if activeTab === 'setup'}
-				<div class="border border-kai-border rounded-md p-4">
-					<h4 class="font-medium mb-3">Clone URL</h4>
-					<div class="flex gap-2 items-center mb-6">
-						<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-						<button
-							class="btn"
-							onclick={() => {
-								navigator.clipboard.writeText(getCloneUrl());
-							}}
-						>
-							Copy
-						</button>
+				<div class="space-y-6">
+					<div class="border border-kai-border rounded-md p-4">
+						<h4 class="font-medium mb-3">Clone URL</h4>
+						<div class="flex gap-2 items-center mb-6">
+							<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
+							<button
+								class="btn"
+								onclick={() => {
+									navigator.clipboard.writeText(getCloneUrl());
+								}}
+							>
+								Copy
+							</button>
+						</div>
+
+						<h4 class="font-medium mb-3">Push to this repository</h4>
+						<div class="code-block bg-kai-bg">
+							<pre class="text-sm">kai remote set origin {getCloneUrl()}
+kai push origin snap.latest</pre>
+						</div>
 					</div>
 
-					<h4 class="font-medium mb-3">Push to this repository</h4>
-					<div class="code-block bg-kai-bg">
-						<pre class="text-sm">kai remote set origin {getCloneUrl()}
-kai push origin snap.latest</pre>
+					<!-- Danger Zone -->
+					<div class="border border-red-500/30 rounded-md p-4">
+						<h4 class="font-medium mb-3 text-red-400">Danger Zone</h4>
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium">Delete this repository</p>
+								<p class="text-sm text-kai-text-muted">Once deleted, it cannot be recovered.</p>
+							</div>
+							<button
+								class="btn btn-danger text-sm"
+								onclick={() => showDeleteConfirm = true}
+							>
+								Delete Repository
+							</button>
+						</div>
 					</div>
 				</div>
 			{/if}
