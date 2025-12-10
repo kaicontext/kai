@@ -1,5 +1,11 @@
 # Kailab K8s Deployment
 # Data plane (graph storage) + Control plane (UI/API)
+#
+# Before deploying, create the database secret:
+#   kubectl create secret generic kailab-db-secret \
+#     --namespace=kailab \
+#     --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname?sslmode=require' \
+#     --from-literal=JWT_SIGNING_KEY='your-secure-jwt-key'
 
 ---
 apiVersion: v1
@@ -8,7 +14,7 @@ metadata:
   name: kailab
 
 ---
-# PersistentVolumeClaim for kailab data
+# PersistentVolumeClaim for kailab data (SQLite graph storage)
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -21,21 +27,6 @@ spec:
     requests:
       storage: 10Gi
   storageClassName: standard  # Adjust for your GCP storage class
-
----
-# PersistentVolumeClaim for kailab-control data
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: kailab-control-data
-  namespace: kailab
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: standard
 
 ---
 # Kailab Data Plane Deployment
@@ -137,15 +128,22 @@ spec:
             - containerPort: 8080
               name: http
           env:
-            - name: KAILAB_CONTROL_LISTEN
+            - name: KLC_LISTEN
               value: ":8080"
-            - name: KAILAB_CONTROL_DB
-              value: /data/kailab-control.db
-            - name: KAILAB_DATA_PLANE_URL
-              value: "kailab:7447"  # Internal service DNS
-          volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: KLC_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kailab-db-secret
+                  key: DATABASE_URL
+            - name: KLC_JWT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kailab-db-secret
+                  key: JWT_SIGNING_KEY
+            - name: KLC_SHARDS_JSON
+              value: '{"default":"kailab:7447"}'
+            - name: KLC_BASE_URL
+              value: "https://kaiscm.com"
           resources:
             requests:
               memory: "128Mi"
@@ -165,10 +163,6 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: kailab-control-data
 
 ---
 # Kailab Control Plane Service
