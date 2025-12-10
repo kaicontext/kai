@@ -61,6 +61,9 @@ func NewRouter(h *Handler) http.Handler {
 	mux.HandleFunc("GET /healthz", h.Health)
 	mux.HandleFunc("GET /readyz", h.Ready)
 
+	// CLI install script
+	mux.HandleFunc("GET /install.sh", h.InstallScript)
+
 	// JWKS endpoint for kailabd to verify tokens
 	mux.HandleFunc("GET /.well-known/jwks.json", h.JWKS)
 
@@ -235,3 +238,80 @@ func writeError(w http.ResponseWriter, status int, msg string, err error) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
 }
+
+// InstallScript serves the CLI install script
+func (h *Handler) InstallScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(installScript))
+}
+
+const installScript = `#!/bin/sh
+# Kai CLI installer
+# Usage: curl -fsSL https://kaiscm.com/install.sh | sh
+
+set -e
+
+INSTALL_DIR="${KAI_INSTALL_DIR:-/usr/local/bin}"
+VERSION="${KAI_VERSION:-latest}"
+BASE_URL="https://gitlab.com/api/v4/projects/preplan%2Fkai/packages/generic/kai-cli/${VERSION}"
+
+# Detect OS and architecture
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+
+case "$ARCH" in
+    x86_64)  ARCH="amd64" ;;
+    aarch64) ARCH="arm64" ;;
+    arm64)   ARCH="arm64" ;;
+    *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+case "$OS" in
+    linux)  ;;
+    darwin) ;;
+    *)      echo "Unsupported OS: $OS"; exit 1 ;;
+esac
+
+BINARY="kai-${OS}-${ARCH}"
+URL="${BASE_URL}/${BINARY}.gz"
+
+echo "Installing Kai CLI..."
+echo "  Version: $VERSION"
+echo "  OS: $OS"
+echo "  Arch: $ARCH"
+echo ""
+
+# Create temp directory
+TMP_DIR=$(mktemp -d)
+trap "rm -rf $TMP_DIR" EXIT
+
+# Download and extract
+if command -v curl > /dev/null; then
+    curl -fsSL "$URL" -o "$TMP_DIR/kai.gz"
+elif command -v wget > /dev/null; then
+    wget -q "$URL" -O "$TMP_DIR/kai.gz"
+else
+    echo "Error: curl or wget required"
+    exit 1
+fi
+
+gzip -d "$TMP_DIR/kai.gz"
+chmod +x "$TMP_DIR/kai"
+
+# Install
+if [ -w "$INSTALL_DIR" ]; then
+    mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+else
+    echo "Installing to $INSTALL_DIR (requires sudo)..."
+    sudo mv "$TMP_DIR/kai" "$INSTALL_DIR/kai"
+fi
+
+echo ""
+echo "Kai CLI installed successfully!"
+echo ""
+echo "Get started:"
+echo "  kai init              # Initialize in a project"
+echo "  kai --help            # See all commands"
+echo ""
+`

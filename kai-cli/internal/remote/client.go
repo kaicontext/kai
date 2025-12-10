@@ -17,6 +17,11 @@ import (
 	"kai-core/cas"
 )
 
+// DefaultServer is the production Kailab server URL.
+// This is used when no explicit remote is configured.
+// Can be overridden via KAI_SERVER environment variable.
+const DefaultServer = "https://kaiscm.com"
+
 // Client communicates with a Kailab server.
 type Client struct {
 	BaseURL    string
@@ -613,6 +618,9 @@ func SaveConfig(cfg *Config) error {
 }
 
 // GetRemote gets the entry for a named remote.
+// If the remote is not configured and the name is "origin", it falls back to:
+// 1. KAI_SERVER environment variable
+// 2. DefaultServer constant (production server)
 func GetRemote(name string) (*RemoteEntry, error) {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -621,6 +629,18 @@ func GetRemote(name string) (*RemoteEntry, error) {
 
 	entry, ok := cfg.Remotes[name]
 	if !ok {
+		// For "origin", fall back to default server
+		if name == "origin" {
+			serverURL := os.Getenv("KAI_SERVER")
+			if serverURL == "" {
+				serverURL = DefaultServer
+			}
+			return &RemoteEntry{
+				URL:    serverURL,
+				Tenant: "default",
+				Repo:   "main",
+			}, nil
+		}
 		return nil, fmt.Errorf("remote %q not configured", name)
 	}
 	return entry, nil

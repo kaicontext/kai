@@ -314,10 +314,19 @@ kai push origin snap.latest`;
 					<h3 class="font-semibold">Quick setup</h3>
 				</div>
 
+				<!-- Install kai-cli -->
 				<div class="p-4 border-b border-kai-border">
-					<div class="flex items-center gap-2 mb-2">
-						<span class="text-kai-text-muted text-sm">Remote URL:</span>
+					<h4 class="font-medium mb-3">1. Install the Kai CLI</h4>
+					<div class="code-block bg-kai-bg">
+						<pre class="text-sm">curl -fsSL https://kaiscm.com/install.sh | sh</pre>
 					</div>
+					<p class="text-kai-text-muted text-xs mt-2">
+						Or with Go: <code class="bg-kai-bg-tertiary px-1 rounded">go install gitlab.com/preplan/kai/kai-cli/cmd/kai@latest</code>
+					</p>
+				</div>
+
+				<div class="p-4 border-b border-kai-border">
+					<h4 class="font-medium mb-3">2. Remote URL</h4>
 					<div class="flex gap-2 items-center">
 						<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
 						<button
@@ -627,24 +636,45 @@ kai push origin snap.latest</pre>
 					{/if}
 				</div>
 			{:else if activeTab === 'setup'}
-				<div class="border border-kai-border rounded-md p-4">
-					<h4 class="font-medium mb-3">Clone URL</h4>
-					<div class="flex gap-2 items-center mb-6">
-						<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-						<button
-							class="btn"
-							onclick={() => {
-								navigator.clipboard.writeText(getCloneUrl());
-							}}
-						>
-							Copy
-						</button>
+				<div class="border border-kai-border rounded-md">
+					<div class="p-4 border-b border-kai-border">
+						<h4 class="font-medium mb-3">Install the Kai CLI</h4>
+						<div class="code-block bg-kai-bg">
+							<pre class="text-sm">curl -fsSL https://kaiscm.com/install.sh | sh</pre>
+						</div>
+						<p class="text-kai-text-muted text-xs mt-2">
+							Or with Go: <code class="bg-kai-bg-tertiary px-1 rounded">go install gitlab.com/preplan/kai/kai-cli/cmd/kai@latest</code>
+						</p>
 					</div>
 
-					<h4 class="font-medium mb-3">Push to this repository</h4>
-					<div class="code-block bg-kai-bg">
-						<pre class="text-sm">kai remote set origin {getCloneUrl()}
+					<div class="p-4 border-b border-kai-border">
+						<h4 class="font-medium mb-3">Clone URL</h4>
+						<div class="flex gap-2 items-center">
+							<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
+							<button
+								class="btn"
+								onclick={() => {
+									navigator.clipboard.writeText(getCloneUrl());
+								}}
+							>
+								Copy
+							</button>
+						</div>
+					</div>
+
+					<div class="p-4 border-b border-kai-border">
+						<h4 class="font-medium mb-3">Clone this repository</h4>
+						<div class="code-block bg-kai-bg">
+							<pre class="text-sm">kai clone {$page.params.slug}/{$page.params.repo}</pre>
+						</div>
+					</div>
+
+					<div class="p-4">
+						<h4 class="font-medium mb-3">Push to this repository</h4>
+						<div class="code-block bg-kai-bg">
+							<pre class="text-sm">kai remote set origin {getCloneUrl()}
 kai push origin snap.latest</pre>
+						</div>
 					</div>
 				</div>
 			{/if}

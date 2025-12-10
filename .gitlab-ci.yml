@@ -4,6 +4,7 @@
 stages:
   - test
   - build
+  - release
   - deploy
 
 variables:
@@ -96,6 +97,51 @@ build:kailab-control:
   only:
     - main
     - tags
+
+# Build and release kai-cli binaries
+# Uploads to GitLab Generic Package Registry
+release:kai-cli:
+  stage: release
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev git curl
+  script:
+    - cd kai-cli
+    - VERSION=$(grep 'var Version' cmd/kai/main.go | cut -d'"' -f2)
+    - echo "Building kai-cli v${VERSION}"
+    - mkdir -p dist
+    # Linux amd64 (native build on Alpine)
+    - CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/kai-linux-amd64 ./cmd/kai
+    - gzip -k dist/kai-linux-amd64
+    # Upload to GitLab Package Registry
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+           --upload-file dist/kai-linux-amd64.gz \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/kai-cli/${VERSION}/kai-linux-amd64.gz"
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+           --upload-file dist/kai-linux-amd64.gz \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/kai-cli/latest/kai-linux-amd64.gz"
+  only:
+    - main
+    - tags
+  artifacts:
+    paths:
+      - kai-cli/dist/
+    expire_in: 1 week
+
+# Build macOS binaries (requires macOS runner, run manually for now)
+# release:kai-cli:macos:
+#   stage: release
+#   tags:
+#     - macos
+#   script:
+#     - cd kai-cli
+#     - VERSION=$(grep 'var Version' cmd/kai/main.go | cut -d'"' -f2)
+#     - CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/kai-darwin-amd64 ./cmd/kai
+#     - CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/kai-darwin-arm64 ./cmd/kai
+#   only:
+#     - tags
 
 # Deploy to GKE
 deploy:

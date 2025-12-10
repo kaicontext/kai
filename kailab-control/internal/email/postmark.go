@@ -90,7 +90,7 @@ func (c *Client) Send(to, subject, htmlBody, textBody string) error {
 }
 
 // SendMagicLink sends a magic link login email.
-func (c *Client) SendMagicLink(to, loginURL string) error {
+func (c *Client) SendMagicLink(to, loginURL, token string) error {
 	subject := "Sign in to Kailab"
 
 	htmlBody := fmt.Sprintf(`
@@ -109,12 +109,18 @@ func (c *Client) SendMagicLink(to, loginURL string) error {
     <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
       Sign in
     </a>
+    <div style="margin: 32px 0 0; padding: 16px; background: #f9f9f9; border-radius: 6px;">
+      <p style="margin: 0 0 8px; color: #555; font-size: 13px; font-weight: 500;">
+        Using the CLI? Copy this token:
+      </p>
+      <code style="display: block; padding: 8px 12px; background: #fff; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 12px; word-break: break-all; color: #333;">%s</code>
+    </div>
     <p style="margin: 24px 0 0; color: #999; font-size: 13px; line-height: 1.5;">
       If you didn't request this email, you can safely ignore it.
     </p>
   </div>
 </body>
-</html>`, loginURL)
+</html>`, loginURL, token)
 
 	textBody := fmt.Sprintf(`Sign in to Kailab
 
@@ -122,7 +128,10 @@ Click the link below to sign in. This link expires in 15 minutes.
 
 %s
 
-If you didn't request this email, you can safely ignore it.`, loginURL)
+Using the CLI? Copy this token:
+%s
+
+If you didn't request this email, you can safely ignore it.`, loginURL, token)
 
 	return c.Send(to, subject, htmlBody, textBody)
 }

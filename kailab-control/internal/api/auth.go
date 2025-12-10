@@ -62,7 +62,7 @@ func (h *Handler) SendMagicLink(w http.ResponseWriter, r *http.Request) {
 
 	// Send email in production (when Postmark is configured)
 	if h.email != nil {
-		if err := h.email.SendMagicLink(req.Email, loginURL); err != nil {
+		if err := h.email.SendMagicLink(req.Email, loginURL, token); err != nil {
 			log.Printf("Failed to send magic link email to %s: %v", req.Email, err)
 			writeError(w, http.StatusInternalServerError, "failed to send email", err)
 			return

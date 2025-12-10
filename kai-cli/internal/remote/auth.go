@@ -236,8 +236,8 @@ func Login(serverURL string) error {
 		fmt.Println("Dev mode: Token received directly")
 		token = result.DevToken
 	} else {
-		fmt.Println("Check your email for a login link.")
-		fmt.Print("Enter token from email (or paste the full URL): ")
+		fmt.Println("Check your email for a login link (from notifications@1medium.ai).")
+		fmt.Print("Copy the token from the email and paste it here: ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 

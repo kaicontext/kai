@@ -53,7 +53,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.7.0"
+var Version = "0.8.0"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -1014,18 +1014,23 @@ Examples:
 }
 
 var cloneCmd = &cobra.Command{
-	Use:   "clone <url> [directory]",
+	Use:   "clone <org/repo | url> [directory]",
 	Short: "Clone a repository from a remote server",
 	Long: `Clone a Kai repository from a remote Kailab server.
 
 Creates a new directory, initializes Kai, sets up the remote, and fetches all refs.
 
-The URL format is: http://server/tenant/repo
-Or specify tenant and repo separately with flags.
+URL formats:
+  org/repo                         Shorthand (uses default server: kaiscm.com)
+  http://server/tenant/repo        Full URL with server
+
+The default server can be overridden with the KAI_SERVER environment variable.
 
 Examples:
-  kai clone http://localhost:8080/myorg/myrepo
-  kai clone http://localhost:8080/myorg/myrepo myproject
+  kai clone 1m/myrepo                                   # Clone from kaiscm.com
+  kai clone 1m/myrepo myproject                         # Clone into 'myproject' directory
+  kai clone https://kaiscm.com/myorg/myrepo             # Full URL
+  kai clone http://localhost:8080/myorg/myrepo          # Local development
   kai clone http://localhost:8080 --tenant myorg --repo myrepo`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runClone,
@@ -9171,20 +9176,34 @@ func runClone(cmd *cobra.Command, args []string) error {
 	tenant := cloneTenant
 	repo := cloneRepo
 
-	// Parse URL: http://server/tenant/repo
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
-	}
+	// Check if input is shorthand format: org/repo (no scheme)
+	if !strings.Contains(rawURL, "://") && strings.Count(rawURL, "/") == 1 {
+		// Shorthand format: org/repo - use default server
+		parts := strings.Split(rawURL, "/")
+		tenant = parts[0]
+		repo = parts[1]
+		// Use default server (env var or constant)
+		serverURL := os.Getenv("KAI_SERVER")
+		if serverURL == "" {
+			serverURL = remote.DefaultServer
+		}
+		rawURL = serverURL
+	} else {
+		// Parse URL: http://server/tenant/repo
+		parsedURL, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("invalid URL: %w", err)
+		}
 
-	// Extract tenant/repo from path if not specified via flags
-	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	if len(pathParts) >= 2 && tenant == "" && repo == "" {
-		tenant = pathParts[0]
-		repo = pathParts[1]
-		// Rebuild base URL without tenant/repo path
-		parsedURL.Path = ""
-		rawURL = parsedURL.String()
+		// Extract tenant/repo from path if not specified via flags
+		pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+		if len(pathParts) >= 2 && tenant == "" && repo == "" {
+			tenant = pathParts[0]
+			repo = pathParts[1]
+			// Rebuild base URL without tenant/repo path
+			parsedURL.Path = ""
+			rawURL = parsedURL.String()
+		}
 	}
 
 	// Validate we have tenant and repo
