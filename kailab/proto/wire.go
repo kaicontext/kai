@@ -228,3 +228,25 @@ type FileContentResponse struct {
 	Content string `json:"content"` // base64-encoded
 	Lang    string `json:"lang,omitempty"`
 }
+
+// ----- Reviews API -----
+
+// ReviewEntry represents a code review.
+type ReviewEntry struct {
+	ID          string   `json:"id"`          // Short hex ID from ref name
+	RefName     string   `json:"refName"`     // Full ref name (review.xyz)
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	State       string   `json:"state"`       // draft, open, approved, changes_requested, merged, abandoned
+	Author      string   `json:"author"`
+	Reviewers   []string `json:"reviewers,omitempty"`
+	TargetID    string   `json:"targetId"`    // hex-encoded changeset/workspace ID
+	TargetKind  string   `json:"targetKind"`  // ChangeSet or Workspace
+	CreatedAt   int64    `json:"createdAt"`
+	UpdatedAt   int64    `json:"updatedAt"`
+}
+
+// ReviewsListResponse contains a list of reviews.
+type ReviewsListResponse struct {
+	Reviews []*ReviewEntry `json:"reviews"`
+}

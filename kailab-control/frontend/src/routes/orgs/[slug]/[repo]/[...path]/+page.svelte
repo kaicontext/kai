@@ -93,6 +93,10 @@
 	let codeViewerEl = $state(null);
 	let expandedDirs = $state(new Set()); // Track expanded directories
 
+	// Reviews tab state
+	let reviews = $state([]);
+	let reviewsLoading = $state(false);
+
 	// File type detection
 	const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tiff', '.tif'];
 	const svgExtension = '.svg';
@@ -369,6 +373,15 @@
 			refs = data.refs;
 		}
 		refsLoading = false;
+	}
+
+	async function loadReviews() {
+		reviewsLoading = true;
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/reviews`);
+		if (data.reviews) {
+			reviews = data.reviews;
+		}
+		reviewsLoading = false;
 	}
 
 	// Load changeset payloads to get intents
@@ -876,6 +889,15 @@ kai push origin snap.latest</pre>
 						{/if}
 					</button>
 					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'reviews' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
+						onclick={() => { setTab('reviews'); if (reviews.length === 0 && !reviewsLoading) loadReviews(); }}
+					>
+						Reviews
+						{#if reviews.length > 0}
+							<span class="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-kai-bg-tertiary">{reviews.length}</span>
+						{/if}
+					</button>
+					<button
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'files' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
 						onclick={() => setTab('files')}
 					>
@@ -1054,6 +1076,63 @@ kai push origin snap.latest</pre>
 								</div>
 							</div>
 						{/each}
+					</div>
+				{/if}
+
+			{:else if activeTab === 'reviews'}
+				{#if reviewsLoading}
+					<div class="text-center py-8 text-kai-text-muted">
+						<p>Loading reviews...</p>
+					</div>
+				{:else if reviews.length === 0}
+					<div class="text-center py-12 text-kai-text-muted">
+						<div class="mb-4">
+							<svg class="w-12 h-12 mx-auto opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+							</svg>
+						</div>
+						<p class="text-lg mb-2">No reviews yet</p>
+						<p class="text-sm mb-4">Create a review for your changesets to share with collaborators</p>
+						<code class="text-xs bg-kai-bg px-2 py-1 rounded">kai review open @cs:last --title "My changes"</code>
+					</div>
+				{:else}
+					<div class="border border-kai-border rounded-md overflow-hidden">
+						<table class="w-full">
+							<thead class="bg-kai-bg-secondary">
+								<tr class="text-left text-sm text-kai-text-muted">
+									<th class="px-4 py-3 font-medium">Title</th>
+									<th class="px-4 py-3 font-medium">State</th>
+									<th class="px-4 py-3 font-medium">Author</th>
+									<th class="px-4 py-3 font-medium">Target</th>
+									<th class="px-4 py-3 font-medium">Updated</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each reviews as review}
+									<tr class="border-t border-kai-border hover:bg-kai-bg-secondary">
+										<td class="px-4 py-3">
+											<span class="font-medium">{review.title || '(untitled)'}</span>
+											<span class="ml-2 text-xs text-kai-text-muted font-mono">{review.id}</span>
+										</td>
+										<td class="px-4 py-3">
+											<span class="px-2 py-0.5 text-xs rounded-full {
+												review.state === 'open' ? 'bg-green-500/20 text-green-400' :
+												review.state === 'approved' ? 'bg-blue-500/20 text-blue-400' :
+												review.state === 'changes_requested' ? 'bg-yellow-500/20 text-yellow-400' :
+												review.state === 'merged' ? 'bg-purple-500/20 text-purple-400' :
+												review.state === 'abandoned' ? 'bg-red-500/20 text-red-400' :
+												'bg-kai-bg-tertiary text-kai-text-muted'
+											}">{review.state}</span>
+										</td>
+										<td class="px-4 py-3 text-kai-text-muted text-sm">{review.author || '-'}</td>
+										<td class="px-4 py-3">
+											<code class="text-xs bg-kai-bg px-1.5 py-0.5 rounded font-mono">{review.targetKind}:{review.targetId?.substring(0, 12)}</code>
+										</td>
+										<td class="px-4 py-3 text-kai-text-muted text-sm">{formatDate(review.updatedAt)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
 					</div>
 				{/if}
 

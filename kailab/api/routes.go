@@ -72,6 +72,9 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
 	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent)))
 
+	// Reviews
+	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews)))
+
 	return mux
 }
 
@@ -860,6 +863,85 @@ func isSQLiteBusy(err error) bool {
 	}
 	return strings.Contains(err.Error(), "SQLITE_BUSY") ||
 		strings.Contains(err.Error(), "database is locked")
+}
+
+// ----- Reviews -----
+
+func (h *Handler) ListReviews(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	// Get all refs with "review." prefix (excluding helper refs like review.xyz.target)
+	refs, err := store.ListRefs(rh.DB, "review.")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list refs", err)
+		return
+	}
+
+	var reviews []*proto.ReviewEntry
+
+	for _, ref := range refs {
+		// Skip helper refs (review.xyz.target, etc.)
+		parts := strings.Split(ref.Name, ".")
+		if len(parts) != 2 {
+			continue
+		}
+
+		reviewID := parts[1] // Short hex ID
+
+		// Fetch the review object to get its payload
+		content, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+		if err != nil {
+			log.Printf("Failed to get review object %s: %v", hex.EncodeToString(ref.Target), err)
+			continue
+		}
+
+		if kind != "Review" {
+			continue
+		}
+
+		// Parse review payload (format: "Review\n{json}")
+		reviewJSON := content
+		if idx := indexOf(content, '\n'); idx >= 0 {
+			reviewJSON = content[idx+1:]
+		}
+
+		var payload struct {
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			State       string   `json:"state"`
+			Author      string   `json:"author"`
+			Reviewers   []string `json:"reviewers"`
+			TargetID    string   `json:"targetId"`
+			TargetKind  string   `json:"targetKind"`
+			CreatedAt   float64  `json:"createdAt"`
+			UpdatedAt   float64  `json:"updatedAt"`
+		}
+
+		if err := json.Unmarshal(reviewJSON, &payload); err != nil {
+			log.Printf("Failed to parse review payload: %v", err)
+			continue
+		}
+
+		reviews = append(reviews, &proto.ReviewEntry{
+			ID:          reviewID,
+			RefName:     ref.Name,
+			Title:       payload.Title,
+			Description: payload.Description,
+			State:       payload.State,
+			Author:      payload.Author,
+			Reviewers:   payload.Reviewers,
+			TargetID:    payload.TargetID,
+			TargetKind:  payload.TargetKind,
+			CreatedAt:   int64(payload.CreatedAt),
+			UpdatedAt:   int64(payload.UpdatedAt),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, proto.ReviewsListResponse{Reviews: reviews})
 }
 
 // Helper type for unused import

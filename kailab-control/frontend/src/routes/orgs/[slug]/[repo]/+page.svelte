@@ -25,6 +25,10 @@
 	let fileContent = $state('');
 	let fileContentLoading = $state(false);
 
+	// Reviews tab state
+	let reviews = $state([]);
+	let reviewsLoading = $state(false);
+
 	$effect(() => {
 		currentOrg.set($page.params.slug);
 		currentRepo.set($page.params.repo);
@@ -60,6 +64,15 @@
 			refs = data.refs;
 		}
 		refsLoading = false;
+	}
+
+	async function loadReviews() {
+		reviewsLoading = true;
+		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/reviews`);
+		if (data.reviews) {
+			reviews = data.reviews;
+		}
+		reviewsLoading = false;
 	}
 
 	async function deleteRepo() {
@@ -389,6 +402,15 @@ kai push origin snap.latest</pre>
 						{/if}
 					</button>
 					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'reviews' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
+						onclick={() => { activeTab = 'reviews'; if (reviews.length === 0 && !reviewsLoading) loadReviews(); }}
+					>
+						Reviews
+						{#if reviews.length > 0}
+							<span class="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-kai-bg-tertiary">{reviews.length}</span>
+						{/if}
+					</button>
+					<button
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors {activeTab === 'files' ? 'border-kai-accent text-kai-text' : 'border-transparent text-kai-text-muted hover:text-kai-text'}"
 						onclick={() => activeTab = 'files'}
 					>
@@ -470,6 +492,56 @@ kai push origin snap.latest</pre>
 										</td>
 										<td class="px-4 py-3 text-kai-text-muted text-sm">{ref.actor || '-'}</td>
 										<td class="px-4 py-3 text-kai-text-muted text-sm">{formatDate(ref.updatedAt)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			{:else if activeTab === 'reviews'}
+				{#if reviewsLoading}
+					<div class="text-center py-8 text-kai-text-muted">
+						<p>Loading reviews...</p>
+					</div>
+				{:else if reviews.length === 0}
+					<div class="text-center py-8 text-kai-text-muted">
+						<p>No reviews yet</p>
+						<p class="text-sm mt-2">Create a review with: <code class="bg-kai-bg px-1.5 py-0.5 rounded">kai review open @cs:last</code></p>
+					</div>
+				{:else}
+					<div class="border border-kai-border rounded-md overflow-hidden">
+						<table class="w-full">
+							<thead class="bg-kai-bg-secondary">
+								<tr class="text-left text-sm text-kai-text-muted">
+									<th class="px-4 py-3 font-medium">Title</th>
+									<th class="px-4 py-3 font-medium">State</th>
+									<th class="px-4 py-3 font-medium">Author</th>
+									<th class="px-4 py-3 font-medium">Target</th>
+									<th class="px-4 py-3 font-medium">Updated</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each reviews as review}
+									<tr class="border-t border-kai-border hover:bg-kai-bg-secondary">
+										<td class="px-4 py-3">
+											<span class="font-medium">{review.title || '(untitled)'}</span>
+											<span class="ml-2 text-xs text-kai-text-muted font-mono">{review.id}</span>
+										</td>
+										<td class="px-4 py-3">
+											<span class="px-2 py-0.5 text-xs rounded-full {
+												review.state === 'open' ? 'bg-green-500/20 text-green-400' :
+												review.state === 'approved' ? 'bg-blue-500/20 text-blue-400' :
+												review.state === 'changes_requested' ? 'bg-yellow-500/20 text-yellow-400' :
+												review.state === 'merged' ? 'bg-purple-500/20 text-purple-400' :
+												review.state === 'abandoned' ? 'bg-red-500/20 text-red-400' :
+												'bg-kai-bg-tertiary text-kai-text-muted'
+											}">{review.state}</span>
+										</td>
+										<td class="px-4 py-3 text-kai-text-muted text-sm">{review.author || '-'}</td>
+										<td class="px-4 py-3">
+											<code class="text-xs bg-kai-bg px-1.5 py-0.5 rounded font-mono">{review.targetKind}:{review.targetId?.substring(0, 12)}</code>
+										</td>
+										<td class="px-4 py-3 text-kai-text-muted text-sm">{formatDate(review.updatedAt)}</td>
 									</tr>
 								{/each}
 							</tbody>
