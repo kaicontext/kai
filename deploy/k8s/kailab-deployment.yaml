@@ -60,7 +60,7 @@ spec:
     spec:
       containers:
         - name: kailab
-          image: gcr.io/preplanai/kailab:latest
+          image: us-central1-docker.pkg.dev/preplanai/preplan/kailab:latest
           ports:
             - containerPort: 7447
               name: grpc
@@ -132,7 +132,7 @@ spec:
     spec:
       containers:
         - name: kailab-control
-          image: gcr.io/preplanai/kailab-control:latest
+          image: us-central1-docker.pkg.dev/preplanai/preplan/kailab-control:latest
           ports:
             - containerPort: 8080
               name: http

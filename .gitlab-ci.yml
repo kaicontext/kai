@@ -7,9 +7,9 @@ stages:
   - deploy
 
 variables:
-  # Image names
-  KAILAB_IMAGE: gcr.io/$GCP_PROJECT_ID/kailab
-  KAILAB_CONTROL_IMAGE: gcr.io/$GCP_PROJECT_ID/kailab-control
+  # Image names (Artifact Registry)
+  KAILAB_IMAGE: us-central1-docker.pkg.dev/$GCP_PROJECT_ID/preplan/kailab
+  KAILAB_CONTROL_IMAGE: us-central1-docker.pkg.dev/$GCP_PROJECT_ID/preplan/kailab-control
 
 # Reusable GCP auth (key is base64 encoded)
 .gcp_auth: &gcp_auth
@@ -17,7 +17,7 @@ variables:
   - echo "$GCP_SERVICE_KEY" | base64 -d > /tmp/gcp-key.json
   - gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
   - gcloud config set project $GCP_PROJECT_ID
-  - gcloud auth configure-docker --quiet
+  - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
 .gke_auth: &gke_auth
   - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
