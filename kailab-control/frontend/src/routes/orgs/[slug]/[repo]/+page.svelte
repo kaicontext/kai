@@ -556,7 +556,12 @@ kai push origin snap.latest</pre>
 							<label class="text-sm text-kai-text-muted">Snapshot:</label>
 							<select
 								bind:value={selectedSnapshot}
-								onchange={() => loadFiles(selectedSnapshot)}
+								onchange={(e) => {
+									const snap = e.target.value;
+									if (snap) {
+										goto(`/orgs/${$page.params.slug}/${$page.params.repo}/files/${snap}`);
+									}
+								}}
 								class="input w-64 font-mono text-sm"
 							>
 								<option value="">Select a snapshot...</option>
@@ -593,7 +598,7 @@ kai push origin snap.latest</pre>
 									{#each files as file}
 										<button
 											class="w-full text-left px-2 py-1 rounded text-sm font-mono hover:bg-kai-bg-tertiary transition-colors flex items-center gap-2 {selectedFile?.digest === file.digest ? 'bg-kai-bg-tertiary text-kai-accent' : 'text-kai-text'}"
-											onclick={() => loadFileContent(file)}
+											onclick={() => goto(`/orgs/${$page.params.slug}/${$page.params.repo}/files/${selectedSnapshot}/${file.path}`)}
 										>
 											<span class="text-xs">{getLangIcon(file.lang)}</span>
 											<span class="truncate">{file.path}</span>

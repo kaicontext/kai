@@ -1261,7 +1261,7 @@ kai push origin snap.latest</pre>
 							</div>
 
 							<!-- File content viewer -->
-							<div class="flex-1 overflow-auto" style="max-height: 600px;">
+							<div class="flex-1 flex flex-col" style="max-height: 600px;">
 								{#if !selectedFile}
 									<div class="flex items-center justify-center h-full text-kai-text-muted">
 										<p>Select a file to view</p>
@@ -1271,36 +1271,38 @@ kai push origin snap.latest</pre>
 										<p>Loading...</p>
 									</div>
 								{:else}
-									<div class="p-4">
-										<div class="flex items-center justify-between mb-3 pb-2 border-b border-kai-border">
-											<div class="flex items-center gap-2">
-												<svg class="w-4 h-4 flex-shrink-0 text-kai-text-muted" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1">
-													<path d="M3 2.5A1.5 1.5 0 014.5 1h5.086a1.5 1.5 0 011.06.44l2.915 2.914a1.5 1.5 0 01.439 1.06V13.5a1.5 1.5 0 01-1.5 1.5h-8A1.5 1.5 0 013 13.5v-11z"/>
-													<path d="M9.5 1v3.5a1 1 0 001 1H14"/>
-												</svg>
-												<span class="text-sm">{selectedFile.path}</span>
-												<span class="text-xs text-kai-text-muted px-2 py-0.5 bg-kai-bg rounded">{selectedFile.lang || getFileExtension(selectedFile.path)}</span>
-											</div>
-											<div class="flex gap-2">
+									<!-- Sticky file header -->
+									<div class="flex items-center justify-between px-4 py-2 border-b border-kai-border bg-kai-bg-secondary sticky top-0 z-10">
+										<div class="flex items-center gap-2">
+											<svg class="w-4 h-4 flex-shrink-0 text-kai-text-muted" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1">
+												<path d="M3 2.5A1.5 1.5 0 014.5 1h5.086a1.5 1.5 0 011.06.44l2.915 2.914a1.5 1.5 0 01.439 1.06V13.5a1.5 1.5 0 01-1.5 1.5h-8A1.5 1.5 0 013 13.5v-11z"/>
+												<path d="M9.5 1v3.5a1 1 0 001 1H14"/>
+											</svg>
+											<span class="text-sm font-medium">{selectedFile.path}</span>
+											<span class="text-xs text-kai-text-muted px-2 py-0.5 bg-kai-bg rounded">{selectedFile.lang || getFileExtension(selectedFile.path)}</span>
+										</div>
+										<div class="flex gap-2">
+											<button
+												class="btn text-xs"
+												onclick={() => navigator.clipboard.writeText(getCurrentFileLink())}
+												title="Copy link to this file"
+											>
+												Copy Link
+											</button>
+											{#if !isBinaryFile(selectedFile.path) || isSvgFile(selectedFile.path)}
 												<button
 													class="btn text-xs"
-													onclick={() => navigator.clipboard.writeText(getCurrentFileLink())}
-													title="Copy link to this file"
+													onclick={() => navigator.clipboard.writeText(fileContent)}
+													title="Copy file contents"
 												>
-													Copy Link
+													Copy Code
 												</button>
-												{#if !isBinaryFile(selectedFile.path) || isSvgFile(selectedFile.path)}
-													<button
-														class="btn text-xs"
-														onclick={() => navigator.clipboard.writeText(fileContent)}
-														title="Copy file contents"
-													>
-														Copy Code
-													</button>
-												{/if}
-											</div>
+											{/if}
 										</div>
+									</div>
 
+									<!-- Scrollable content area -->
+									<div class="flex-1 overflow-auto">
 										<!-- Image preview -->
 										{#if isImageFile(selectedFile.path) && fileContentRaw}
 											<div class="flex flex-col items-center justify-center bg-kai-bg rounded border border-kai-border p-8">
@@ -1375,7 +1377,7 @@ kai push origin snap.latest</pre>
 											</div>
 										<!-- Regular code view -->
 										{:else}
-											<div class="code-viewer bg-kai-bg rounded border border-kai-border overflow-auto" bind:this={codeViewerEl}>
+											<div class="code-viewer bg-kai-bg border-t border-kai-border" bind:this={codeViewerEl}>
 												<table class="w-full code-table">
 													<tbody>
 														{#each fileContent.split('\n') as line, i}
@@ -1520,7 +1522,7 @@ kai push origin snap.latest</pre>
 
 	/* Code viewer specific styles */
 	.code-viewer {
-		max-height: 500px;
+		/* Let parent container handle scrolling */
 	}
 
 	.code-table {
