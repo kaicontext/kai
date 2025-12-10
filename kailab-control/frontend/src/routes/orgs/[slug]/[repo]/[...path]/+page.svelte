@@ -379,9 +379,19 @@
 		reviewsLoading = true;
 		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/reviews`);
 		if (data.reviews) {
-			reviews = data.reviews;
+			// Sort reviews by updatedAt descending (newest first)
+			reviews = data.reviews.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 		}
 		reviewsLoading = false;
+	}
+
+	// Select a review and navigate to its changeset
+	function selectReview(review) {
+		// Navigate to the review's target changeset
+		if (review.targetKind === 'ChangeSet' && review.targetId) {
+			const csId = review.targetId.substring(0, 12);
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${csId}`, { replaceState: false });
+		}
 	}
 
 	// Load changeset payloads to get intents
@@ -478,6 +488,9 @@
 	// Select a changeset for detail view
 	async function selectChangeset(csRef) {
 		selectedChangeset = csRef;
+		// Update URL to include changeset name
+		const csId = csRef.name.replace('cs.', '');
+		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${csId}`, { replaceState: false, noScroll: true });
 		await loadChangesetDiff(csRef);
 	}
 
@@ -485,6 +498,8 @@
 	function closeChangesetDetail() {
 		selectedChangeset = null;
 		changesetFiles = { added: [], removed: [], modified: [] };
+		// Go back to changes list
+		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes`, { replaceState: false, noScroll: true });
 	}
 
 	async function deleteRepo() {
@@ -548,9 +563,9 @@ kai push origin snap.latest`;
 		return '🏷️';
 	}
 
-	// Filter refs by type
-	let snapshots = $derived(refs.filter(r => r.name.startsWith('snap.')));
-	let changesets = $derived(refs.filter(r => r.name.startsWith('cs.')));
+	// Filter refs by type and sort by updatedAt descending (newest first)
+	let snapshots = $derived(refs.filter(r => r.name.startsWith('snap.')).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)));
+	let changesets = $derived(refs.filter(r => r.name.startsWith('cs.')).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)));
 	// Only show main workspace refs (ws.<name>), not helper refs (ws.<name>.base, .head, .cs.*)
 	let workspaces = $derived(refs.filter(r => {
 		if (!r.name.startsWith('ws.')) return false;
@@ -1091,7 +1106,10 @@ kai push origin snap.latest</pre>
 							</thead>
 							<tbody>
 								{#each reviews as review}
-									<tr class="border-t border-kai-border hover:bg-kai-bg-secondary">
+									<tr
+										class="border-t border-kai-border hover:bg-kai-bg-secondary cursor-pointer"
+										onclick={() => selectReview(review)}
+									>
 										<td class="px-4 py-3">
 											<span class="font-medium">{review.title || '(untitled)'}</span>
 											<span class="ml-2 text-xs text-kai-text-muted font-mono">{review.id}</span>
