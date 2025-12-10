@@ -105,9 +105,12 @@ deploy:
     - *gcp_auth
     - *gke_auth
   script:
-    # Update deployments with new images
-    - kubectl set image deployment/kailab kailab=$KAILAB_IMAGE:$CI_COMMIT_SHA -n kailab
-    - kubectl set image deployment/kailab-control kailab-control=$KAILAB_CONTROL_IMAGE:$CI_COMMIT_SHA -n kailab
+    # Create namespace if not exists
+    - kubectl create namespace kailab --dry-run=client -o yaml | kubectl apply -f -
+    # Update image tags in manifest and apply
+    - sed -i "s|us-central1-docker.pkg.dev/preplanai/preplan/kailab:latest|$KAILAB_IMAGE:$CI_COMMIT_SHA|g" deploy/k8s/kailab-deployment.yaml
+    - sed -i "s|us-central1-docker.pkg.dev/preplanai/preplan/kailab-control:latest|$KAILAB_CONTROL_IMAGE:$CI_COMMIT_SHA|g" deploy/k8s/kailab-deployment.yaml
+    - kubectl apply -f deploy/k8s/kailab-deployment.yaml
     # Wait for rollout
     - kubectl rollout status deployment/kailab -n kailab --timeout=300s
     - kubectl rollout status deployment/kailab-control -n kailab --timeout=300s
