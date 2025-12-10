@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -272,12 +273,23 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return raw bytes with metadata headers
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("X-Kailab-Kind", kind)
-	w.Header().Set("X-Kailab-Digest", digestHex)
-	w.WriteHeader(http.StatusOK)
-	w.Write(content)
+	// Return JSON with kind and payload
+	// Content format is: Kind\n{json_payload}
+	// Extract just the payload part after the first newline
+	var payload json.RawMessage
+	parts := bytes.SplitN(content, []byte("\n"), 2)
+	if len(parts) == 2 {
+		payload = parts[1]
+	} else {
+		payload = content
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"kind":    kind,
+		"digest":  digestHex,
+		"payload": payload,
+	})
 }
 
 // ----- Refs -----
