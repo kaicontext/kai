@@ -131,10 +131,7 @@ spec:
             - name: KLC_LISTEN
               value: ":8080"
             - name: KLC_DB_URL
-              valueFrom:
-                secretKeyRef:
-                  name: kailab-db-secret
-                  key: DATABASE_URL
+              value: "postgres://kailab_admin:REDACTED@10.34.65.2:5432/kailab?sslmode=verify-ca&sslrootcert=/certs/ca.crt&sslcert=/certs/client.crt&sslkey=/certs/client.key"
             - name: KLC_JWT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
@@ -149,6 +146,10 @@ spec:
               value: '{"default":"http://kailab:7447"}'
             - name: KLC_BASE_URL
               value: "https://kaiscm.com"
+          volumeMounts:
+            - name: db-certs
+              mountPath: /certs
+              readOnly: true
           resources:
             requests:
               memory: "128Mi"
@@ -168,6 +169,11 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: db-certs
+          secret:
+            secretName: kailab-db-certs
+            defaultMode: 0400
 
 ---
 # Kailab Control Plane Service
