@@ -53,7 +53,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.1"
+var Version = "0.9.2"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -79,19 +79,24 @@ var initCmd = &cobra.Command{
 
 var snapshotCmd = &cobra.Command{
 	Use:   "snapshot",
+	Short: "Snapshot commands",
+}
+
+var snapshotCreateCmd = &cobra.Command{
+	Use:   "create",
 	Short: "Create a snapshot from a Git ref or directory",
 	Long: `Create a snapshot from a Git ref or directory.
 
 IMPORTANT: You must be explicit about the source using --git or --dir.
 
 Git Snapshot:
-  kai snapshot --git main           # Snapshot from Git branch
-  kai snapshot --git feature/login  # Snapshot from branch
-  kai snapshot --git abc123def      # Snapshot from commit hash
+  kai snapshot create --git main           # Snapshot from Git branch
+  kai snapshot create --git feature/login  # Snapshot from branch
+  kai snapshot create --git abc123def      # Snapshot from commit hash
 
 Directory Snapshot:
-  kai snapshot --dir .              # Snapshot current directory
-  kai snapshot --dir ./src          # Snapshot specific path
+  kai snapshot create --dir .              # Snapshot current directory
+  kai snapshot create --dir ./src          # Snapshot specific path
 
 For a quick directory snapshot, use 'kai snap' instead.
 For the full workflow (snapshot + analyze), use 'kai capture'.`,
@@ -543,18 +548,31 @@ var dumpCmd = &cobra.Command{
 }
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List resources",
+	Use:        "list",
+	Short:      "List resources (deprecated: use 'kai snapshot list' or 'kai changeset list')",
+	Deprecated: "use 'kai snapshot list' or 'kai changeset list' instead",
 }
 
 var listSnapshotsCmd = &cobra.Command{
 	Use:   "snapshots",
-	Short: "List all snapshots",
+	Short: "List all snapshots (deprecated: use 'kai snapshot list')",
 	RunE:  runListSnapshots,
 }
 
 var listChangesetsCmd = &cobra.Command{
 	Use:   "changesets",
+	Short: "List all changesets (deprecated: use 'kai changeset list')",
+	RunE:  runListChangesets,
+}
+
+var snapshotListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all snapshots",
+	RunE:  runListSnapshots,
+}
+
+var changesetListCmd = &cobra.Command{
+	Use:   "list",
 	Short: "List all changesets",
 	RunE:  runListChangesets,
 }
@@ -1335,11 +1353,11 @@ var (
 )
 
 func init() {
-	snapshotCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
-	snapshotCmd.Flags().StringVar(&dirPath, "dir", "", "Path to directory (creates snapshot without Git)")
-	snapshotCmd.Flags().StringVar(&snapshotGitRef, "git", "", "Git ref to snapshot (explicit mode)")
-	snapshotCmd.Flags().StringVarP(&snapshotMessage, "message", "m", "", "Description for this snapshot")
-	snapshotCmd.Flags().BoolVar(&explainFlag, "explain", false, "Show detailed explanation of what this command does")
+	snapshotCreateCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
+	snapshotCreateCmd.Flags().StringVar(&dirPath, "dir", "", "Path to directory (creates snapshot without Git)")
+	snapshotCreateCmd.Flags().StringVar(&snapshotGitRef, "git", "", "Git ref to snapshot (explicit mode)")
+	snapshotCreateCmd.Flags().StringVarP(&snapshotMessage, "message", "m", "", "Description for this snapshot")
+	snapshotCreateCmd.Flags().BoolVar(&explainFlag, "explain", false, "Show detailed explanation of what this command does")
 
 	// Capture command flags
 	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
@@ -1521,8 +1539,18 @@ func init() {
 	analyzeCmd.AddCommand(analyzeSymbolsCmd)
 	analyzeCmd.AddCommand(analyzeCallsCmd)
 	analyzeCmd.AddCommand(analyzeDepsCmd)
+
+	// Snapshot subcommands
+	snapshotCmd.AddCommand(snapshotCreateCmd)
+	snapshotCmd.AddCommand(snapshotListCmd)
+
+	// Changeset subcommands
 	changesetCmd.AddCommand(changesetCreateCmd)
+	changesetCmd.AddCommand(changesetListCmd)
+
 	intentCmd.AddCommand(intentRenderCmd)
+
+	// Deprecated list commands (kept for backwards compatibility)
 	listCmd.AddCommand(listSnapshotsCmd)
 	listCmd.AddCommand(listChangesetsCmd)
 	listCmd.AddCommand(listSymbolsCmd)
