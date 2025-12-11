@@ -31,6 +31,32 @@
 		breaks: true
 	});
 
+	/**
+	 * Sanitize HTML by removing potentially dangerous tags and attributes
+	 * @param {string} html - HTML string to sanitize
+	 * @returns {string} Sanitized HTML
+	 */
+	function sanitizeHtml(html) {
+		if (!html) return '';
+		// Remove script tags and event handlers
+		return html
+			.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+			.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
+			.replace(/<object\b[^<]*(?:(?!<\/object>)<[^<]*)*<\/object>/gi, '')
+			.replace(/<embed\b[^>]*>/gi, '')
+			.replace(/\bon\w+\s*=/gi, 'data-removed=')
+			.replace(/javascript:/gi, 'removed:');
+	}
+
+	/**
+	 * Render markdown safely
+	 * @param {string} content - Markdown content
+	 * @returns {string} Sanitized HTML
+	 */
+	function safeMarkdown(content) {
+		return sanitizeHtml(marked(content));
+	}
+
 	// Register languages
 	hljs.registerLanguage('javascript', javascript);
 	hljs.registerLanguage('js', javascript);
@@ -62,11 +88,76 @@
 	hljs.registerLanguage('rb', ruby);
 	hljs.registerLanguage('php', php);
 
+	// ============================================
+	// Type Definitions (JSDoc)
+	// ============================================
+
+	/**
+	 * @typedef {Object} Ref
+	 * @property {string} name - Ref name (e.g., "snap.latest", "cs.abc123")
+	 * @property {string} target - Base64-encoded target digest
+	 * @property {string} actor - Who created/updated this ref
+	 * @property {number} updatedAt - Timestamp in milliseconds
+	 */
+
+	/**
+	 * @typedef {Object} File
+	 * @property {string} path - File path relative to repo root
+	 * @property {string} digest - Content digest (hex)
+	 * @property {number} [size] - File size in bytes
+	 * @property {string} [lang] - Detected language for syntax highlighting
+	 */
+
+	/**
+	 * @typedef {Object} ChangesetPayload
+	 * @property {string} base - Base snapshot digest (hex)
+	 * @property {string} head - Head snapshot digest (hex)
+	 * @property {string} [intent] - Changeset intent/title
+	 * @property {string} [description] - Changeset description
+	 * @property {number} createdAt - Creation timestamp
+	 */
+
+	/**
+	 * @typedef {Object} Review
+	 * @property {string} id - Review ID (hex)
+	 * @property {string} title - Review title
+	 * @property {string} state - Review state (draft, open, approved, merged, etc.)
+	 * @property {string} author - Review author
+	 * @property {string} targetId - Target changeset ID
+	 * @property {string} targetKind - Target kind (ChangeSet)
+	 * @property {string[]} [reviewers] - List of reviewers
+	 * @property {string} [description] - Review description
+	 */
+
+	/**
+	 * @typedef {Object} DiffHunk
+	 * @property {number} oldStart - Starting line in old file
+	 * @property {number} oldLines - Number of lines in old file
+	 * @property {number} newStart - Starting line in new file
+	 * @property {number} newLines - Number of lines in new file
+	 * @property {DiffLine[]} lines - Lines in this hunk
+	 */
+
+	/**
+	 * @typedef {Object} DiffLine
+	 * @property {string} type - Line type: 'add', 'delete', or 'context'
+	 * @property {string} content - Line content
+	 * @property {number} [oldLine] - Line number in old file
+	 * @property {number} [newLine] - Line number in new file
+	 */
+
+	// ============================================
+	// State
+	// ============================================
+
+	/** @type {Object|null} */
 	let repo = $state(null);
+	/** @type {Ref[]} */
 	let refs = $state([]);
 	let loading = $state(true);
 	let refsLoading = $state(true);
-	let activeTab = $state('changes');  // Default to changes (changesets)
+	/** @type {'changes'|'workspaces'|'files'|'snapshots'|'setup'|'reviews'} */
+	let activeTab = $state('changes');
 	let compareBase = $state('');
 	let compareHead = $state('');
 	let diffResult = $state(null);
@@ -75,29 +166,39 @@
 	let deleting = $state(false);
 
 	// Changeset state
-	let changesetPayloads = $state({});  // Map of ref name -> payload
+	/** @type {Object<string, ChangesetPayload>} */
+	let changesetPayloads = $state({});
 	let changesetsLoading = $state(false);
-	let selectedChangeset = $state(null);  // Currently selected changeset for detail view
-	let changesetFiles = $state({ added: [], removed: [], modified: [] });  // Files changed in selected changeset
+	/** @type {Ref|null} */
+	let selectedChangeset = $state(null);
+	/** @type {{added: File[], removed: File[], modified: File[]}} */
+	let changesetFiles = $state({ added: [], removed: [], modified: [] });
 	let changesetFilesLoading = $state(false);
 
-	// Diff view state (for changeset file diffs)
-	let selectedDiffFile = $state(null);  // { path, status }
-	let fileDiffData = $state(null);      // API response with hunks
+	// Diff view state
+	/** @type {{path: string, status: string}|null} */
+	let selectedDiffFile = $state(null);
+	/** @type {{hunks: DiffHunk[]}|null} */
+	let fileDiffData = $state(null);
 	let fileDiffLoading = $state(false);
 
 	// Affected tests state
+	/** @type {string[]} */
 	let affectedTests = $state([]);
 	let affectedTestsLoading = $state(false);
 
 	// Files tab state
 	let selectedSnapshot = $state('');
+	/** @type {File[]} */
 	let files = $state([]);
 	let filesLoading = $state(false);
+	/** @type {File|null} */
 	let selectedFile = $state(null);
 	let fileContent = $state('');
-	let fileContentRaw = $state(null); // Raw base64 for binary files
+	/** @type {string|null} */
+	let fileContentRaw = $state(null);
 	let fileContentLoading = $state(false);
+	/** @type {{start: number|null, end: number|null}} */
 	let selectedLines = $state({ start: null, end: null });
 	let codeViewerEl = $state(null);
 	let expandedDirs = $state(new Set()); // Track expanded directories
@@ -128,6 +229,26 @@
 			return null;
 		}
 	});
+
+	// File size limits
+	const MAX_FILE_SIZE = 1024 * 1024; // 1MB for text files
+	const MAX_IMAGE_SIZE = 2 * 1024 * 1024; // 2MB for images
+
+	/**
+	 * Safe API wrapper with error handling
+	 * @param {string} method - HTTP method
+	 * @param {string} url - API endpoint
+	 * @param {object|null} data - Request body
+	 * @returns {Promise<any>} API response or null on error
+	 */
+	async function safeApiCall(method, url, data = null) {
+		try {
+			return await api(method, url, data);
+		} catch (error) {
+			console.error(`API call failed: ${method} ${url}`, error);
+			return null;
+		}
+	}
 
 	// File type detection
 	const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tiff', '.tif'];
@@ -185,9 +306,6 @@
 		const ext = getFileExtension(path);
 		return ext === '.md' || ext === '.markdown';
 	}
-
-	// Max file size to display images (2MB)
-	const MAX_IMAGE_SIZE = 2 * 1024 * 1024;
 
 	$effect(() => {
 		currentOrg.set($page.params.slug);
@@ -385,14 +503,13 @@
 			selectedSnapshot = snapshot;
 		}
 
+		// Load repo first (needed for path validation), then parallelize the rest
 		await loadRepo();
-		await loadRefs();
-
-		// Load changeset payloads to get intents
-		await loadChangesetPayloads();
-
-		// Load reviews to show review info on changesets
-		await loadReviews();
+		await Promise.all([
+			loadRefs(),
+			loadChangesetPayloads(),
+			loadReviews()
+		]);
 
 		// If URL has changeset ID, select it
 		if (changesetId && activeTab === 'changes') {
@@ -819,8 +936,11 @@ kai push origin snap.latest`;
 			const estimatedSize = (data.content.length * 3) / 4;
 
 			if (isImageFile(file.path) || isSvgFile(file.path)) {
-				// For images and SVGs, keep as base64 for display
-				if (isSvgFile(file.path)) {
+				// Check image size limit
+				if (estimatedSize > MAX_IMAGE_SIZE) {
+					fileContent = `(Image too large to display: ${(estimatedSize / 1024 / 1024).toFixed(1)}MB, max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`;
+					fileContentRaw = null;
+				} else if (isSvgFile(file.path)) {
 					// Decode SVG to show the source as well
 					try {
 						fileContent = atob(data.content);
@@ -831,11 +951,16 @@ kai push origin snap.latest`;
 			} else if (isBinaryFile(file.path)) {
 				fileContent = '(Binary file - cannot display)';
 			} else {
-				// Text file - decode from base64
-				try {
-					fileContent = atob(data.content);
-				} catch {
-					fileContent = '(Binary file - cannot display)';
+				// Text file - check size limit
+				if (estimatedSize > MAX_FILE_SIZE) {
+					fileContent = `(File too large to display: ${(estimatedSize / 1024).toFixed(0)}KB, max ${MAX_FILE_SIZE / 1024}KB)`;
+				} else {
+					// Decode from base64
+					try {
+						fileContent = atob(data.content);
+					} catch {
+						fileContent = '(Binary file - cannot display)';
+					}
 				}
 			}
 		}
@@ -1669,7 +1794,7 @@ kai push origin snap.latest</pre>
 										<!-- Markdown rendering -->
 										{:else if isMarkdownFile(selectedFile.path)}
 											<div class="markdown-body bg-kai-bg rounded border border-kai-border p-6 overflow-auto">
-												{@html marked(fileContent)}
+												{@html safeMarkdown(fileContent)}
 											</div>
 										<!-- Regular code view -->
 										{:else}
