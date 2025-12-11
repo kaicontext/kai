@@ -172,7 +172,7 @@ func resolveBaseline(db *graph.DB, against string) ([]byte, string, error) {
 		return result.ID, against, nil
 	}
 
-	// Default: latest snapshot
+	// Default: latest snapshot (snap.latest)
 	result, err := resolver.Resolve("@snap:last", &kind)
 	if err != nil {
 		// No snapshots yet
@@ -182,5 +182,5 @@ func resolveBaseline(db *graph.DB, against string) ([]byte, string, error) {
 		return nil, "", err
 	}
 
-	return result.ID, "@snap:last", nil
+	return result.ID, "snap.latest", nil
 }

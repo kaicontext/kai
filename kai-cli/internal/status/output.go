@@ -141,7 +141,7 @@ func writeDefaultWithSemantic(w io.Writer, result *Result, semantic *SemanticRes
 	}
 
 	if !result.HasChanges() {
-		fmt.Fprintln(w, "No changes since baseline")
+		fmt.Fprintf(w, "No changes since %s\n", formatBaselineRef(result))
 		return nil
 	}
 
