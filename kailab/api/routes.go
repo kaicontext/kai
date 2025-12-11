@@ -1315,22 +1315,11 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 	}
 	newContent := append([]byte("Review\n"), newPayloadJSON...)
 
-	// Build pack with the single object
-	packData, err := pack.BuildPack([]pack.PackObject{{
-		Digest:  nil, // Will be computed by BuildPack
-		Kind:    "Review",
-		Content: newContent,
-	}})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to build pack", err)
-		return
-	}
-
-	// Compute segment checksum
-	segmentChecksum := computeBlake3(packData)
-
 	// Compute object digest
 	newDigest := computeBlake3(newContent)
+
+	// Store raw content as a segment (not a pack - just the raw bytes)
+	segmentChecksum := computeBlake3(newContent)
 
 	// Store in transaction
 	tx, err := rh.DB.Begin()
@@ -1340,18 +1329,14 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// Insert segment
-	segmentID, err := store.InsertSegmentTx(tx, segmentChecksum, packData)
+	// Insert segment with raw content
+	segmentID, err := store.InsertSegmentTx(tx, segmentChecksum, newContent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store segment", err)
 		return
 	}
 
-	// Insert object index (offset 0 after header, which BuildPack handles)
-	// For a single-object pack, the object starts right after the header
-	// The header is: 4 bytes length + JSON header
-	// But we stored the whole pack, so we need to compute the offset
-	// Actually, simpler: just store the object content directly with offset 0
+	// Insert object index at offset 0 with full length
 	err = store.InsertObjectTx(tx, newDigest, segmentID, 0, int64(len(newContent)), "Review")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to index object", err)
