@@ -53,7 +53,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.0"
+var Version = "0.9.1"
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
