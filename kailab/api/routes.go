@@ -1343,11 +1343,40 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update ref
+	// Update review ref
 	err = store.ForceSetRef(rh.DB, tx, refName, newDigest, "", "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update ref", err)
 		return
+	}
+
+	// If merging, also update snap.main to the changeset's head snapshot
+	if req.State == "merged" {
+		targetID, ok := payload["targetId"].(string)
+		if ok && targetID != "" {
+			// Get the changeset object
+			csDigest, err := hex.DecodeString(targetID)
+			if err == nil {
+				csContent, csKind, err := pack.ExtractObjectFromDB(rh.DB, csDigest)
+				if err == nil && csKind == "ChangeSet" {
+					// Parse changeset to get head snapshot
+					csJSON := csContent
+					if idx := indexOf(csContent, '\n'); idx >= 0 {
+						csJSON = csContent[idx+1:]
+					}
+					var csPayload struct {
+						Head string `json:"head"`
+					}
+					if err := json.Unmarshal(csJSON, &csPayload); err == nil && csPayload.Head != "" {
+						// Update snap.main to point to the head snapshot
+						headDigest, err := hex.DecodeString(csPayload.Head)
+						if err == nil {
+							store.ForceSetRef(rh.DB, tx, "snap.main", headDigest, "", "")
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
