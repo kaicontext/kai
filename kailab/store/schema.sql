@@ -72,3 +72,18 @@ CREATE TABLE IF NOT EXISTS enrich_queue (
 );
 CREATE INDEX IF NOT EXISTS enrich_queue_status ON enrich_queue(status);
 CREATE INDEX IF NOT EXISTS enrich_queue_node_id ON enrich_queue(node_id);
+
+-- Edges: relationships between nodes (IMPORTS, TESTS, CALLS, DEFINES_IN, etc.)
+-- Pushed from CLI which computes them during symbol analysis
+CREATE TABLE IF NOT EXISTS edges (
+  src BLOB NOT NULL,           -- source node digest
+  type TEXT NOT NULL,          -- edge type: IMPORTS, TESTS, CALLS, DEFINES_IN, HAS_FILE, etc.
+  dst BLOB NOT NULL,           -- destination node digest
+  at BLOB,                     -- snapshot context (optional, for scoped queries)
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (src, type, dst, at)
+);
+CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
+CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+CREATE INDEX IF NOT EXISTS edges_type ON edges(type);
+CREATE INDEX IF NOT EXISTS edges_at ON edges(at);

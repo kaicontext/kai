@@ -9256,6 +9256,47 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Push edges for pushed snapshots
+	// Collect edges for all snapshot refs we just pushed
+	var edgesToPush []remote.EdgeData
+	for _, r := range refsToSync {
+		// Only push edges for snapshots (where import/test analysis is scoped)
+		if r.TargetKind != ref.KindSnapshot {
+			continue
+		}
+
+		// Get edges scoped to this snapshot (IMPORTS, TESTS, CALLS, etc.)
+		for _, edgeType := range []graph.EdgeType{
+			graph.EdgeImports,
+			graph.EdgeTests,
+			graph.EdgeCalls,
+		} {
+			edges, err := db.GetEdgesByContext(r.TargetID, edgeType)
+			if err != nil {
+				continue
+			}
+			for _, edge := range edges {
+				edgesToPush = append(edgesToPush, remote.EdgeData{
+					Src:  hex.EncodeToString(edge.Src),
+					Type: string(edge.Type),
+					Dst:  hex.EncodeToString(edge.Dst),
+					At:   hex.EncodeToString(edge.At),
+				})
+			}
+		}
+	}
+
+	if len(edgesToPush) > 0 {
+		fmt.Printf("  Pushing %d edges...", len(edgesToPush))
+		result, err := client.PushEdges(edgesToPush)
+		if err != nil {
+			// Don't fail the push if edge push fails - edges are supplementary
+			fmt.Printf(" warning: %v\n", err)
+		} else {
+			fmt.Printf(" %d inserted\n", result.Inserted)
+		}
+	}
+
 	fmt.Println("Push complete.")
 	return nil
 }

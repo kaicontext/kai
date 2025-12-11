@@ -84,6 +84,9 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	// CI / Affected Tests
 	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests)))
 
+	// Edges
+	mux.Handle("POST /{tenant}/{repo}/v1/edges", withRepo(http.HandlerFunc(h.IngestEdges)))
+
 	return mux
 }
 
@@ -1499,13 +1502,19 @@ func (h *Handler) GetAffectedTests(w http.ResponseWriter, r *http.Request) {
 	// For modified, we'd need to compare content digests - skip for now
 	// The heuristic will still work for added/removed files
 
-	// Find affected tests using naming heuristics
-	affectedTests := findAffectedTestsByHeuristic(changedFiles, headFiles)
+	// Try to find affected tests using real edges first
+	affectedTests, method := findAffectedTestsFromEdges(rh.DB, headDigest, changedFiles)
+
+	// Fall back to heuristics if no edges found
+	if len(affectedTests) == 0 {
+		affectedTests = findAffectedTestsByHeuristic(changedFiles, headFiles)
+		method = "heuristic"
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"changedFiles":  changedFiles,
 		"affectedTests": affectedTests,
-		"method":        "heuristic", // Indicates this is heuristic-based, not graph-based
+		"method":        method,
 	})
 }
 
@@ -1533,6 +1542,81 @@ func getSnapshotFilePaths(db *sql.DB, snapshotDigest []byte) (map[string]bool, e
 		paths[f.Path] = true
 	}
 	return paths, nil
+}
+
+// findAffectedTestsFromEdges finds affected tests using real edges from the database.
+// Returns affected test paths and the method used ("edges" or empty if none found).
+func findAffectedTestsFromEdges(db *sql.DB, snapshotDigest []byte, changedFiles []string) ([]string, string) {
+	// Get all TESTS edges scoped to this snapshot
+	edges, err := store.GetEdgesBySnapshotDB(db, snapshotDigest, "TESTS")
+	if err != nil || len(edges) == 0 {
+		return nil, ""
+	}
+
+	// Build map of file digests to their test edges
+	// Edge format: src=test_file_digest, type=TESTS, dst=source_file_digest
+	// We need to find tests where dst matches any changed file
+
+	// First get the snapshot to map paths to digests
+	snapData, _, err := pack.ExtractObjectFromDB(db, snapshotDigest)
+	if err != nil {
+		return nil, ""
+	}
+
+	// Parse snapshot to get file paths and their digests
+	var snapPayload struct {
+		Files []struct {
+			Path   string `json:"path"`
+			Digest string `json:"digest"` // content digest
+		} `json:"files"`
+	}
+	if idx := bytes.Index(snapData, []byte("\n")); idx > 0 {
+		if err := json.Unmarshal(snapData[idx+1:], &snapPayload); err != nil {
+			return nil, ""
+		}
+	}
+
+	// Map paths to content digests, and vice versa
+	pathToDigest := make(map[string][]byte)
+	digestToPath := make(map[string]string)
+	for _, f := range snapPayload.Files {
+		if d, err := hex.DecodeString(f.Digest); err == nil {
+			pathToDigest[f.Path] = d
+			digestToPath[f.Digest] = f.Path
+		}
+	}
+
+	// Find digests of changed files
+	changedDigests := make(map[string]bool)
+	for _, path := range changedFiles {
+		if d, ok := pathToDigest[path]; ok {
+			changedDigests[hex.EncodeToString(d)] = true
+		}
+	}
+
+	// Find tests that test any changed file
+	affectedTests := make(map[string]bool)
+	for _, edge := range edges {
+		dstHex := hex.EncodeToString(edge.Dst)
+		if changedDigests[dstHex] {
+			// This test targets a changed file
+			srcHex := hex.EncodeToString(edge.Src)
+			if testPath, ok := digestToPath[srcHex]; ok {
+				affectedTests[testPath] = true
+			}
+		}
+	}
+
+	if len(affectedTests) == 0 {
+		return nil, ""
+	}
+
+	// Convert to slice
+	var result []string
+	for path := range affectedTests {
+		result = append(result, path)
+	}
+	return result, "edges"
 }
 
 // findAffectedTestsByHeuristic finds test files that might be affected by changed files.
@@ -1623,6 +1707,90 @@ func getFileName(path string) string {
 		}
 	}
 	return path
+}
+
+// ----- Edges -----
+
+// IngestEdges receives and stores edges from CLI.
+func (h *Handler) IngestEdges(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Edges []struct {
+			Src  string `json:"src"`  // hex digest
+			Type string `json:"type"` // IMPORTS, TESTS, etc.
+			Dst  string `json:"dst"`  // hex digest
+			At   string `json:"at"`   // hex digest (optional)
+		} `json:"edges"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if len(req.Edges) == 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"inserted": 0,
+		})
+		return
+	}
+
+	// Convert to store.Edge format
+	edges := make([]store.Edge, 0, len(req.Edges))
+	for _, e := range req.Edges {
+		src, err := hex.DecodeString(e.Src)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid src digest", err)
+			return
+		}
+		dst, err := hex.DecodeString(e.Dst)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid dst digest", err)
+			return
+		}
+		var at []byte
+		if e.At != "" {
+			at, err = hex.DecodeString(e.At)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid at digest", err)
+				return
+			}
+		}
+		edges = append(edges, store.Edge{
+			Src:  src,
+			Type: e.Type,
+			Dst:  dst,
+			At:   at,
+		})
+	}
+
+	// Insert in a transaction
+	tx, err := store.BeginTx(rh.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction", err)
+		return
+	}
+	defer tx.Rollback()
+
+	if err := store.InsertEdgesTx(tx, edges); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to insert edges", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"inserted": len(edges),
+	})
 }
 
 // Helper type for unused import

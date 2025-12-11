@@ -1075,3 +1075,226 @@ func EnqueueForEnrichmentTx(tx *sql.Tx, nodeID []byte, kind string) error {
 	}
 	return nil
 }
+
+// ----- Edges -----
+
+// Edge represents a relationship between two nodes.
+type Edge struct {
+	Src  []byte `json:"src"`  // source node digest
+	Type string `json:"type"` // edge type: IMPORTS, TESTS, CALLS, etc.
+	Dst  []byte `json:"dst"`  // destination node digest
+	At   []byte `json:"at"`   // snapshot context (optional)
+}
+
+// InsertEdge inserts a single edge, ignoring duplicates.
+func (db *DB) InsertEdge(tx *sql.Tx, src []byte, edgeType string, dst []byte, at []byte) error {
+	ts := cas.NowMs()
+	_, err := tx.Exec(
+		`INSERT OR IGNORE INTO edges (src, type, dst, at, created_at) VALUES (?, ?, ?, ?, ?)`,
+		src, edgeType, dst, at, ts,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting edge: %w", err)
+	}
+	return nil
+}
+
+// InsertEdgesBatch inserts multiple edges efficiently.
+func (db *DB) InsertEdgesBatch(tx *sql.Tx, edges []Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+
+	ts := cas.NowMs()
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO edges (src, type, dst, at, created_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("preparing edge insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, e := range edges {
+		if _, err := stmt.Exec(e.Src, e.Type, e.Dst, e.At, ts); err != nil {
+			return fmt.Errorf("inserting edge: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetEdgesFrom returns all edges from a source node.
+func (db *DB) GetEdgesFrom(src []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE src = ?`
+	args := []interface{}{src}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// GetEdgesTo returns all edges pointing to a destination node.
+func (db *DB) GetEdgesTo(dst []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE dst = ?`
+	args := []interface{}{dst}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// GetEdgesBySnapshot returns all edges scoped to a specific snapshot.
+func (db *DB) GetEdgesBySnapshot(at []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE at = ?`
+	args := []interface{}{at}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// ----- Standalone Edge Functions (for use with raw *sql.DB) -----
+
+// InsertEdgesTx inserts multiple edges in a transaction (standalone function).
+func InsertEdgesTx(tx *sql.Tx, edges []Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+
+	ts := cas.NowMs()
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO edges (src, type, dst, at, created_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("preparing edge insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, e := range edges {
+		if _, err := stmt.Exec(e.Src, e.Type, e.Dst, e.At, ts); err != nil {
+			return fmt.Errorf("inserting edge: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetEdgesFromDB returns edges from a source node (standalone function).
+func GetEdgesFromDB(db *sql.DB, src []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE src = ?`
+	args := []interface{}{src}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// GetEdgesToDB returns edges pointing to a destination node (standalone function).
+func GetEdgesToDB(db *sql.DB, dst []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE dst = ?`
+	args := []interface{}{dst}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// GetEdgesBySnapshotDB returns edges for a specific snapshot (standalone function).
+func GetEdgesBySnapshotDB(db *sql.DB, at []byte, edgeType string) ([]Edge, error) {
+	query := `SELECT src, type, dst, at FROM edges WHERE at = ?`
+	args := []interface{}{at}
+	if edgeType != "" {
+		query += ` AND type = ?`
+		args = append(args, edgeType)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Src, &e.Type, &e.Dst, &e.At); err != nil {
+			return nil, fmt.Errorf("scanning edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}

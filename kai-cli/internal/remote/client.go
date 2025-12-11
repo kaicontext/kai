@@ -762,3 +762,59 @@ func CollectObjects(db interface {
 
 	return objects, nil
 }
+
+// EdgeData represents an edge to push to the server.
+type EdgeData struct {
+	Src  string `json:"src"`  // hex digest
+	Type string `json:"type"` // IMPORTS, TESTS, etc.
+	Dst  string `json:"dst"`  // hex digest
+	At   string `json:"at"`   // hex digest (optional)
+}
+
+// PushEdgesResponse is the response from POST /edges.
+type PushEdgesResponse struct {
+	Inserted int `json:"inserted"`
+}
+
+// PushEdges sends edges to the server.
+func (c *Client) PushEdges(edges []EdgeData) (*PushEdgesResponse, error) {
+	if len(edges) == 0 {
+		return &PushEdgesResponse{Inserted: 0}, nil
+	}
+
+	req := struct {
+		Edges []EdgeData `json:"edges"`
+	}{Edges: edges}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/edges", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result PushEdgesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
