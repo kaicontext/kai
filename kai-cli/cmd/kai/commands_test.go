@@ -375,7 +375,7 @@ func TestCommandFlags(t *testing.T) {
 		flags    []string
 		cmdName  string
 	}{
-		{snapshotCmd, []string{"repo", "dir", "message"}, "snapshot"},
+		{snapshotCreateCmd, []string{"repo", "dir", "message"}, "snapshot create"},
 		{statusCmd, []string{"dir", "against", "name-only", "json", "semantic"}, "status"},
 		{logCmd, []string{"limit"}, "log"},
 		{diffCmd, []string{"dir", "name-only", "explain", "semantic", "json", "patch"}, "diff"},
@@ -749,17 +749,6 @@ func TestShowUnifiedDiff(t *testing.T) {
 	}
 }
 
-// TestCapturePromoteFlag verifies --promote flag exists on capture command
-func TestCapturePromoteFlag(t *testing.T) {
-	flag := captureCmd.Flags().Lookup("promote")
-	if flag == nil {
-		t.Fatal("capture command should have --promote flag")
-	}
-	if flag.DefValue != "false" {
-		t.Errorf("--promote should default to false, got %s", flag.DefValue)
-	}
-}
-
 // TestReviewOpenBaseFlag verifies --base flag exists on review open command
 func TestReviewOpenBaseFlag(t *testing.T) {
 	flag := reviewOpenCmd.Flags().Lookup("base")
@@ -768,17 +757,6 @@ func TestReviewOpenBaseFlag(t *testing.T) {
 	}
 	if flag.DefValue != "" {
 		t.Errorf("--base should default to empty, got %s", flag.DefValue)
-	}
-}
-
-// TestReviewOpenPromoteLastFlag verifies --promote-last flag exists on review open command
-func TestReviewOpenPromoteLastFlag(t *testing.T) {
-	flag := reviewOpenCmd.Flags().Lookup("promote-last")
-	if flag == nil {
-		t.Fatal("review open command should have --promote-last flag")
-	}
-	if flag.DefValue != "false" {
-		t.Errorf("--promote-last should default to false, got %s", flag.DefValue)
 	}
 }
 
