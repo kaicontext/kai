@@ -116,7 +116,7 @@ Examples:
   kai snap src/           # Snapshot specific path
   kai snap ./build        # Snapshot build output
 
-Equivalent to 'kai snapshot --dir <path>'.
+Equivalent to 'kai snapshot create --dir <path>'.
 
 This command:
   - Never reads Git
@@ -1851,7 +1851,7 @@ This creates a ` + "`" + `.kai/` + "`" + ` directory with the database and objec
 kai snap .
 
 # Or from Git branch/tag/commit
-kai snapshot --git main
+kai snapshot create --git main
 ` + "```" + `
 
 ### Step 3: Make Changes and Diff
@@ -1955,8 +1955,8 @@ kai diff -p
 ### "I want to compare two Git branches"
 ` + "```" + `bash
 # Must use explicit --git flag (no positional args)
-kai snapshot --git main
-kai snapshot --git feature-branch
+kai snapshot create --git main
+kai snapshot create --git feature-branch
 kai analyze symbols @snap:prev
 kai analyze symbols @snap:last
 kai changeset create @snap:prev @snap:last
@@ -2092,7 +2092,7 @@ kai prune --keep "src/**"  # Preserve files matching pattern
 | Error | Fix |
 |-------|-----|
 | "Kai not initialized" | Run ` + "`" + `kai init` + "`" + ` first |
-| "No snapshots found" | Create one with ` + "`" + `kai snapshot --dir .` + "`" + ` |
+| "No snapshots found" | Create one with ` + "`" + `kai snapshot create --dir .` + "`" + ` |
 | "ambiguous prefix" | Use more characters of the ID, or use ` + "`" + `@snap:last` + "`" + ` |
 | "Last capture was X minutes ago" | Run ` + "`" + `kai capture` + "`" + ` or use ` + "`" + `--force` + "`" + ` |
 
@@ -2677,12 +2677,12 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Println("╭─ Positional arguments not allowed")
 		fmt.Println("│")
-		fmt.Printf("│  'kai snapshot %s' is ambiguous.\n", arg)
+		fmt.Printf("│  'kai snapshot create %s' is ambiguous.\n", arg)
 		fmt.Println("│")
 		fmt.Println("│  Please be explicit about the source:")
 		fmt.Println("│")
-		fmt.Printf("│    kai snapshot --git %s    # Snapshot from Git commit/branch\n", arg)
-		fmt.Printf("│    kai snapshot --dir %s    # Snapshot from directory\n", arg)
+		fmt.Printf("│    kai snapshot create --git %s    # Snapshot from Git commit/branch\n", arg)
+		fmt.Printf("│    kai snapshot create --dir %s    # Snapshot from directory\n", arg)
 		fmt.Println("│")
 		fmt.Println("│  Or use 'kai snap' for quick directory snapshots:")
 		fmt.Println("│")
@@ -2718,8 +2718,8 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		fmt.Println("│")
 		fmt.Println("│  Choose one of:")
 		fmt.Println("│")
-		fmt.Println("│    kai snapshot --git main        # From Git commit/branch/tag")
-		fmt.Println("│    kai snapshot --dir .           # From directory")
+		fmt.Println("│    kai snapshot create --git main        # From Git commit/branch/tag")
+		fmt.Println("│    kai snapshot create --dir .           # From directory")
 		fmt.Println("│")
 		fmt.Println("│  Or use 'kai snap' for quick directory snapshots:")
 		fmt.Println("│")

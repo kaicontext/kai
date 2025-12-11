@@ -15,7 +15,7 @@ Every command in Kai is idempotent—the same command always produces the same r
 
 ```bash
 kai push origin --ws feature/auth   # Always pushes feature/auth
-kai snapshot --dir ./src            # Same dir = same snapshot hash
+kai snapshot create --dir ./src     # Same dir = same snapshot hash
 kai changeset create snap.a snap.b  # Same inputs = same changeset
 ```
 
@@ -247,11 +247,11 @@ For more control, here's the step-by-step approach:
 
 ```bash
 # Create a snapshot of your main branch
-kai snapshot --git main
+kai snapshot create --git main
 # Output: Created snapshot: abc123...
 
 # Create a snapshot of your feature branch
-kai snapshot --git feature-branch
+kai snapshot create --git feature-branch
 # Output: Created snapshot: def456...
 
 # Analyze symbols in both snapshots
@@ -354,8 +354,8 @@ Use selector syntax for dynamic references:
 
 ```bash
 # Common workflow using selectors
-kai snapshot main --repo .
-kai snapshot feature --repo .
+kai snapshot create --git main --repo .
+kai snapshot create --git feature --repo .
 kai analyze symbols @snap:last
 kai changeset create @snap:prev @snap:last
 kai intent render @cs:last
@@ -413,8 +413,8 @@ With completion enabled, pressing Tab will suggest:
 ```bash
 # Initialize and create snapshots
 kai init
-kai snapshot main --repo .
-kai snapshot feature --repo .
+kai snapshot create --git main --repo .
+kai snapshot create --git feature --repo .
 
 # Analyze using selectors
 kai analyze symbols @snap:last
@@ -514,7 +514,7 @@ Initialized Kai in .kai/
 Create a snapshot of the main branch:
 
 ```bash
-kai snapshot main --repo .
+kai snapshot create --git main --repo .
 ```
 
 **Output:**
@@ -525,7 +525,7 @@ Created snapshot: d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00
 Create a snapshot of the feature branch:
 
 ```bash
-kai snapshot feature --repo .
+kai snapshot create --git feature --repo .
 ```
 
 **Output:**
@@ -685,16 +685,16 @@ kai snapshot [git-ref] [flags]
 **Examples:**
 ```bash
 # Snapshot from Git ref
-kai snapshot main --repo .
+kai snapshot create --git main --repo .
 
 # Snapshot from directory (no Git required)
-kai snapshot --dir ./src
+kai snapshot create --dir ./src
 
 # Snapshot a specific commit
-kai snapshot abc123def456
+kai snapshot create --git abc123def456
 
 # Snapshot a tag
-kai snapshot v1.2.3 --repo /path/to/repo
+kai snapshot create --git v1.2.3 --repo /path/to/repo
 ```
 
 **Output:**
@@ -2653,8 +2653,8 @@ Use Kai to understand pull requests at a semantic level:
 
 ```bash
 # Create snapshots of base and PR branches
-kai snapshot main --repo .
-kai snapshot pr-123 --repo .
+kai snapshot create --git main --repo .
+kai snapshot create --git pr-123 --repo .
 
 # Analyze and compare
 kai analyze symbols <main-snap>
