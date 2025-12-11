@@ -1054,15 +1054,15 @@ var cloneCmd = &cobra.Command{
 Creates a new directory, initializes Kai, sets up the remote, and fetches all refs.
 
 URL formats:
-  org/repo                         Shorthand (uses default server: kaiscm.com)
+  org/repo                         Shorthand (uses default server: kailayer.com)
   http://server/tenant/repo        Full URL with server
 
 The default server can be overridden with the KAI_SERVER environment variable.
 
 Examples:
-  kai clone 1m/myrepo                                   # Clone from kaiscm.com
+  kai clone 1m/myrepo                                   # Clone from kailayer.com
   kai clone 1m/myrepo myproject                         # Clone into 'myproject' directory
-  kai clone https://kaiscm.com/myorg/myrepo             # Full URL
+  kai clone https://kailayer.com/myorg/myrepo             # Full URL
   kai clone http://localhost:8080/myorg/myrepo          # Local development
   kai clone http://localhost:8080 --tenant myorg --repo myrepo`,
 	Args: cobra.RangeArgs(1, 2),

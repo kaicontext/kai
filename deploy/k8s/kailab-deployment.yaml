@@ -145,7 +145,7 @@ spec:
             - name: KLC_SHARDS_JSON
               value: '{"default":"http://kailab:7447"}'
             - name: KLC_BASE_URL
-              value: "https://kaiscm.com"
+              value: "https://kailayer.com"
           volumeMounts:
             - name: db-certs
               mountPath: /certs
@@ -205,7 +205,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
 spec:
   rules:
-    - host: kaiscm.com
+    - host: kailayer.com
       http:
         paths:
           - path: /

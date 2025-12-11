@@ -246,7 +246,7 @@ func (h *Handler) InstallScript(w http.ResponseWriter, r *http.Request) {
 
 const installScript = `#!/bin/sh
 # Kai CLI installer
-# Usage: curl -fsSL https://kaiscm.com/install.sh | sh
+# Usage: curl -fsSL https://kailayer.com/install.sh | sh
 
 set -e
 

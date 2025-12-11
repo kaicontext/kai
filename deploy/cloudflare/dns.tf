@@ -41,7 +41,7 @@ resource "cloudflare_record" "root" {
 }
 
 # Wildcard for multi-tenant (optional)
-# e.g., org1.kaiscm.com, org2.kaiscm.com
+# e.g., org1.kailayer.com, org2.kailayer.com
 resource "cloudflare_record" "wildcard" {
   zone_id = var.zone_id
   name    = "*"

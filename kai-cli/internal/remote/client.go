@@ -20,7 +20,7 @@ import (
 // DefaultServer is the production Kailab server URL.
 // This is used when no explicit remote is configured.
 // Can be overridden via KAI_SERVER environment variable.
-const DefaultServer = "https://kaiscm.com"
+const DefaultServer = "https://kailayer.com"
 
 // Client communicates with a Kailab server.
 type Client struct {
