@@ -204,8 +204,40 @@
 	let expandedDirs = $state(new Set()); // Track expanded directories
 
 	// Reviews tab state
+	/** @type {Review[]} */
 	let reviews = $state([]);
 	let reviewsLoading = $state(false);
+
+	// Error state for user feedback
+	/** @type {string|null} */
+	let errorMessage = $state(null);
+
+	// Request cancellation for file loading
+	/** @type {AbortController|null} */
+	let fileLoadController = $state(null);
+
+	/**
+	 * Clear file content state (memory cleanup)
+	 */
+	function clearFileContent() {
+		selectedFile = null;
+		fileContent = '';
+		fileContentRaw = null;
+		selectedLines = { start: null, end: null };
+	}
+
+	/**
+	 * Show error message to user (auto-dismisses after 5 seconds)
+	 * @param {string} message
+	 */
+	function showError(message) {
+		errorMessage = message;
+		setTimeout(() => {
+			if (errorMessage === message) {
+				errorMessage = null;
+			}
+		}, 5000);
+	}
 
 	// Map changeset target IDs to their reviews (for showing review UI in changeset view)
 	let changesetToReview = $derived(() => {
@@ -553,8 +585,8 @@
 
 	async function loadRepo() {
 		loading = true;
-		const data = await api('GET', `/api/v1/orgs/${$page.params.slug}/repos/${$page.params.repo}`);
-		if (data.error) {
+		const data = await safeApiCall('GET', `/api/v1/orgs/${$page.params.slug}/repos/${$page.params.repo}`);
+		if (!data || data.error) {
 			goto(`/orgs/${$page.params.slug}`);
 			return;
 		}
@@ -564,18 +596,19 @@
 
 	async function loadRefs() {
 		refsLoading = true;
-		// Fetch refs from the data plane via proxy
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/refs`);
-		if (data.refs) {
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/refs`);
+		if (data?.refs) {
 			refs = data.refs;
+		} else {
+			showError('Failed to load refs');
 		}
 		refsLoading = false;
 	}
 
 	async function loadReviews() {
 		reviewsLoading = true;
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/reviews`);
-		if (data.reviews) {
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/reviews`);
+		if (data?.reviews) {
 			// Sort reviews by updatedAt descending (newest first)
 			reviews = data.reviews.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 		}
@@ -595,14 +628,11 @@
 	let reviewUpdating = $state(false);
 	async function updateReviewState(reviewId, newState) {
 		reviewUpdating = true;
-		try {
-			const result = await api('POST', `/${$page.params.slug}/${$page.params.repo}/v1/reviews/${reviewId}/state`, { state: newState });
-			if (result.success) {
-				// Reload reviews to get updated state
-				await loadReviews();
-			}
-		} catch (err) {
-			console.error('Failed to update review state:', err);
+		const result = await safeApiCall('POST', `/${$page.params.slug}/${$page.params.repo}/v1/reviews/${reviewId}/state`, { state: newState });
+		if (result?.success) {
+			await loadReviews();
+		} else {
+			showError('Failed to update review state');
 		}
 		reviewUpdating = false;
 	}
@@ -615,15 +645,11 @@
 
 		// Fetch each changeset object to get its payload
 		await Promise.all(csRefs.map(async (ref) => {
-			try {
-				// target is base64-encoded digest, convert to hex
-				const targetHex = base64ToHex(ref.target);
-				const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/objects/${targetHex}`);
-				if (data.payload) {
-					payloads[ref.name] = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
-				}
-			} catch (e) {
-				console.error(`Failed to load changeset ${ref.name}:`, e);
+			// target is base64-encoded digest, convert to hex
+			const targetHex = base64ToHex(ref.target);
+			const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/objects/${targetHex}`);
+			if (data?.payload) {
+				payloads[ref.name] = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
 			}
 		}));
 
@@ -655,46 +681,40 @@
 
 		changesetFilesLoading = true;
 
-		try {
-			// Use raw snapshot IDs directly - API accepts both ref names and hex IDs
-			const baseId = payload.base;
-			const headId = payload.head;
+		// Use raw snapshot IDs directly - API accepts both ref names and hex IDs
+		const baseId = payload.base;
+		const headId = payload.head;
 
-			// Load files from both snapshots using raw hex IDs
-			const [baseData, headData] = await Promise.all([
-				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${baseId}`).catch(() => ({ files: [] })),
-				api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${headId}`).catch(() => ({ files: [] }))
-			]);
+		// Load files from both snapshots using raw hex IDs
+		const [baseData, headData] = await Promise.all([
+			safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${baseId}`),
+			safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${headId}`)
+		]);
 
-			const baseFiles = new Map((baseData.files || []).map(f => [f.path, f]));
-			const headFiles = new Map((headData.files || []).map(f => [f.path, f]));
+		const baseFiles = new Map((baseData?.files || []).map(f => [f.path, f]));
+		const headFiles = new Map((headData?.files || []).map(f => [f.path, f]));
 
-			const added = [];
-			const removed = [];
-			const modified = [];
+		const added = [];
+		const removed = [];
+		const modified = [];
 
-			// Find added and modified files
-			for (const [path, file] of headFiles) {
-				if (!baseFiles.has(path)) {
-					added.push(file);
-				} else if (baseFiles.get(path).contentDigest !== file.contentDigest) {
-					modified.push(file);
-				}
+		// Find added and modified files
+		for (const [path, file] of headFiles) {
+			if (!baseFiles.has(path)) {
+				added.push(file);
+			} else if (baseFiles.get(path).contentDigest !== file.contentDigest) {
+				modified.push(file);
 			}
-
-			// Find removed files
-			for (const [path, file] of baseFiles) {
-				if (!headFiles.has(path)) {
-					removed.push(file);
-				}
-			}
-
-			changesetFiles = { added, removed, modified };
-		} catch (e) {
-			console.error('Failed to load changeset diff:', e);
-			changesetFiles = { added: [], removed: [], modified: [] };
 		}
 
+		// Find removed files
+		for (const [path, file] of baseFiles) {
+			if (!headFiles.has(path)) {
+				removed.push(file);
+			}
+		}
+
+		changesetFiles = { added, removed, modified };
 		changesetFilesLoading = false;
 	}
 
@@ -707,15 +727,10 @@
 		}
 
 		affectedTestsLoading = true;
-		try {
-			// Get the changeset's target ID (the actual changeset object digest)
-			const changesetId = csRef.target ? base64ToHex(csRef.target) : csRef.name.replace('cs.', '');
-			const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/changesets/${changesetId}/affected-tests`);
-			affectedTests = data.affectedTests || [];
-		} catch (e) {
-			console.error('Failed to load affected tests:', e);
-			affectedTests = [];
-		}
+		// Get the changeset's target ID (the actual changeset object digest)
+		const changesetId = csRef.target ? base64ToHex(csRef.target) : csRef.name.replace('cs.', '');
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/changesets/${changesetId}/affected-tests`);
+		affectedTests = data?.affectedTests || [];
 		affectedTestsLoading = false;
 	}
 
@@ -749,17 +764,17 @@
 		selectedDiffFile = { path, status };
 		fileDiffData = null;
 
-		try {
-			const payload = changesetPayloads[selectedChangeset.name];
-			if (!payload) {
-				fileDiffLoading = false;
-				return;
-			}
+		const payload = changesetPayloads[selectedChangeset.name];
+		if (!payload) {
+			fileDiffLoading = false;
+			return;
+		}
 
-			const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/diff/${payload.base}/${payload.head}?path=${encodeURIComponent(path)}`);
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/diff/${payload.base}/${payload.head}?path=${encodeURIComponent(path)}`);
+		if (data) {
 			fileDiffData = data;
-		} catch (err) {
-			console.error('Failed to load diff:', err);
+		} else {
+			showError('Failed to load file diff');
 		}
 
 		fileDiffLoading = false;
@@ -773,10 +788,12 @@
 
 	async function deleteRepo() {
 		deleting = true;
-		const result = await api('DELETE', `/api/v1/orgs/${$page.params.slug}/repos/${$page.params.repo}`);
+		const result = await safeApiCall('DELETE', `/api/v1/orgs/${$page.params.slug}/repos/${$page.params.repo}`);
 		deleting = false;
-		if (!result.error) {
+		if (result && !result.error) {
 			goto(`/orgs/${$page.params.slug}`);
+		} else {
+			showError('Failed to delete repository');
 		}
 	}
 
@@ -884,8 +901,8 @@ kai push origin snap.latest`;
 
 	// Load a single file by path (fast)
 	async function loadSingleFile(snapshotRef, filePath) {
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${snapshotRef}?path=${encodeURIComponent(filePath)}`);
-		if (data.files && data.files.length > 0) {
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${snapshotRef}?path=${encodeURIComponent(filePath)}`);
+		if (data?.files && data.files.length > 0) {
 			return data.files[0];
 		}
 		return null;
@@ -904,8 +921,8 @@ kai push origin snap.latest`;
 		}
 		expandedDirs = new Set(); // Reset expanded directories
 
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${snapshotRef}`);
-		if (data.files) {
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/files/${snapshotRef}`);
+		if (data?.files) {
 			files = data.files.sort((a, b) => a.path.localeCompare(b.path));
 
 			// Auto-select README if no file is selected
@@ -917,17 +934,36 @@ kai push origin snap.latest`;
 			}
 		} else {
 			files = [];
+			if (data === null) {
+				showError('Failed to load files');
+			}
 		}
 		filesLoading = false;
 	}
 
 	async function loadFileContent(file) {
+		// Cancel previous request if still pending
+		if (fileLoadController) {
+			fileLoadController.abort();
+		}
+		fileLoadController = new AbortController();
+
 		selectedFile = file;
 		fileContentLoading = true;
 		fileContent = '';
 		fileContentRaw = null;
 
-		const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/content/${file.digest}`);
+		const data = await safeApiCall('GET', `/${$page.params.slug}/${$page.params.repo}/v1/content/${file.digest}`);
+
+		// Clear controller after request completes
+		fileLoadController = null;
+
+		if (!data) {
+			showError('Failed to load file content');
+			fileContentLoading = false;
+			return;
+		}
+
 		if (data.content) {
 			// Store raw base64 for binary files (images)
 			fileContentRaw = data.content;
@@ -1051,6 +1087,20 @@ kai push origin snap.latest`;
 </script>
 
 <div class="max-w-6xl mx-auto px-5 py-8">
+	<!-- Error toast notification -->
+	{#if errorMessage}
+		<div class="fixed top-4 right-4 z-50 bg-red-500/90 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 max-w-md animate-fade-in">
+			<span class="flex-1">{errorMessage}</span>
+			<button
+				class="text-white/80 hover:text-white"
+				onclick={() => errorMessage = null}
+				aria-label="Dismiss error"
+			>
+				✕
+			</button>
+		</div>
+	{/if}
+
 	{#if loading || refsLoading}
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 	{:else if repo}
@@ -1877,6 +1927,15 @@ kai push origin snap.latest</pre>
 </div>
 
 <style>
+	/* Error toast animation */
+	@keyframes fade-in {
+		from { opacity: 0; transform: translateY(-10px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	.animate-fade-in {
+		animation: fade-in 0.2s ease-out;
+	}
+
 	/* Syntax highlighting theme - dark mode matching Kai design */
 	:global(.hljs) {
 		color: #e4e4e7; /* zinc-200 */
