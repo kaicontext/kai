@@ -667,7 +667,7 @@ func NewFileChange(category ChangeCategory, path string) *ChangeType {
 // IsParseable returns true if the language supports semantic parsing.
 func IsParseable(lang string) bool {
 	switch lang {
-	case "ts", "js", "json", "py", "yaml":
+	case "ts", "js", "json", "py", "yaml", "rb", "go":
 		return true
 	default:
 		return false

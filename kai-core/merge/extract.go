@@ -40,6 +40,8 @@ func (e *Extractor) ExtractUnits(path string, content []byte, lang string) (*Fil
 		e.extractJSUnits(parsed, content, path, fu)
 	case "py", "python":
 		e.extractPyUnits(parsed, content, path, fu)
+	case "rb", "ruby":
+		e.extractRbUnits(parsed, content, path, fu)
 	default:
 		e.extractJSUnits(parsed, content, path, fu) // fallback to JS
 	}
@@ -507,4 +509,329 @@ func EquivalentUnits(a, b *MergeUnit) bool {
 // Changed checks if a unit changed from base.
 func Changed(unit, base *MergeUnit) bool {
 	return !EquivalentUnits(unit, base)
+}
+
+// ==================== Ruby Extraction ====================
+
+// extractRbUnits extracts merge units from Ruby AST.
+func (e *Extractor) extractRbUnits(parsed *parse.ParsedFile, content []byte, path string, fu *FileUnits) {
+	root := parsed.GetRootNode()
+	e.walkRbNode(root, content, path, nil, fu)
+}
+
+func (e *Extractor) walkRbNode(node *sitter.Node, content []byte, path string, parentPath []string, fu *FileUnits) {
+	if node == nil {
+		return
+	}
+
+	switch node.Type() {
+	case "method":
+		unit := e.extractRbMethod(node, content, path, parentPath)
+		if unit != nil {
+			fu.Units[unit.Key.String()] = unit
+		}
+
+	case "singleton_method":
+		unit := e.extractRbSingletonMethod(node, content, path, parentPath)
+		if unit != nil {
+			fu.Units[unit.Key.String()] = unit
+		}
+
+	case "class":
+		unit := e.extractRbClass(node, content, path, parentPath, fu)
+		if unit != nil {
+			fu.Units[unit.Key.String()] = unit
+		}
+
+	case "module":
+		unit := e.extractRbModule(node, content, path, parentPath, fu)
+		if unit != nil {
+			fu.Units[unit.Key.String()] = unit
+		}
+
+	case "call":
+		// Check for require/require_relative
+		unit := e.extractRbRequire(node, content, path)
+		if unit != nil {
+			fu.Units[unit.Key.String()] = unit
+		}
+	}
+
+	// Recurse for program-level children
+	if node.Type() == "program" {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			e.walkRbNode(node.Child(i), content, path, parentPath, fu)
+		}
+	}
+}
+
+func (e *Extractor) extractRbMethod(node *sitter.Node, content []byte, path string, parentPath []string) *MergeUnit {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "method_parameters":
+			params = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	symbolPath := append(parentPath, name)
+	bodyContent := node.Content(content)
+	bodyHash := sha256.Sum256([]byte(bodyContent))
+
+	signature := "def " + name
+	if params != "" {
+		signature += params
+	}
+
+	return &MergeUnit{
+		Key: UnitKey{
+			File:       path,
+			SymbolPath: symbolPath,
+			Kind:       UnitFunction,
+		},
+		Kind:      UnitFunction,
+		Name:      name,
+		Signature: signature,
+		BodyHash:  bodyHash[:],
+		Range:     parse.GetNodeRange(node),
+		Content:   []byte(bodyContent),
+		RawNode:   node,
+	}
+}
+
+func (e *Extractor) extractRbSingletonMethod(node *sitter.Node, content []byte, path string, parentPath []string) *MergeUnit {
+	var name string
+	var params string
+	var object string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if object == "" {
+				object = child.Content(content)
+			} else if name == "" {
+				name = child.Content(content)
+			}
+		case "self":
+			object = "self"
+		case "method_parameters":
+			params = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	symbolPath := append(parentPath, name)
+	bodyContent := node.Content(content)
+	bodyHash := sha256.Sum256([]byte(bodyContent))
+
+	signature := "def " + object + "." + name
+	if params != "" {
+		signature += params
+	}
+
+	return &MergeUnit{
+		Key: UnitKey{
+			File:       path,
+			SymbolPath: symbolPath,
+			Kind:       UnitFunction,
+		},
+		Kind:      UnitFunction,
+		Name:      name,
+		Signature: signature,
+		BodyHash:  bodyHash[:],
+		Range:     parse.GetNodeRange(node),
+		Content:   []byte(bodyContent),
+		RawNode:   node,
+	}
+}
+
+func (e *Extractor) extractRbClass(node *sitter.Node, content []byte, path string, parentPath []string, fu *FileUnits) *MergeUnit {
+	var name string
+	var classBody *sitter.Node
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "constant":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "scope_resolution":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "body_statement":
+			classBody = child
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	symbolPath := append(parentPath, name)
+	bodyContent := node.Content(content)
+	bodyHash := sha256.Sum256([]byte(bodyContent))
+
+	unit := &MergeUnit{
+		Key: UnitKey{
+			File:       path,
+			SymbolPath: symbolPath,
+			Kind:       UnitClass,
+		},
+		Kind:      UnitClass,
+		Name:      name,
+		Signature: "class " + name,
+		BodyHash:  bodyHash[:],
+		Range:     parse.GetNodeRange(node),
+		Content:   []byte(bodyContent),
+		RawNode:   node,
+	}
+
+	// Extract methods
+	if classBody != nil {
+		for i := 0; i < int(classBody.ChildCount()); i++ {
+			child := classBody.Child(i)
+			switch child.Type() {
+			case "method":
+				method := e.extractRbMethod(child, content, path, symbolPath)
+				if method != nil {
+					method.Kind = UnitMethod
+					method.Key.Kind = UnitMethod
+					unit.Children = append(unit.Children, method)
+					fu.Units[method.Key.String()] = method
+				}
+			case "singleton_method":
+				method := e.extractRbSingletonMethod(child, content, path, symbolPath)
+				if method != nil {
+					method.Kind = UnitMethod
+					method.Key.Kind = UnitMethod
+					unit.Children = append(unit.Children, method)
+					fu.Units[method.Key.String()] = method
+				}
+			}
+		}
+	}
+
+	return unit
+}
+
+func (e *Extractor) extractRbModule(node *sitter.Node, content []byte, path string, parentPath []string, fu *FileUnits) *MergeUnit {
+	var name string
+	var moduleBody *sitter.Node
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "constant":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "scope_resolution":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "body_statement":
+			moduleBody = child
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	symbolPath := append(parentPath, name)
+	bodyContent := node.Content(content)
+	bodyHash := sha256.Sum256([]byte(bodyContent))
+
+	unit := &MergeUnit{
+		Key: UnitKey{
+			File:       path,
+			SymbolPath: symbolPath,
+			Kind:       UnitModule,
+		},
+		Kind:      UnitModule,
+		Name:      name,
+		Signature: "module " + name,
+		BodyHash:  bodyHash[:],
+		Range:     parse.GetNodeRange(node),
+		Content:   []byte(bodyContent),
+		RawNode:   node,
+	}
+
+	// Extract methods
+	if moduleBody != nil {
+		for i := 0; i < int(moduleBody.ChildCount()); i++ {
+			child := moduleBody.Child(i)
+			switch child.Type() {
+			case "method":
+				method := e.extractRbMethod(child, content, path, symbolPath)
+				if method != nil {
+					method.Kind = UnitMethod
+					method.Key.Kind = UnitMethod
+					unit.Children = append(unit.Children, method)
+					fu.Units[method.Key.String()] = method
+				}
+			case "singleton_method":
+				method := e.extractRbSingletonMethod(child, content, path, symbolPath)
+				if method != nil {
+					method.Kind = UnitMethod
+					method.Key.Kind = UnitMethod
+					unit.Children = append(unit.Children, method)
+					fu.Units[method.Key.String()] = method
+				}
+			}
+		}
+	}
+
+	return unit
+}
+
+func (e *Extractor) extractRbRequire(node *sitter.Node, content []byte, path string) *MergeUnit {
+	var methodName string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			methodName = child.Content(content)
+			break
+		}
+	}
+
+	// Only handle require/require_relative/load
+	if methodName != "require" && methodName != "require_relative" && methodName != "load" {
+		return nil
+	}
+
+	importContent := node.Content(content)
+	bodyHash := sha256.Sum256([]byte(importContent))
+
+	return &MergeUnit{
+		Key: UnitKey{
+			File:       path,
+			SymbolPath: []string{"import:" + importContent},
+			Kind:       UnitImport,
+		},
+		Kind:     UnitImport,
+		Name:     importContent,
+		BodyHash: bodyHash[:],
+		Range:    parse.GetNodeRange(node),
+		Content:  []byte(importContent),
+		RawNode:  node,
+	}
 }

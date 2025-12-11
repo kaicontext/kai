@@ -275,7 +275,8 @@ func TestIsParseable(t *testing.T) {
 		{"json", true},
 		{"py", true},
 		{"yaml", true},
-		{"go", false},
+		{"go", true},
+		{"rb", true},
 		{"rust", false},
 		{"", false},
 	}

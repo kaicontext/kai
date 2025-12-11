@@ -1,4 +1,4 @@
-// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, and Go.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, and Ruby.
 package parse
 
 import (
@@ -10,6 +10,7 @@ import (
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/python"
+	"github.com/smacker/go-tree-sitter/ruby"
 )
 
 // Range represents a source code range (0-based line and column).
@@ -38,9 +39,10 @@ type Parser struct {
 	jsParser *sitter.Parser
 	pyParser *sitter.Parser
 	goParser *sitter.Parser
+	rbParser *sitter.Parser
 }
 
-// NewParser creates a new parser with support for JavaScript/TypeScript, Python, and Go.
+// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, and Ruby.
 func NewParser() *Parser {
 	jsParser := sitter.NewParser()
 	jsParser.SetLanguage(javascript.GetLanguage())
@@ -51,10 +53,14 @@ func NewParser() *Parser {
 	goParser := sitter.NewParser()
 	goParser.SetLanguage(golang.GetLanguage())
 
+	rbParser := sitter.NewParser()
+	rbParser.SetLanguage(ruby.GetLanguage())
+
 	return &Parser{
 		jsParser: jsParser,
 		pyParser: pyParser,
 		goParser: goParser,
+		rbParser: rbParser,
 	}
 }
 
@@ -73,6 +79,9 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 	case "js", "ts", "javascript", "typescript":
 		parser = p.jsParser
 		extractFn = extractSymbols
+	case "rb", "ruby":
+		parser = p.rbParser
+		extractFn = extractRubySymbols
 	default:
 		// Default to JavaScript parser for unknown languages
 		parser = p.jsParser
@@ -850,6 +859,333 @@ func extractGoVarSpec(node *sitter.Node, content []byte, declKind string) []*Sym
 			Range:     nodeRange(node),
 			Signature: signature,
 		})
+	}
+
+	return symbols
+}
+
+// ==================== Ruby Symbol Extraction ====================
+
+// extractRubySymbols walks the Ruby AST and extracts method, class, and module declarations.
+func extractRubySymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil {
+			break
+		}
+		if n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "method":
+			sym := extractRubyMethod(n, content, "")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "singleton_method":
+			sym := extractRubySingletonMethod(n, content, "")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "class":
+			sym := extractRubyClass(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			// Also extract methods within the class
+			methods := extractRubyClassMethods(n, content)
+			symbols = append(symbols, methods...)
+		case "module":
+			sym := extractRubyModule(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			// Also extract methods within the module
+			methods := extractRubyModuleMethods(n, content)
+			symbols = append(symbols, methods...)
+		case "assignment":
+			// Top-level constant assignments (CONSTANT = value)
+			parent := n.Parent()
+			if parent != nil && parent.Type() == "program" {
+				syms := extractRubyAssignment(n, content)
+				symbols = append(symbols, syms...)
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractRubyMethod(node *sitter.Node, content []byte, className string) *Symbol {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "method_parameters":
+			params = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	fullName := name
+	if className != "" {
+		fullName = className + "#" + name
+	}
+
+	signature := "def " + name
+	if params != "" {
+		signature += params
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractRubySingletonMethod(node *sitter.Node, content []byte, className string) *Symbol {
+	var name string
+	var params string
+	var object string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if object == "" {
+				object = child.Content(content)
+			} else if name == "" {
+				name = child.Content(content)
+			}
+		case "self":
+			object = "self"
+		case "method_parameters":
+			params = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	fullName := name
+	if className != "" {
+		fullName = className + "." + name
+	} else if object == "self" {
+		fullName = "self." + name
+	}
+
+	signature := "def " + object + "." + name
+	if params != "" {
+		signature += params
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractRubyClass(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var superclass string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "constant":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "scope_resolution":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "superclass":
+			// superclass node contains the parent class
+			for j := 0; j < int(child.ChildCount()); j++ {
+				superChild := child.Child(j)
+				if superChild.Type() == "constant" || superChild.Type() == "scope_resolution" {
+					superclass = superChild.Content(content)
+					break
+				}
+			}
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := "class " + name
+	if superclass != "" {
+		signature += " < " + superclass
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractRubyModule(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "constant":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "scope_resolution":
+			if name == "" {
+				name = child.Content(content)
+			}
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "module",
+		Range:     nodeRange(node),
+		Signature: "module " + name,
+	}
+}
+
+func extractRubyClassMethods(classNode *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+
+	// Find class name
+	var className string
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "constant" || child.Type() == "scope_resolution" {
+			className = child.Content(content)
+			break
+		}
+	}
+
+	// Find body_statement (class body)
+	var classBody *sitter.Node
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "body_statement" {
+			classBody = child
+			break
+		}
+	}
+
+	if classBody == nil {
+		return methods
+	}
+
+	// Find method definitions inside the body
+	for i := 0; i < int(classBody.ChildCount()); i++ {
+		child := classBody.Child(i)
+		switch child.Type() {
+		case "method":
+			sym := extractRubyMethod(child, content, className)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		case "singleton_method":
+			sym := extractRubySingletonMethod(child, content, className)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		}
+	}
+
+	return methods
+}
+
+func extractRubyModuleMethods(moduleNode *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+
+	// Find module name
+	var moduleName string
+	for i := 0; i < int(moduleNode.ChildCount()); i++ {
+		child := moduleNode.Child(i)
+		if child.Type() == "constant" || child.Type() == "scope_resolution" {
+			moduleName = child.Content(content)
+			break
+		}
+	}
+
+	// Find body_statement (module body)
+	var moduleBody *sitter.Node
+	for i := 0; i < int(moduleNode.ChildCount()); i++ {
+		child := moduleNode.Child(i)
+		if child.Type() == "body_statement" {
+			moduleBody = child
+			break
+		}
+	}
+
+	if moduleBody == nil {
+		return methods
+	}
+
+	// Find method definitions inside the body
+	for i := 0; i < int(moduleBody.ChildCount()); i++ {
+		child := moduleBody.Child(i)
+		switch child.Type() {
+		case "method":
+			sym := extractRubyMethod(child, content, moduleName)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		case "singleton_method":
+			sym := extractRubySingletonMethod(child, content, moduleName)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		}
+	}
+
+	return methods
+}
+
+func extractRubyAssignment(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	// Look for constant on the left side (CONSTANT = value)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "constant" {
+			name := child.Content(content)
+			symbols = append(symbols, &Symbol{
+				Name:      name,
+				Kind:      "variable",
+				Range:     nodeRange(node),
+				Signature: name,
+			})
+			break
+		}
 	}
 
 	return symbols

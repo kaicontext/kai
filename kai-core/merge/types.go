@@ -17,6 +17,7 @@ const (
 	UnitImport   UnitKind = "import"
 	UnitExport   UnitKind = "export"
 	UnitType     UnitKind = "type"
+	UnitModule   UnitKind = "module" // Ruby modules
 )
 
 // UnitKey uniquely identifies a merge unit within a file.

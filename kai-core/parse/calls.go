@@ -53,6 +53,10 @@ func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error)
 		result.Imports = extractGoImports(root, content)
 		result.Calls = extractGoCallSites(root, content)
 		result.Exports = extractGoExports(root, content)
+	case "rb", "ruby":
+		result.Imports = extractRubyImports(root, content)
+		result.Calls = extractRubyCallSites(root, content)
+		result.Exports = extractRubyExports(root, content)
 	default:
 		// JavaScript/TypeScript/Python
 		result.Imports = extractImports(root, content)
@@ -591,7 +595,7 @@ func IsTestFile(path string) bool {
 	base := filepath.Base(path)
 	dir := filepath.Dir(path)
 
-	// Check filename patterns
+	// Check filename patterns - JavaScript/TypeScript
 	if strings.HasSuffix(base, ".test.ts") ||
 		strings.HasSuffix(base, ".test.tsx") ||
 		strings.HasSuffix(base, ".test.js") ||
@@ -605,15 +609,36 @@ func IsTestFile(path string) bool {
 		return true
 	}
 
+	// Check filename patterns - Ruby (RSpec/Minitest)
+	if strings.HasSuffix(base, "_spec.rb") ||
+		strings.HasSuffix(base, "_test.rb") {
+		return true
+	}
+
+	// Check filename patterns - Go
+	if strings.HasSuffix(base, "_test.go") {
+		return true
+	}
+
+	// Check filename patterns - Python
+	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") ||
+		strings.HasSuffix(base, "_test.py") {
+		return true
+	}
+
 	// Check directory patterns
 	if strings.Contains(dir, "__tests__") ||
 		strings.Contains(dir, "__test__") ||
 		strings.HasSuffix(dir, "/test") ||
 		strings.HasSuffix(dir, "/tests") ||
+		strings.HasSuffix(dir, "/spec") || // Ruby RSpec convention
 		dir == "test" ||
 		dir == "tests" ||
+		dir == "spec" ||
 		strings.HasPrefix(dir, "test/") ||
-		strings.HasPrefix(dir, "tests/") {
+		strings.HasPrefix(dir, "tests/") ||
+		strings.HasPrefix(dir, "spec/") ||
+		strings.Contains(dir, "/spec/") {
 		return true
 	}
 
@@ -654,6 +679,29 @@ func FindTestsForFile(sourcePath string, allFiles []string) []string {
 			basePath+".spec.js",
 			basePath+".test.jsx",
 			basePath+".spec.jsx",
+		)
+	}
+
+	// Ruby patterns: foo.rb -> foo_spec.rb, foo_test.rb, spec/foo_spec.rb
+	if ext == ".rb" {
+		patterns = append(patterns,
+			basePath+"_spec.rb",
+			basePath+"_test.rb",
+			filepath.Join(dir, "spec", baseName+"_spec.rb"),
+			filepath.Join("spec", strings.TrimPrefix(dir, "lib/"), baseName+"_spec.rb"),
+		)
+	}
+
+	// Go patterns: foo.go -> foo_test.go
+	if ext == ".go" {
+		patterns = append(patterns, basePath+"_test.go")
+	}
+
+	// Python patterns: foo.py -> test_foo.py, foo_test.py
+	if ext == ".py" {
+		patterns = append(patterns,
+			filepath.Join(dir, "test_"+baseName+".py"),
+			basePath+"_test.py",
 		)
 	}
 
@@ -977,4 +1025,269 @@ func isGoExported(name string) bool {
 	}
 	r := rune(name[0])
 	return r >= 'A' && r <= 'Z'
+}
+
+// ==================== Ruby Import/Call Extraction ====================
+
+// extractRubyImports finds all require/require_relative/load statements in Ruby source.
+func extractRubyImports(node *sitter.Node, content []byte) []*Import {
+	var imports []*Import
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		// Look for method calls that are require, require_relative, or load
+		if n.Type() == "call" {
+			imp := parseRubyRequireCall(n, content)
+			if imp != nil {
+				imports = append(imports, imp)
+			}
+		}
+	}
+
+	return imports
+}
+
+// parseRubyRequireCall parses require/require_relative/load calls.
+// Handles:
+//   - require 'foo'
+//   - require "foo"
+//   - require_relative './foo'
+//   - load 'foo.rb'
+func parseRubyRequireCall(node *sitter.Node, content []byte) *Import {
+	var methodName string
+	var source string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		switch child.Type() {
+		case "identifier":
+			if methodName == "" {
+				methodName = child.Content(content)
+			}
+		case "argument_list":
+			// Find string argument
+			for j := 0; j < int(child.ChildCount()); j++ {
+				arg := child.Child(j)
+				if arg.Type() == "string" {
+					source = extractRubyStringContent(arg, content)
+					break
+				}
+			}
+		case "string":
+			// Direct string argument (without parentheses)
+			source = extractRubyStringContent(child, content)
+		}
+	}
+
+	// Check if it's a require-type call
+	if methodName != "require" && methodName != "require_relative" && methodName != "load" {
+		return nil
+	}
+
+	if source == "" {
+		return nil
+	}
+
+	isRelative := methodName == "require_relative" ||
+		strings.HasPrefix(source, "./") ||
+		strings.HasPrefix(source, "../")
+
+	return &Import{
+		Source:     source,
+		IsRelative: isRelative,
+		Default:    filepath.Base(strings.TrimSuffix(source, ".rb")),
+		Named:      make(map[string]string),
+		Range:      nodeRange(node),
+	}
+}
+
+// extractRubyStringContent extracts the content from a Ruby string node.
+func extractRubyStringContent(node *sitter.Node, content []byte) string {
+	// Ruby strings have structure: string -> string_content or interpolation
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "string_content" {
+			return child.Content(content)
+		}
+	}
+	// Fallback: try to get content directly and trim quotes
+	s := node.Content(content)
+	s = strings.Trim(s, "\"'")
+	return s
+}
+
+// extractRubyCallSites finds all method calls in Ruby source.
+func extractRubyCallSites(node *sitter.Node, content []byte) []*CallSite {
+	var calls []*CallSite
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		if n.Type() != "call" {
+			continue
+		}
+
+		call := parseRubyCallExpression(n, content)
+		if call != nil {
+			calls = append(calls, call)
+		}
+	}
+
+	return calls
+}
+
+// parseRubyCallExpression extracts call info from a Ruby call node.
+func parseRubyCallExpression(node *sitter.Node, content []byte) *CallSite {
+	call := &CallSite{
+		Range: nodeRange(node),
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		switch child.Type() {
+		case "identifier":
+			// Method name (for simple calls like `foo()`)
+			if call.CalleeName == "" {
+				call.CalleeName = child.Content(content)
+			}
+		case "constant":
+			// Class/module name (for calls like `Foo.bar`)
+			if call.CalleeObject == "" {
+				call.CalleeObject = child.Content(content)
+			}
+		case "call":
+			// Chained call: foo.bar.baz
+			call.CalleeObject = "(call)"
+		case "self":
+			call.CalleeObject = "self"
+			call.IsMethodCall = true
+		}
+	}
+
+	// Check for method call pattern (receiver.method)
+	// In Ruby tree-sitter, this might be represented differently
+	if call.CalleeObject != "" {
+		call.IsMethodCall = true
+	}
+
+	if call.CalleeName == "" {
+		return nil
+	}
+
+	// Skip require/require_relative/load as they're handled as imports
+	if call.CalleeName == "require" || call.CalleeName == "require_relative" || call.CalleeName == "load" {
+		return nil
+	}
+
+	return call
+}
+
+// extractRubyExports finds public methods and constants in Ruby source.
+// In Ruby, methods are public by default unless marked private/protected.
+func extractRubyExports(node *sitter.Node, content []byte) []string {
+	var exports []string
+	seen := make(map[string]bool)
+	inPrivateSection := false
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "call":
+			// Check for private/protected/public visibility modifiers
+			methodName := ""
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "identifier" {
+					methodName = child.Content(content)
+					break
+				}
+			}
+			switch methodName {
+			case "private", "protected":
+				inPrivateSection = true
+			case "public":
+				inPrivateSection = false
+			}
+
+		case "method":
+			if inPrivateSection {
+				continue
+			}
+			// Find method name
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "identifier" {
+					name := child.Content(content)
+					// Skip methods starting with underscore (convention for private)
+					if !strings.HasPrefix(name, "_") && !seen[name] {
+						seen[name] = true
+						exports = append(exports, name)
+					}
+					break
+				}
+			}
+
+		case "singleton_method":
+			if inPrivateSection {
+				continue
+			}
+			// Find class method name (def self.foo)
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "identifier" {
+					name := child.Content(content)
+					if name != "self" && !strings.HasPrefix(name, "_") && !seen[name] {
+						seen[name] = true
+						exports = append(exports, name)
+					}
+				}
+			}
+
+		case "class", "module":
+			// Export class/module names
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "constant" {
+					name := child.Content(content)
+					if !seen[name] {
+						seen[name] = true
+						exports = append(exports, name)
+					}
+					break
+				}
+			}
+
+		case "assignment":
+			// Check for constant assignments (CONSTANT = value)
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "constant" {
+					name := child.Content(content)
+					if !seen[name] {
+						seen[name] = true
+						exports = append(exports, name)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	return exports
 }
