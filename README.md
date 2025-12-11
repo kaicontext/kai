@@ -232,7 +232,7 @@ kai review close <id> --state merged
 
 That's it! You now have semantic diffs, change classification, and selective CI.
 
-**How snapshots work:** The first `kai capture` creates a baseline (`@snap:last`). Subsequent captures update a working snapshot (`@snap:working`) without creating garbage. When you `kai review open`, the working snapshot is committed as the new baseline. Old working snapshots are automatically cleaned up by `kai prune`.
+**How snapshots work:** Each `kai capture` creates a snapshot and updates `snap.latest`. After capture, `kai status` shows clean (like `git status` after `git commit`). Use `kai review open` to create a review for your changes.
 
 Use `--explain` on any command to learn what concepts are involved:
 ```bash
