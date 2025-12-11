@@ -3582,6 +3582,8 @@ Make those three world-class; everything else is ornament.
 - [ ] Test mapping (which tests cover which symbols)
 - [ ] CODEOWNERS integration
 - [ ] Watch mode for continuous analysis
+- [ ] CI plan with cached .kai database (Option B) - reuse existing snapshots when available, create temp DB if not
+- [ ] Server-side CI plan (Option C) - `kai ci plan --remote origin --git-range BASE..HEAD` delegates to kailab server
 
 ### Medium-term
 

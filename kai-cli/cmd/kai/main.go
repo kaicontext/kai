@@ -226,7 +226,7 @@ The CLI never runs tests or builds - it just determines what to run.`,
 }
 
 var ciPlanCmd = &cobra.Command{
-	Use:   "plan <changeset|selector>",
+	Use:   "plan [changeset|selector]",
 	Short: "Compute a selection plan for affected targets",
 	Long: `Analyzes changes and computes which targets should run.
 
@@ -249,7 +249,11 @@ Examples:
   kai ci plan                  # Uses @cs:last by default
   kai ci plan @cs:last --out plan.json
   kai ci plan @cs:last --strategy=imports --risk-policy=expand
-  kai ci plan @ws:feature/auth --out plan.json --json`,
+  kai ci plan @ws:feature/auth --out plan.json --json
+
+Git-based CI (no .kai/ database required):
+  kai ci plan --git-range main..feature --out plan.json
+  kai ci plan --git-range $CI_MERGE_REQUEST_DIFF_BASE_SHA..$CI_COMMIT_SHA`,
 	Args: cobra.RangeArgs(0, 1),
 	RunE: runCIPlan,
 }
@@ -465,6 +469,8 @@ var (
 	ciOutFile    string
 	ciSafetyMode string // "shadow", "guarded", "strict"
 	ciExplain    bool   // Output human-readable explanation
+	ciGitRange   string // BASE..HEAD format for git-based CI plan
+	ciGitRepo    string // Git repo path for --git-range
 	ciPlanFile   string
 	ciSection    string
 	// detect-runtime-risk flags
@@ -502,10 +508,19 @@ var changesetCmd = &cobra.Command{
 }
 
 var changesetCreateCmd = &cobra.Command{
-	Use:   "create <base-snap> <head-snap>",
+	Use:   "create [base-snap] [head-snap]",
 	Short: "Create a changeset between two snapshots",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runChangesetCreate,
+	Long: `Create a changeset between two snapshots.
+
+You can specify snapshots by ID/ref, or create them on-the-fly from Git refs:
+
+  kai changeset create snap.main snap.feature      # Using snapshot IDs/refs
+  kai changeset create --git-base main --git-head feature  # From Git refs
+
+The --git-base and --git-head flags create ephemeral snapshots from Git refs,
+useful for CI pipelines where you don't have a persistent .kai database.`,
+	Args: cobra.MaximumNArgs(2),
+	RunE: runChangesetCreate,
 }
 
 var intentCmd = &cobra.Command{
@@ -1260,8 +1275,11 @@ var (
 	pickNoUI      bool
 
 	// Changeset flags
-	changesetMessage string
-	wsStageMessage   string
+	changesetMessage  string
+	changesetGitBase  string // git ref for base snapshot
+	changesetGitHead  string // git ref for head snapshot
+	changesetGitRepo  string // git repo path
+	wsStageMessage    string
 
 	// Diff flags
 	diffDir      string
@@ -1341,6 +1359,9 @@ func init() {
 
 	// Changeset command flags
 	changesetCreateCmd.Flags().StringVarP(&changesetMessage, "message", "m", "", "Changeset message describing the intent")
+	changesetCreateCmd.Flags().StringVar(&changesetGitBase, "git-base", "", "Git ref for base snapshot (instead of snapshot ID)")
+	changesetCreateCmd.Flags().StringVar(&changesetGitHead, "git-head", "", "Git ref for head snapshot (instead of snapshot ID)")
+	changesetCreateCmd.Flags().StringVar(&changesetGitRepo, "repo", ".", "Path to Git repository (used with --git-base/--git-head)")
 
 	// Diff command flags
 	diffCmd.Flags().StringVar(&diffDir, "dir", ".", "Directory to compare against (when comparing snapshot vs working dir)")
@@ -1528,6 +1549,8 @@ func init() {
 	ciPlanCmd.Flags().StringVar(&ciOutFile, "out", "", "Output file for plan JSON")
 	ciPlanCmd.Flags().StringVar(&ciSafetyMode, "safety-mode", "guarded", "Safety mode: shadow (learn-only), guarded (safe fallback), strict (no fallback)")
 	ciPlanCmd.Flags().BoolVar(&ciExplain, "explain", false, "Output human-readable explanation table instead of JSON")
+	ciPlanCmd.Flags().StringVar(&ciGitRange, "git-range", "", "Git range BASE..HEAD to create changeset from (e.g., main..feature)")
+	ciPlanCmd.Flags().StringVar(&ciGitRepo, "repo", ".", "Path to Git repository (used with --git-range)")
 	ciPrintCmd.Flags().StringVar(&ciPlanFile, "plan", "plan.json", "Path to plan file")
 	ciPrintCmd.Flags().StringVar(&ciSection, "section", "summary", "Section to display: targets, impact, summary")
 	// detect-runtime-risk flags
@@ -4244,90 +4267,155 @@ func getAllTestFiles(files []*graph.Node) []string {
 }
 
 func runCIPlan(cmd *cobra.Command, args []string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	matcher, err := loadMatcher()
-	if err != nil {
-		return err
-	}
-
-	creator := snapshot.NewCreator(db, matcher)
-
-	// Resolve the selector - could be changeset, workspace, or snapshot pair
-	// Default to @cs:last if no argument given
-	selector := "@cs:last"
-	if len(args) > 0 {
-		selector = args[0]
-	}
-
+	var db *graph.DB
+	var err error
 	var baseSnapshotID, headSnapshotID []byte
 	var changesetID []byte // Track for provenance
 	var changedFiles []string
+	var matcher *module.Matcher
+	var creator *snapshot.Creator
+	var cleanupFunc func() // For temp dir cleanup
 
-	// Try to resolve as changeset first
-	// Accept both @cs: prefix and raw hex IDs
-	isChangesetSelector := strings.HasPrefix(selector, "@cs:")
-	if !isChangesetSelector && len(selector) >= 8 && !strings.HasPrefix(selector, "@") {
-		// Try to resolve as raw changeset ID
-		if csID, err := util.HexToBytes(selector); err == nil {
-			if node, _ := db.GetNode(csID); node != nil && node.Kind == graph.KindChangeSet {
-				isChangesetSelector = true
-				selector = "@cs:" + selector // Normalize for resolver
+	// Handle --git-range mode: create ephemeral DB and snapshots from git
+	if ciGitRange != "" {
+		// Parse BASE..HEAD format
+		parts := strings.Split(ciGitRange, "..")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid --git-range format: expected BASE..HEAD (e.g., main..feature)")
+		}
+		gitBase, gitHead := parts[0], parts[1]
+
+		// Create temp database
+		tmpDir, err := os.MkdirTemp("", "kai-ci-*")
+		if err != nil {
+			return fmt.Errorf("creating temp dir: %w", err)
+		}
+		cleanupFunc = func() { os.RemoveAll(tmpDir) }
+		defer cleanupFunc()
+
+		dbPath := filepath.Join(tmpDir, "db.sqlite")
+		objDir := filepath.Join(tmpDir, "objects")
+		os.MkdirAll(objDir, 0755)
+		db, err = graph.Open(dbPath, objDir)
+		if err != nil {
+			return fmt.Errorf("creating temp database: %w", err)
+		}
+		defer db.Close()
+
+		// Apply schema to temp database
+		if err := applyDBSchema(db); err != nil {
+			return fmt.Errorf("applying schema: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Creating snapshot from git ref: %s\n", gitBase)
+		baseSnapshotID, err = createSnapshotFromGitRef(db, ciGitRepo, gitBase)
+		if err != nil {
+			return fmt.Errorf("creating base snapshot: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Creating snapshot from git ref: %s\n", gitHead)
+		headSnapshotID, err = createSnapshotFromGitRef(db, ciGitRepo, gitHead)
+		if err != nil {
+			return fmt.Errorf("creating head snapshot: %w", err)
+		}
+
+		// Create changeset
+		fmt.Fprintf(os.Stderr, "Creating changeset...\n")
+		changesetID, err = createChangesetFromSnapshots(db, baseSnapshotID, headSnapshotID, "")
+		if err != nil {
+			return fmt.Errorf("creating changeset: %w", err)
+		}
+
+		// Set up matcher and creator for the rest of the function
+		matcher, _ = loadMatcher()
+		if matcher == nil {
+			matcher = module.NewMatcher(nil)
+		}
+		creator = snapshot.NewCreator(db, matcher)
+
+	} else {
+		// Normal mode: use existing .kai database
+		db, err = openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		matcher, err = loadMatcher()
+		if err != nil {
+			return err
+		}
+
+		creator = snapshot.NewCreator(db, matcher)
+
+		// Resolve the selector - could be changeset, workspace, or snapshot pair
+		// Default to @cs:last if no argument given
+		selector := "@cs:last"
+		if len(args) > 0 {
+			selector = args[0]
+		}
+
+		// Try to resolve as changeset first
+		// Accept both @cs: prefix and raw hex IDs
+		isChangesetSelector := strings.HasPrefix(selector, "@cs:")
+		if !isChangesetSelector && len(selector) >= 8 && !strings.HasPrefix(selector, "@") {
+			// Try to resolve as raw changeset ID
+			if csID, err := util.HexToBytes(selector); err == nil {
+				if node, _ := db.GetNode(csID); node != nil && node.Kind == graph.KindChangeSet {
+					isChangesetSelector = true
+					selector = "@cs:" + selector // Normalize for resolver
+				}
 			}
 		}
-	}
-	if isChangesetSelector {
-		csID, err := resolveChangeSetID(db, selector)
-		changesetID = csID // Save for provenance
-		if err != nil {
-			return fmt.Errorf("resolving changeset: %w", err)
+		if isChangesetSelector {
+			csID, err := resolveChangeSetID(db, selector)
+			changesetID = csID // Save for provenance
+			if err != nil {
+				return fmt.Errorf("resolving changeset: %w", err)
+			}
+
+			// Get the changeset's base and head snapshots from payload
+			cs, err := db.GetNode(csID)
+			if err != nil {
+				return fmt.Errorf("getting changeset: %w", err)
+			}
+
+			// Get base and head from changeset payload
+			// Note: EdgeHas edges point to ChangeType nodes, not snapshots
+			if headHex, ok := cs.Payload["head"].(string); ok {
+				headSnapshotID, _ = util.HexToBytes(headHex)
+			}
+			if baseHex, ok := cs.Payload["base"].(string); ok {
+				baseSnapshotID, _ = util.HexToBytes(baseHex)
+			}
 		}
 
-		// Get the changeset's base and head snapshots from payload
-		cs, err := db.GetNode(csID)
-		if err != nil {
-			return fmt.Errorf("getting changeset: %w", err)
+		// If we couldn't resolve snapshots from changeset, try workspace
+		if headSnapshotID == nil && strings.HasPrefix(selector, "@ws:") {
+			wsName := strings.TrimPrefix(selector, "@ws:")
+			mgr := workspace.NewManager(db)
+			ws, err := mgr.Get(wsName)
+			if err != nil {
+				return fmt.Errorf("resolving workspace: %w", err)
+			}
+			baseSnapshotID = ws.BaseSnapshot
+			headSnapshotID = ws.HeadSnapshot
 		}
 
-		// Get base and head from changeset payload
-		// Note: EdgeHas edges point to ChangeType nodes, not snapshots
-		if headHex, ok := cs.Payload["head"].(string); ok {
-			headSnapshotID, _ = util.HexToBytes(headHex)
+		// Fallback: try as snapshot selector (use with @snap:prev)
+		if headSnapshotID == nil {
+			headSnapshotID, err = resolveSnapshotID(db, selector)
+			if err != nil {
+				return fmt.Errorf("could not resolve selector '%s' as changeset, workspace, or snapshot", selector)
+			}
+			// Try to get previous snapshot as base
+			baseSnapshotID, _ = resolveSnapshotID(db, "@snap:prev")
 		}
-		if baseHex, ok := cs.Payload["base"].(string); ok {
-			baseSnapshotID, _ = util.HexToBytes(baseHex)
-		}
-	}
 
-	// If we couldn't resolve snapshots from changeset, try workspace
-	if headSnapshotID == nil && strings.HasPrefix(selector, "@ws:") {
-		wsName := strings.TrimPrefix(selector, "@ws:")
-		mgr := workspace.NewManager(db)
-		ws, err := mgr.Get(wsName)
-		if err != nil {
-			return fmt.Errorf("resolving workspace: %w", err)
+		if headSnapshotID == nil {
+			return fmt.Errorf("could not determine head snapshot from selector")
 		}
-		baseSnapshotID = ws.BaseSnapshot
-		headSnapshotID = ws.HeadSnapshot
-	}
-
-	// Fallback: try as snapshot selector (use with @snap:prev)
-	if headSnapshotID == nil {
-		headSnapshotID, err = resolveSnapshotID(db, selector)
-		if err != nil {
-			return fmt.Errorf("could not resolve selector '%s' as changeset, workspace, or snapshot", selector)
-		}
-		// Try to get previous snapshot as base
-		baseSnapshotID, _ = resolveSnapshotID(db, "@snap:prev")
-	}
-
-	if headSnapshotID == nil {
-		return fmt.Errorf("could not determine head snapshot from selector")
-	}
+	} // End of else block (normal mode)
 
 	// Get changed files
 	changedFiles, err = getChangedFiles(db, creator, baseSnapshotID, headSnapshotID)
@@ -6453,6 +6541,50 @@ func createChangesetFromSnapshots(db *graph.DB, baseSnapID, headSnapID []byte, m
 	return changeSetID, nil
 }
 
+// createSnapshotFromGitRef creates a snapshot from a git ref, including symbol analysis
+func createSnapshotFromGitRef(db *graph.DB, repoPath, gitRef string) ([]byte, error) {
+	// Load module matcher
+	matcher, err := loadMatcher()
+	if err != nil {
+		// Use empty matcher if no config
+		matcher = module.NewMatcher(nil)
+	}
+
+	// Open git source
+	source, err := gitio.OpenSource(repoPath, gitRef)
+	if err != nil {
+		return nil, fmt.Errorf("opening git ref %s: %w", gitRef, err)
+	}
+
+	// Create snapshot
+	creator := snapshot.NewCreator(db, matcher)
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		return nil, fmt.Errorf("creating snapshot from %s: %w", gitRef, err)
+	}
+
+	// Analyze symbols (needed for semantic diff and CI plan)
+	if err := analyzeSnapshotSymbols(db, snapshotID); err != nil {
+		// Non-fatal - continue without symbols
+		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed for %s: %v\n", gitRef, err)
+	}
+
+	return snapshotID, nil
+}
+
+// analyzeSnapshotSymbols extracts symbols from all files in a snapshot
+func analyzeSnapshotSymbols(db *graph.DB, snapshotID []byte) error {
+	matcher, err := loadMatcher()
+	if err != nil {
+		matcher = module.NewMatcher(nil)
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+	// Silent progress for internal use
+	progress := func(current, total int, filename string) {}
+	return creator.AnalyzeSymbols(snapshotID, progress)
+}
+
 func runChangesetCreate(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -6460,14 +6592,43 @@ func runChangesetCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	baseSnapID, err := resolveSnapshotID(db, args[0])
-	if err != nil {
-		return fmt.Errorf("resolving base snapshot: %w", err)
-	}
+	var baseSnapID, headSnapID []byte
 
-	headSnapID, err := resolveSnapshotID(db, args[1])
-	if err != nil {
-		return fmt.Errorf("resolving head snapshot: %w", err)
+	// Check if using git refs or snapshot IDs
+	useGitRefs := changesetGitBase != "" || changesetGitHead != ""
+
+	if useGitRefs {
+		// Both --git-base and --git-head required together
+		if changesetGitBase == "" || changesetGitHead == "" {
+			return fmt.Errorf("both --git-base and --git-head are required when using git refs")
+		}
+
+		fmt.Printf("Creating snapshot from git ref: %s\n", changesetGitBase)
+		baseSnapID, err = createSnapshotFromGitRef(db, changesetGitRepo, changesetGitBase)
+		if err != nil {
+			return fmt.Errorf("creating base snapshot: %w", err)
+		}
+
+		fmt.Printf("Creating snapshot from git ref: %s\n", changesetGitHead)
+		headSnapID, err = createSnapshotFromGitRef(db, changesetGitRepo, changesetGitHead)
+		if err != nil {
+			return fmt.Errorf("creating head snapshot: %w", err)
+		}
+	} else {
+		// Traditional mode: use positional args as snapshot IDs
+		if len(args) != 2 {
+			return fmt.Errorf("either provide two snapshot IDs or use --git-base and --git-head")
+		}
+
+		baseSnapID, err = resolveSnapshotID(db, args[0])
+		if err != nil {
+			return fmt.Errorf("resolving base snapshot: %w", err)
+		}
+
+		headSnapID, err = resolveSnapshotID(db, args[1])
+		if err != nil {
+			return fmt.Errorf("resolving head snapshot: %w", err)
+		}
 	}
 
 	changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, changesetMessage)
@@ -6564,6 +6725,79 @@ func openDB() (*graph.DB, error) {
 	dbPath := filepath.Join(kaiDir, dbFile)
 	objPath := filepath.Join(kaiDir, objectsDir)
 	return graph.Open(dbPath, objPath)
+}
+
+// applyDBSchema applies the database schema to a fresh database.
+// Used for ephemeral databases in --git-range mode.
+func applyDBSchema(db *graph.DB) error {
+	schema := `
+CREATE TABLE IF NOT EXISTS nodes (
+  id BLOB PRIMARY KEY,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nodes_kind ON nodes(kind);
+
+CREATE TABLE IF NOT EXISTS edges (
+  src BLOB NOT NULL,
+  type TEXT NOT NULL,
+  dst BLOB NOT NULL,
+  at  BLOB,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (src, type, dst, at)
+);
+
+CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
+CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+CREATE INDEX IF NOT EXISTS edges_type ON edges(type);
+CREATE INDEX IF NOT EXISTS edges_at ON edges(at);
+
+CREATE TABLE IF NOT EXISTS refs (
+  name TEXT PRIMARY KEY,
+  target_id BLOB NOT NULL,
+  target_kind TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refs_kind ON refs(target_kind);
+
+CREATE TABLE IF NOT EXISTS slugs (
+  target_id BLOB PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS logs (
+  kind TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  id BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, seq)
+);
+CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
+
+CREATE TABLE IF NOT EXISTS ref_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  old_target BLOB,
+  new_target BLOB NOT NULL,
+  actor TEXT,
+  moved_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name);
+CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
+
+CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
+`
+	tx, err := db.BeginTx()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func loadMatcher() (*module.Matcher, error) {
