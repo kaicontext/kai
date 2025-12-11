@@ -1,0 +1,394 @@
+openapi: 3.0.3
+info:
+  title: Kai API
+  version: 0.1.0
+  description: >
+    API reference for Kai, the intent-based version control system. The service
+    creates immutable snapshots, produces semantic changesets, and maps changes
+    to logical modules.
+servers:
+  - url: https://api.kai.local/v1
+    description: Local development
+  - url: https://api.kai.run/v1
+    description: Production
+tags:
+  - name: Health
+    description: Service readiness endpoints.
+  - name: Snapshots
+    description: Create and read immutable content snapshots.
+  - name: Changesets
+    description: Generate semantic changesets between snapshots.
+  - name: Modules
+    description: Module mappings and metadata.
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns the current health status and build info.
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /snapshots:
+    post:
+      tags: [Snapshots]
+      summary: Create snapshot
+      description: >
+        Creates an immutable snapshot of repository content. Snapshot IDs are
+        content-addressed and safe to reuse in concurrent workflows.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSnapshotRequest"
+      responses:
+        "201":
+          description: Snapshot created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /snapshots/{snapshotId}:
+    get:
+      tags: [Snapshots]
+      summary: Get snapshot metadata
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: snapshotId
+          required: true
+          description: Content-addressed snapshot identifier.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Snapshot metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "404":
+          description: Snapshot not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /changesets:
+    post:
+      tags: [Changesets]
+      summary: Create changeset
+      description: >
+        Computes a semantic changeset between two snapshots. Changes are mapped
+        to logical modules and classified by change type.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChangesetRequest"
+      responses:
+        "201":
+          description: Changeset created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Changeset"
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /changesets/{changesetId}:
+    get:
+      tags: [Changesets]
+      summary: Get changeset
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: path
+          name: changesetId
+          required: true
+          description: Unique identifier returned from the create changeset operation.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Changeset details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Changeset"
+        "404":
+          description: Changeset not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /modules:
+    get:
+      tags: [Modules]
+      summary: List modules for a snapshot
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: query
+          name: snapshotId
+          required: true
+          schema:
+            type: string
+          description: Snapshot to map into modules.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+          description: Max items to return.
+        - in: query
+          name: cursor
+          schema:
+            type: string
+          description: Pagination cursor returned from a previous call.
+      responses:
+        "200":
+          description: Module list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Module"
+                  nextCursor:
+                    type: string
+                    nullable: true
+        "404":
+          description: Snapshot not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status, uptimeSeconds]
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 0.1.0
+        uptimeSeconds:
+          type: integer
+          format: int64
+          example: 1337
+    CreateSnapshotRequest:
+      type: object
+      required: [repository, ref]
+      properties:
+        repository:
+          type: string
+          description: Repository remote to read from (e.g., git@github.com:org/repo.git).
+          example: git@github.com:kai-project/example.git
+        ref:
+          type: string
+          description: Git ref to snapshot.
+          example: refs/heads/main
+        path:
+          type: string
+          description: Subdirectory to scope the snapshot to.
+          default: .
+          example: ./services/api
+        include:
+          type: array
+          description: Glob patterns to include.
+          items:
+            type: string
+          example: ["src/**"]
+        exclude:
+          type: array
+          description: Glob patterns to exclude.
+          items:
+            type: string
+          example: ["**/node_modules/**", "**/*.tmp"]
+        metadata:
+          type: object
+          description: User-provided metadata stored with the snapshot.
+          additionalProperties: true
+    Snapshot:
+      type: object
+      required: [id, repository, ref, createdAt, rootHash]
+      properties:
+        id:
+          type: string
+          description: Content-addressed identifier of the snapshot.
+          example: snap_01hzy3sj5k6w4kqs0y0c7q6tbq
+        repository:
+          type: string
+          example: git@github.com:kai-project/example.git
+        ref:
+          type: string
+          example: refs/heads/main
+        createdAt:
+          type: string
+          format: date-time
+          example: 2024-04-02T18:42:22Z
+        rootHash:
+          type: string
+          description: Merkle root hash of the snapshot contents.
+          example: b6a7e0b8f5d8c4aabf1e7830c2d4a1a2f4c9c8b7a6e5d4c3b2a1f0e9d8c7b6a
+        fileCount:
+          type: integer
+          example: 142
+        byteSize:
+          type: integer
+          format: int64
+          example: 984213
+        include:
+          type: array
+          items:
+            type: string
+        exclude:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    CreateChangesetRequest:
+      type: object
+      required: [snapshotAId, snapshotBId]
+      properties:
+        snapshotAId:
+          type: string
+          example: snap_01hzy3sj5k6w4kqs0y0c7q6tbq
+        snapshotBId:
+          type: string
+          example: snap_01hzy3sj5k6w4kqs0y0c7q6tbr
+        includeModules:
+          type: boolean
+          default: true
+          description: Whether to enrich the changeset with module mappings.
+        filters:
+          type: object
+          properties:
+            changeTypes:
+              type: array
+              items:
+                type: string
+                enum: [added, modified, removed, renamed, signatureChanged]
+            paths:
+              type: array
+              items:
+                type: string
+              description: Limit changes to these path prefixes.
+    Changeset:
+      type: object
+      required: [id, snapshotAId, snapshotBId, changes]
+      properties:
+        id:
+          type: string
+          example: chg_01hzy3vm18b9wr9hm0p5tn8kdp
+        snapshotAId:
+          type: string
+        snapshotBId:
+          type: string
+        summary:
+          type: string
+          example: Updated auth service token validation and rotated secrets module.
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChangeItem"
+        modules:
+          type: array
+          items:
+            $ref: "#/components/schemas/Module"
+        createdAt:
+          type: string
+          format: date-time
+          example: 2024-04-02T18:52:10Z
+    ChangeItem:
+      type: object
+      required: [path, changeType]
+      properties:
+        path:
+          type: string
+          example: services/auth/token.go
+        changeType:
+          type: string
+          enum: [added, modified, removed, renamed, signatureChanged]
+        module:
+          type: string
+          example: auth
+        description:
+          type: string
+          example: Updated token validation to include expiry skew.
+    Module:
+      type: object
+      required: [name, path]
+      properties:
+        name:
+          type: string
+          example: auth
+        path:
+          type: string
+          example: services/auth
+        changeCount:
+          type: integer
+          example: 12
+        lastUpdatedAt:
+          type: string
+          format: date-time
+          example: 2024-04-01T12:30:00Z
+        riskScore:
+          type: number
+          format: float
+          description: Computed module risk score (0 low risk, 1 high risk).
+          example: 0.42
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: invalid_request
+        message:
+          type: string
+          example: Snapshot not found.
+        details:
+          type: object
+          additionalProperties: true

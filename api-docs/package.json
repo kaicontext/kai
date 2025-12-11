@@ -1,0 +1,12 @@
+{
+  "name": "kai-api-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "redoc-cli serve openapi/openapi.yaml --watch --title \"Kai API Reference\"",
+    "build": "redoc-cli bundle openapi/openapi.yaml -o dist/index.html --title \"Kai API Reference\""
+  },
+  "devDependencies": {
+    "redoc-cli": "^0.13.21"
+  }
+}

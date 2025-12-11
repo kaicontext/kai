@@ -1121,6 +1121,12 @@ kai push origin snap.latest</pre>
 													onclick={() => updateReviewState(selectedChangesetReview().id, 'abandoned')}
 												>Abandon</button>
 											{/if}
+											{#if selectedChangesetReview().state === 'abandoned'}
+												<button
+													class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors"
+													onclick={() => updateReviewState(selectedChangesetReview().id, 'open')}
+												>Reopen</button>
+											{/if}
 										{/if}
 									</div>
 								</div>
