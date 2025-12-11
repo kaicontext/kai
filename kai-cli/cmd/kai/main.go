@@ -10329,6 +10329,24 @@ func runReviewClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("closing review: %w", err)
 	}
 
+	// If merging, update snap.main to the changeset's head snapshot
+	if state == review.StateMerged && rev.TargetKind == graph.KindChangeSet {
+		target, err := mgr.GetTarget(rev.ID)
+		if err == nil && target != nil {
+			if headHex, ok := target.Payload["head"].(string); ok && headHex != "" {
+				headID, err := util.HexToBytes(headHex)
+				if err == nil {
+					refMgr := ref.NewRefManager(db)
+					if err := refMgr.Set("snap.main", headID, ref.KindSnapshot); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: could not update snap.main: %v\n", err)
+					} else {
+						fmt.Printf("Updated snap.main to merged head.\n")
+					}
+				}
+			}
+		}
+	}
+
 	fmt.Printf("Review %s closed as %s.\n", review.IDToHex(rev.ID)[:12], state)
 	return nil
 }
