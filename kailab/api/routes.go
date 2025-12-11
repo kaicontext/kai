@@ -81,6 +81,9 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews)))
 	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState)))
 
+	// CI / Affected Tests
+	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests)))
+
 	return mux
 }
 
@@ -1395,6 +1398,231 @@ func computeBlake3(data []byte) []byte {
 	h := cas.NewBlake3Hasher()
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+// GetAffectedTests returns tests that might be affected by the changes in a changeset.
+// This uses heuristics based on file naming conventions (e.g., foo.js -> foo.test.js).
+func (h *Handler) GetAffectedTests(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	changesetID := r.PathValue("id")
+	if changesetID == "" {
+		writeError(w, http.StatusBadRequest, "missing changeset ID", nil)
+		return
+	}
+
+	// Resolve changeset ID (could be short ID or full hex)
+	var fullDigest []byte
+	if len(changesetID) < 64 {
+		// Short ID - find matching ref
+		rows, err := rh.DB.Query(`SELECT target FROM refs WHERE name LIKE ? LIMIT 1`, "cs.%"+changesetID+"%")
+		if err == nil {
+			defer rows.Close()
+			if rows.Next() {
+				rows.Scan(&fullDigest)
+			}
+		}
+		// If not found via ref, try objects table
+		if fullDigest == nil {
+			rows2, err := rh.DB.Query(`SELECT digest FROM objects WHERE kind = 'ChangeSet' AND hex(digest) LIKE ? LIMIT 1`, changesetID+"%")
+			if err == nil {
+				defer rows2.Close()
+				if rows2.Next() {
+					rows2.Scan(&fullDigest)
+				}
+			}
+		}
+	} else {
+		fullDigest, _ = hex.DecodeString(changesetID)
+	}
+
+	if fullDigest == nil {
+		writeError(w, http.StatusNotFound, "changeset not found", nil)
+		return
+	}
+
+	// Get the changeset object
+	csData, _, err := pack.ExtractObjectFromDB(rh.DB, fullDigest)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "changeset not found", err)
+		return
+	}
+
+	// Parse changeset payload
+	var csPayload struct {
+		Base string `json:"base"`
+		Head string `json:"head"`
+	}
+	// Skip "ChangeSet\n" prefix
+	if idx := bytes.Index(csData, []byte("\n")); idx > 0 {
+		if err := json.Unmarshal(csData[idx+1:], &csPayload); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to parse changeset", err)
+			return
+		}
+	}
+
+	baseDigest, _ := hex.DecodeString(csPayload.Base)
+	headDigest, _ := hex.DecodeString(csPayload.Head)
+
+	if baseDigest == nil || headDigest == nil {
+		writeError(w, http.StatusInternalServerError, "invalid changeset base/head", nil)
+		return
+	}
+
+	// Get files from both snapshots
+	baseFiles, err := getSnapshotFilePaths(rh.DB, baseDigest)
+	if err != nil {
+		baseFiles = make(map[string]bool) // Empty if base doesn't exist
+	}
+	headFiles, err := getSnapshotFilePaths(rh.DB, headDigest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get head files", err)
+		return
+	}
+
+	// Find changed files
+	var changedFiles []string
+	for path := range headFiles {
+		if !baseFiles[path] {
+			changedFiles = append(changedFiles, path) // Added
+		}
+	}
+	for path := range baseFiles {
+		if !headFiles[path] {
+			changedFiles = append(changedFiles, path) // Removed
+		}
+	}
+	// For modified, we'd need to compare content digests - skip for now
+	// The heuristic will still work for added/removed files
+
+	// Find affected tests using naming heuristics
+	affectedTests := findAffectedTestsByHeuristic(changedFiles, headFiles)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"changedFiles":  changedFiles,
+		"affectedTests": affectedTests,
+		"method":        "heuristic", // Indicates this is heuristic-based, not graph-based
+	})
+}
+
+// getSnapshotFilePaths returns a map of file paths in a snapshot
+func getSnapshotFilePaths(db *sql.DB, snapshotDigest []byte) (map[string]bool, error) {
+	snapData, _, err := pack.ExtractObjectFromDB(db, snapshotDigest)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse snapshot payload
+	var snapPayload struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if idx := bytes.Index(snapData, []byte("\n")); idx > 0 {
+		if err := json.Unmarshal(snapData[idx+1:], &snapPayload); err != nil {
+			return nil, err
+		}
+	}
+
+	paths := make(map[string]bool)
+	for _, f := range snapPayload.Files {
+		paths[f.Path] = true
+	}
+	return paths, nil
+}
+
+// findAffectedTestsByHeuristic finds test files that might be affected by changed files.
+// Uses common naming patterns:
+// - foo.js -> foo.test.js, foo.spec.js, test/foo.js, __tests__/foo.js
+// - src/foo.js -> test/foo.test.js, tests/foo.test.js
+func findAffectedTestsByHeuristic(changedFiles []string, allFiles map[string]bool) []string {
+	testPatterns := make(map[string]bool)
+
+	for _, path := range changedFiles {
+		// Skip if the changed file is already a test file
+		if isTestFile(path) {
+			testPatterns[path] = true
+			continue
+		}
+
+		// Generate possible test file names
+		base := strings.TrimSuffix(path, getExtension(path))
+		ext := getExtension(path)
+
+		// Common patterns
+		candidates := []string{
+			base + ".test" + ext,
+			base + ".spec" + ext,
+			base + "_test" + ext,
+			strings.Replace(path, "src/", "test/", 1),
+			strings.Replace(path, "src/", "tests/", 1),
+			strings.Replace(path, "lib/", "test/", 1),
+			"test/" + path,
+			"tests/" + path,
+			"__tests__/" + strings.TrimPrefix(path, "src/"),
+		}
+
+		// Also try test file with same name in test directory
+		fileName := getFileName(path)
+		baseName := strings.TrimSuffix(fileName, ext)
+		candidates = append(candidates,
+			"test/"+baseName+".test"+ext,
+			"tests/"+baseName+".test"+ext,
+			"test/"+baseName+"_test"+ext,
+			"__tests__/"+baseName+".test"+ext,
+		)
+
+		for _, candidate := range candidates {
+			if allFiles[candidate] {
+				testPatterns[candidate] = true
+			}
+		}
+	}
+
+	// Convert to slice
+	var result []string
+	for path := range testPatterns {
+		result = append(result, path)
+	}
+	return result
+}
+
+// isTestFile checks if a file path looks like a test file
+func isTestFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, ".test.") ||
+		strings.Contains(lower, ".spec.") ||
+		strings.Contains(lower, "_test.") ||
+		strings.HasPrefix(lower, "test/") ||
+		strings.HasPrefix(lower, "tests/") ||
+		strings.Contains(lower, "__tests__/")
+}
+
+// getExtension returns the file extension including the dot
+func getExtension(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+		if path[i] == '/' {
+			return ""
+		}
+	}
+	return ""
+}
+
+// getFileName returns just the file name from a path
+func getFileName(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[i+1:]
+		}
+	}
+	return path
 }
 
 // Helper type for unused import

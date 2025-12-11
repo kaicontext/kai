@@ -86,6 +86,10 @@
 	let fileDiffData = $state(null);      // API response with hunks
 	let fileDiffLoading = $state(false);
 
+	// Affected tests state
+	let affectedTests = $state([]);
+	let affectedTestsLoading = $state(false);
+
 	// Files tab state
 	let selectedSnapshot = $state('');
 	let files = $state([]);
@@ -577,13 +581,38 @@
 		changesetFilesLoading = false;
 	}
 
+	// Load affected tests for a changeset
+	async function loadAffectedTests(csRef) {
+		const payload = changesetPayloads[csRef.name];
+		if (!payload) {
+			affectedTests = [];
+			return;
+		}
+
+		affectedTestsLoading = true;
+		try {
+			// Get the changeset's target ID (the actual changeset object digest)
+			const changesetId = csRef.target ? base64ToHex(csRef.target) : csRef.name.replace('cs.', '');
+			const data = await api('GET', `/${$page.params.slug}/${$page.params.repo}/v1/changesets/${changesetId}/affected-tests`);
+			affectedTests = data.affectedTests || [];
+		} catch (e) {
+			console.error('Failed to load affected tests:', e);
+			affectedTests = [];
+		}
+		affectedTestsLoading = false;
+	}
+
 	// Select a changeset for detail view
 	async function selectChangeset(csRef) {
 		selectedChangeset = csRef;
 		// Update URL to include changeset name
 		const csId = csRef.name.replace('cs.', '');
 		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${csId}`, { replaceState: false, noScroll: true });
-		await loadChangesetDiff(csRef);
+		// Load files and affected tests in parallel
+		await Promise.all([
+			loadChangesetDiff(csRef),
+			loadAffectedTests(csRef)
+		]);
 	}
 
 	// Close changeset detail view
@@ -592,6 +621,7 @@
 		selectedDiffFile = null;
 		fileDiffData = null;
 		changesetFiles = { added: [], removed: [], modified: [] };
+		affectedTests = [];
 		// Go back to changes list
 		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes`, { replaceState: false, noScroll: true });
 	}
@@ -1270,6 +1300,33 @@ kai push origin snap.latest</pre>
 										{/if}
 									</div>
 								{/if}
+							{/if}
+
+							<!-- Affected Tests Section -->
+							{#if affectedTestsLoading}
+								<div class="mt-6 pt-4 border-t border-kai-border">
+									<div class="text-kai-text-muted text-sm">Loading affected tests...</div>
+								</div>
+							{:else if affectedTests.length > 0}
+								<div class="mt-6 pt-4 border-t border-kai-border">
+									<h4 class="text-sm font-semibold text-kai-text mb-3 flex items-center gap-2">
+										<svg class="w-4 h-4 text-kai-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+										</svg>
+										Affected Tests ({affectedTests.length})
+									</h4>
+									<div class="space-y-1">
+										{#each affectedTests as testPath}
+											<div class="flex items-center gap-2 text-sm py-1 px-2 rounded bg-kai-bg-tertiary">
+												<span class="text-purple-400 font-mono w-4">T</span>
+												<span class="text-kai-text font-mono">{testPath}</span>
+											</div>
+										{/each}
+									</div>
+									<p class="text-xs text-kai-text-muted mt-3">
+										Based on file naming patterns. Run <code class="bg-kai-bg px-1 rounded">kai ci plan</code> for full dependency analysis.
+									</p>
+								</div>
 							{/if}
 						</div>
 					</div>
