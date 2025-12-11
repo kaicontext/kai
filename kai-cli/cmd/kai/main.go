@@ -1296,7 +1296,6 @@ var (
 
 	// Capture flags
 	captureExplain bool
-	capturePromote bool
 
 	// Global explain flag
 	explainFlag bool
@@ -1345,7 +1344,6 @@ func init() {
 
 	// Capture command flags
 	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
-	captureCmd.Flags().BoolVar(&capturePromote, "promote", false, "Also update @snap:last (commit as new baseline)")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
 	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
@@ -2040,9 +2038,9 @@ Kai uses a two-tier snapshot model to prevent database bloat:
 
 ### How it works:
 
-1. **` + "`" + `kai capture` + "`" + `** updates ` + "`" + `@snap:working` + "`" + ` (your current state)
-2. **` + "`" + `kai capture --promote` + "`" + `** also updates ` + "`" + `@snap:last` + "`" + ` (new baseline)
-3. **` + "`" + `kai review open` + "`" + `** creates a changeset from baseline to working
+1. **` + "`" + `kai capture` + "`" + `** creates a snapshot and updates ` + "`" + `snap.latest` + "`" + `
+2. **` + "`" + `kai status` + "`" + `** compares working directory to ` + "`" + `snap.latest` + "`" + `
+3. **` + "`" + `kai review open` + "`" + `** creates a changeset for review
 4. **` + "`" + `kai prune` + "`" + `** cleans up unreferenced snapshots
 
 ### Garbage Collection
@@ -2300,30 +2298,19 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	// Update auto-refs
-	// Use @snap:working (ephemeral) instead of @snap:last (committed)
-	// This prevents snapshot accumulation - old working snapshots are GC'd
+	// Update refs - like git commit, capture always updates snap.latest
 	fmt.Print("Updating refs... ")
 	autoRefMgr := ref.NewAutoRefManager(db)
 
 	// Check if this is the first scan (no snap.latest ref exists)
-	// We check the ref directly, not @snap:last, because @snap:last has a fallback
-	// to created_at ordering which would find the snapshot we just created.
 	refMgr := ref.NewRefManager(db)
 	existingLatest, _ := refMgr.Get("snap.latest")
 	isFirstScan := existingLatest == nil
 
-	if isFirstScan || capturePromote {
-		// First scan or --promote: commit as baseline (@snap:last) AND set as working
-		if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
-			fmt.Println("failed")
-			fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
-		}
-	}
-	// Always update working snapshot
-	if err := autoRefMgr.OnWorkingSnapshotUpdated(snapshotID); err != nil {
+	// Always update snap.latest (like git commit updates HEAD)
+	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
 		fmt.Println("failed")
-		fmt.Fprintf(os.Stderr, "warning: failed to update working ref: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
 	} else {
 		fmt.Println("done")
 	}
@@ -2381,30 +2368,23 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("│")
 	if isFirstScan {
-		fmt.Println("│  Baseline created (@snap:last).")
+		fmt.Println("│  Snapshot created (snap.latest).")
 		fmt.Println("│")
 		fmt.Println("│  Next: make changes, then:")
-		fmt.Println("│    kai diff           # See what changed")
+		fmt.Println("│    kai status         # See what changed")
 		fmt.Println("│    kai capture        # Capture changes")
-		fmt.Println("│    kai review open    # Commit & review")
-		fmt.Println("│    kai ci plan        # Get selective test plan")
-	} else if capturePromote {
-		fmt.Println("│  Baseline updated (@snap:last) via --promote.")
-		fmt.Println("│")
-		fmt.Println("│  Next: make changes, then:")
-		fmt.Println("│    kai diff           # See differences from new baseline")
-		fmt.Println("│    kai capture        # Capture working changes")
+		fmt.Println("│    kai review open    # Create a review")
 	} else if changeSummary != nil && changeSummary.hasChanges {
-		fmt.Println("│  Working snapshot updated (@snap:working).")
+		fmt.Println("│  Snapshot updated (snap.latest).")
 		fmt.Println("│")
 		fmt.Println("│  Next:")
-		fmt.Println("│    kai diff           # See detailed changes")
-		fmt.Println("│    kai review open    # Commit & review")
+		fmt.Println("│    kai review open    # Create a review")
 		fmt.Println("│    kai ci plan        # Get selective test plan")
+		fmt.Println("│    kai push           # Push to remote")
 	} else {
-		fmt.Println("│  Working snapshot updated (@snap:working).")
+		fmt.Println("│  Snapshot updated (snap.latest).")
 		fmt.Println("│")
-		fmt.Println("│  No changes to review.")
+		fmt.Println("│  No changes from previous snapshot.")
 	}
 	fmt.Println("╰─────────────────────────────────────────────")
 
