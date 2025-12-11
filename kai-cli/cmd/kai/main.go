@@ -1247,12 +1247,11 @@ var (
 	reviewReviewers   []string
 	reviewCloseState  string
 	reviewExportMD    bool
-	reviewExportHTML  bool
-	reviewJSON        bool
-	reviewViewMode    string
-	reviewExplain     bool
-	reviewBase        string
-	reviewPromoteLast bool
+	reviewExportHTML bool
+	reviewJSON       bool
+	reviewViewMode   string
+	reviewExplain    bool
+	reviewBase       string
 
 	statusDir      string
 	statusAgainst  string
@@ -1450,8 +1449,7 @@ func init() {
 	// Review flags
 	reviewOpenCmd.Flags().StringVarP(&reviewTitle, "title", "m", "", "Review title (auto-generated from changes if not provided)")
 	reviewOpenCmd.Flags().StringVar(&reviewDesc, "desc", "", "Review description")
-	reviewOpenCmd.Flags().StringVar(&reviewBase, "base", "", "Base ref for changeset (default: @snap:last or snap.main if set)")
-	reviewOpenCmd.Flags().BoolVar(&reviewPromoteLast, "promote-last", false, "Promote @snap:working to @snap:last after review")
+	reviewOpenCmd.Flags().StringVar(&reviewBase, "base", "", "Base ref for changeset (default: @snap:prev)")
 	reviewOpenCmd.Flags().StringArrayVar(&reviewReviewers, "reviewers", nil, "Reviewers (can be specified multiple times)")
 	reviewOpenCmd.Flags().BoolVar(&reviewExplain, "explain", false, "Show detailed explanation of what this command does")
 
@@ -9884,11 +9882,10 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 			targetKind = string(ref.KindWorkspace)
 			fmt.Printf("Changeset added to workspace stack\n\n")
 		} else {
-			// No workspace - auto-create standalone changeset from base to @snap:working
-			// Determine base: --base flag > snap.main (if exists) > @snap:last
+			// No workspace - auto-create standalone changeset from base to snap.latest
+			// Determine base: --base flag > @snap:prev (previous snapshot)
 			var baseSnapID []byte
 			var baseLabel string
-			refMgr := ref.NewRefManager(db)
 
 			if reviewBase != "" {
 				// User specified --base
@@ -9898,32 +9895,26 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 				}
 				baseLabel = reviewBase
 			} else {
-				// Check for snap.main as default base
-				snapMain, _ := refMgr.Get("snap.main")
-				if snapMain != nil {
-					baseSnapID = snapMain.TargetID
-					baseLabel = "snap.main"
-				} else {
-					// Fall back to @snap:last
-					baseSnapID, err = resolveSnapshotID(db, "@snap:last")
-					if err != nil {
-						return fmt.Errorf("resolving @snap:last: %w (run 'kai capture' first to create a baseline)", err)
-					}
-					baseLabel = "@snap:last"
+				// Use previous snapshot as base (like git diff HEAD~1)
+				baseSnapID, err = resolveSnapshotID(db, "@snap:prev")
+				if err != nil {
+					return fmt.Errorf("resolving @snap:prev: %w (need at least 2 snapshots, run 'kai capture' twice)", err)
 				}
+				baseLabel = "@snap:prev"
 			}
 
-			headSnapID, err := resolveSnapshotID(db, "@snap:working")
+			// Use snap.latest as head (updated by kai capture)
+			headSnapID, err := resolveSnapshotID(db, "snap.latest")
 			if err != nil {
-				return fmt.Errorf("resolving @snap:working: %w (run 'kai capture' to capture your changes)", err)
+				return fmt.Errorf("resolving snap.latest: %w (run 'kai capture' to capture your changes)", err)
 			}
 
-			// Check if baseline and working are the same (no changes)
+			// Check if baseline and head are the same (no changes)
 			if string(baseSnapID) == string(headSnapID) {
-				return fmt.Errorf("no changes to review: %s and @snap:working are the same\n  Make changes and run 'kai capture' to capture them", baseLabel)
+				return fmt.Errorf("no changes to review: %s and snap.latest are the same\n  Make changes and run 'kai capture' to capture them", baseLabel)
 			}
 
-			fmt.Printf("Creating changeset from %s to @snap:working...\n", baseLabel)
+			fmt.Printf("Creating changeset from %s to snap.latest...\n", baseLabel)
 			changeSetID, err := createChangesetFromSnapshots(db, baseSnapID, headSnapID, reviewTitle)
 			if err != nil {
 				return fmt.Errorf("creating changeset: %w", err)
@@ -9932,16 +9923,6 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 			targetID = changeSetID
 			targetKind = string(ref.KindChangeSet)
 			fmt.Printf("Changeset created: %s\n", util.BytesToHex(changeSetID)[:12])
-
-			// Promote @snap:working to @snap:last only if --promote-last is specified
-			if reviewPromoteLast {
-				autoRefMgr := ref.NewAutoRefManager(db)
-				if err := autoRefMgr.PromoteWorkingSnapshot(); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to promote working snapshot: %v\n", err)
-				} else {
-					fmt.Println("Working snapshot promoted to @snap:last")
-				}
-			}
 			fmt.Println()
 		}
 	} else {
