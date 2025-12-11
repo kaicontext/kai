@@ -8919,15 +8919,20 @@ func runPush(cmd *cobra.Command, args []string) error {
 			var batch []remote.PackObject
 			var batchSize int64
 			batchNum := 1
-			totalBatches := 1
 
-			// Calculate estimated total batches
-			var totalSize int64
+			// Count total batches accurately by simulating the batching
+			totalBatches := 0
+			var simBatchSize int64
 			for _, obj := range packObjects {
-				totalSize += int64(len(obj.Content))
+				objSize := int64(len(obj.Content))
+				if simBatchSize+objSize > maxBatchSize && simBatchSize > 0 {
+					totalBatches++
+					simBatchSize = 0
+				}
+				simBatchSize += objSize
 			}
-			if totalSize > maxBatchSize {
-				totalBatches = int(totalSize/maxBatchSize) + 1
+			if simBatchSize > 0 {
+				totalBatches++
 			}
 
 			for _, obj := range packObjects {
