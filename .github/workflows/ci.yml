@@ -1,0 +1,221 @@
+# GitHub Actions CI for Kai
+# Builds and deploys to GKE on merge to main
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+    branches: [main]
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  KAILAB_IMAGE: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/preplan/kailab
+  KAILAB_CONTROL_IMAGE: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/preplan/kailab-control
+
+jobs:
+  # Test kai-cli (needs CGO for tree-sitter)
+  test-kai-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run tests
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./...
+
+  # Test kai-core (needs CGO for tree-sitter)
+  test-kai-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run tests
+        run: |
+          cd kai-core
+          CGO_ENABLED=1 go test ./...
+
+  # Test kailab (needs CGO for sqlite)
+  test-kailab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run tests
+        run: |
+          cd kailab
+          CGO_ENABLED=1 go test ./...
+
+  # Test kailab-control
+  test-kailab-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run tests
+        run: |
+          cd kailab-control
+          go test ./...
+
+  # Build kailab (data plane)
+  build-kailab:
+    runs-on: ubuntu-latest
+    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t $KAILAB_IMAGE:${{ github.sha }} -t $KAILAB_IMAGE:latest -f kailab/Dockerfile .
+          docker push $KAILAB_IMAGE:${{ github.sha }}
+          docker push $KAILAB_IMAGE:latest
+
+  # Build kailab-control (control plane)
+  build-kailab-control:
+    runs-on: ubuntu-latest
+    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t $KAILAB_CONTROL_IMAGE:${{ github.sha }} -t $KAILAB_CONTROL_IMAGE:latest kailab-control/
+          docker push $KAILAB_CONTROL_IMAGE:${{ github.sha }}
+          docker push $KAILAB_CONTROL_IMAGE:latest
+
+  # Build and release kai-cli binaries
+  release-kai-cli:
+    runs-on: ubuntu-latest
+    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Build binaries
+        run: |
+          cd kai-cli
+          VERSION=$(grep 'var Version' cmd/kai/main.go | cut -d'"' -f2)
+          echo "Building kai-cli v${VERSION}"
+          mkdir -p dist
+          # Linux amd64
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/kai-linux-amd64 ./cmd/kai
+          gzip -k dist/kai-linux-amd64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-cli-binaries
+          path: kai-cli/dist/
+          retention-days: 7
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            kai-cli/dist/kai-linux-amd64.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Deploy to GKE
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-kailab, build-kailab-control]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://kailayer.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install gke-gcloud-auth-plugin
+        run: gcloud components install gke-gcloud-auth-plugin --quiet
+
+      - name: Get GKE credentials
+        run: gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
+
+      - name: Deploy to GKE
+        run: |
+          # Create namespace if not exists
+          kubectl create namespace kailab --dry-run=client -o yaml | kubectl apply -f -
+          # Update image tags in manifest and apply
+          sed -i "s|us-central1-docker.pkg.dev/preplanai/preplan/kailab:latest|$KAILAB_IMAGE:${{ github.sha }}|g" deploy/k8s/kailab-deployment.yaml
+          sed -i "s|us-central1-docker.pkg.dev/preplanai/preplan/kailab-control:latest|$KAILAB_CONTROL_IMAGE:${{ github.sha }}|g" deploy/k8s/kailab-deployment.yaml
+          kubectl apply -f deploy/k8s/kailab-deployment.yaml
+          # Wait for rollout
+          kubectl rollout status deployment/kailab -n kailab --timeout=300s
+          kubectl rollout status deployment/kailab-control -n kailab --timeout=300s
