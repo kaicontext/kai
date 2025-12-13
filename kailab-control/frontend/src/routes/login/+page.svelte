@@ -63,7 +63,7 @@
 	<!-- Left side: Design principles -->
 	<div class="hidden lg:flex lg:w-1/2 bg-kai-bg-secondary border-r border-kai-border flex-col justify-center px-12">
 		<h1 class="text-3xl font-bold mb-2">Kai</h1>
-		<p class="text-kai-text-muted mb-8">Intent-based version control</p>
+		<p class="text-kai-text-muted mb-8">Semantic Grounding for AI-Driven Code</p>
 
 		<div class="space-y-6">
 			<div class="flex gap-4">
@@ -74,7 +74,7 @@
 				</div>
 				<div>
 					<h3 class="font-semibold mb-1">Idempotent</h3>
-					<p class="text-sm text-kai-text-muted">Same command, same result. No hidden state. Content-addressed and immutable.</p>
+					<p class="text-sm text-kai-text-muted">Same input, same output — always. Semantic snapshots are deterministic and content-addressed, giving AI agents stable context to reason on.</p>
 				</div>
 			</div>
 
@@ -86,7 +86,7 @@
 				</div>
 				<div>
 					<h3 class="font-semibold mb-1">Fast</h3>
-					<p class="text-sm text-kai-text-muted">Sub-second operations. O(1) lookups. Transfer only what's missing.</p>
+					<p class="text-sm text-kai-text-muted">Sub-second semantic lookups. Incremental parsing. Diff only what changed. Perfect for real-time AI coding loops.</p>
 				</div>
 			</div>
 
@@ -98,7 +98,7 @@
 				</div>
 				<div>
 					<h3 class="font-semibold mb-1">Semantic</h3>
-					<p class="text-sm text-kai-text-muted">Understands meaning, not just text. "Function added" not "line 47 changed".</p>
+					<p class="text-sm text-kai-text-muted">Understands behavior, not just tokens. "Function refactored" — not "lines deleted/added". LLMs get clean, structured deltas instead of raw noise.</p>
 				</div>
 			</div>
 
@@ -110,7 +110,7 @@
 				</div>
 				<div>
 					<h3 class="font-semibold mb-1">Immutable</h3>
-					<p class="text-sm text-kai-text-muted">Snapshots never change. Trustworthy history. Safe concurrent operations.</p>
+					<p class="text-sm text-kai-text-muted">Snapshots never mutate. AI agents always operate on a trustworthy, unchanging baseline — essential for safe automated edits and multi-step reasoning.</p>
 				</div>
 			</div>
 
@@ -123,7 +123,7 @@
 				</div>
 				<div>
 					<h3 class="font-semibold mb-1">Explicit</h3>
-					<p class="text-sm text-kai-text-muted">Commands say what they do. No magic. No surprises.</p>
+					<p class="text-sm text-kai-text-muted">Every operation is clear and inspectable. AI tools can query "what changed", "why", and "what's impacted" without guessing. No heuristics. No hidden state. No magic.</p>
 				</div>
 			</div>
 		</div>
@@ -136,7 +136,7 @@
 				<h1 class="text-center text-2xl font-semibold mb-2 lg:hidden">Kai</h1>
 				<h2 class="text-center text-xl font-semibold mb-6 hidden lg:block">Sign in</h2>
 				<p class="text-center text-kai-text-muted mb-6 lg:hidden">
-					Intent-based version control
+					Semantic Grounding for AI-Driven Code
 				</p>
 
 				{#if error}
