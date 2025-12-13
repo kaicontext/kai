@@ -107,11 +107,12 @@ Because Kai sees symbols and AST structure, downstream tools become smarter.
 
 ```bash
 kai init
-kai snapshot create --git main
-kai snapshot create --git feature/login
-kai changeset create @snap:prev @snap:last
-kai intent render @cs:last
-kai ci plan @cs:last --explain
+kai capture
+# make changes 
+kai diff
+kai review open
+kai ci plan
+kai push
 ```
 
 No new source-control model.
