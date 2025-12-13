@@ -8681,9 +8681,9 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 	fmt.Printf("Detected project: %s\n", projectName)
 	fmt.Printf("Server: %s\n\n", serverURL)
 
-	// Check if user is authenticated
-	_, _, loggedIn := remote.GetAuthStatus()
-	if !loggedIn {
+	// Check if user is authenticated with a valid token
+	token, err := remote.GetValidAccessToken()
+	if err != nil || token == "" {
 		fmt.Println("You're not logged in. Let's set that up first.")
 		fmt.Println()
 
@@ -8699,6 +8699,9 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 			return nil, fmt.Errorf("login failed: %w", err)
 		}
 		fmt.Println()
+	} else {
+		email, _, _ := remote.GetAuthStatus()
+		fmt.Printf("Logged in as: %s\n", email)
 	}
 
 	// Create control client to manage orgs/repos
