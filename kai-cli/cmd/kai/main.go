@@ -3,15 +3,19 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1099,6 +1103,17 @@ Examples:
 	RunE: runRemoteLog,
 }
 
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update kai to the latest version",
+	Long: `Download and install the latest kai binary from GitHub releases.
+
+Examples:
+  kai update           # Download and install latest version
+  kai update --check   # Check for updates without installing`,
+	RunE: runUpdate,
+}
+
 // Auth commands
 var authCmd = &cobra.Command{
 	Use:   "auth",
@@ -1658,10 +1673,13 @@ func init() {
 	fetchCmd.GroupID = groupRemote
 	cloneCmd.GroupID = groupRemote
 	authCmd.GroupID = groupRemote
+	updateCmd.GroupID = groupRemote
 	rootCmd.AddCommand(remoteCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
 	rootCmd.AddCommand(cloneCmd)
+	rootCmd.AddCommand(updateCmd)
+	updateCmd.Flags().Bool("check", false, "Check for updates without installing")
 
 	// Advanced (low-level/plumbing commands)
 	snapshotCmd.GroupID = groupAdvanced
@@ -12364,5 +12382,120 @@ func runCIValidatePlan(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Kai:        %s\n", plan.Provenance.KaiVersion)
 	fmt.Printf("Detector:   %s\n", plan.Provenance.DetectorVersion)
 
+	return nil
+}
+
+// runUpdate downloads and installs the latest kai binary from GitHub releases.
+func runUpdate(cmd *cobra.Command, args []string) error {
+	checkOnly, _ := cmd.Flags().GetBool("check")
+
+	// Determine OS and architecture
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	binaryName := fmt.Sprintf("kai-%s-%s", goos, goarch)
+
+	// GitHub releases URL
+	downloadURL := fmt.Sprintf("https://github.com/kailayerhq/kai/releases/latest/download/%s.gz", binaryName)
+
+	fmt.Printf("Current version: %s\n", Version)
+	fmt.Printf("Binary: %s\n", binaryName)
+
+	// Check if binary is available
+	resp, err := http.Head(downloadURL)
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		fmt.Printf("No binary available for %s/%s\n", goos, goarch)
+		fmt.Println("Try: go install github.com/kailayerhq/kai/kai-cli/cmd/kai@latest")
+		return nil
+	}
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("unexpected status checking for updates: %d", resp.StatusCode)
+	}
+
+	fmt.Println("Update available!")
+
+	if checkOnly {
+		fmt.Printf("Download URL: %s\n", downloadURL)
+		return nil
+	}
+
+	// Get current executable path
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+
+	fmt.Printf("Downloading %s...\n", binaryName)
+
+	// Download the gzipped binary
+	resp, err = http.Get(downloadURL)
+	if err != nil {
+		return fmt.Errorf("failed to download update: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
+	}
+
+	// Create temp file
+	tmpFile, err := os.CreateTemp("", "kai-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	// Decompress gzip
+	gzReader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to decompress: %w", err)
+	}
+
+	_, err = io.Copy(tmpFile, gzReader)
+	gzReader.Close()
+	tmpFile.Close()
+	if err != nil {
+		return fmt.Errorf("failed to write update: %w", err)
+	}
+
+	// Make executable
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		return fmt.Errorf("failed to make executable: %w", err)
+	}
+
+	// Replace current binary
+	// On Unix, we can rename over the running binary
+	if err := os.Rename(tmpPath, execPath); err != nil {
+		// If rename fails (e.g., cross-device), try copy
+		src, err := os.Open(tmpPath)
+		if err != nil {
+			return fmt.Errorf("failed to open temp file: %w", err)
+		}
+		defer src.Close()
+
+		dst, err := os.OpenFile(execPath, os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			return fmt.Errorf("failed to open destination (try sudo?): %w", err)
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, src); err != nil {
+			return fmt.Errorf("failed to copy update: %w", err)
+		}
+	}
+
+	fmt.Println("Updated successfully!")
+	fmt.Println("Run 'kai --version' to verify.")
 	return nil
 }
