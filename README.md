@@ -319,6 +319,26 @@ Kai is designed to complement Git, not replace it. Use Git for your source of tr
 
 - **Go 1.22+** (uses Go 1.24 features)
 - **Git** (optional - only needed for Git-based snapshots)
+- **C compiler** (required for CGO dependencies)
+
+#### Ubuntu/Debian
+
+```bash
+sudo apt-get update && sudo apt-get install -y gcc
+```
+
+#### macOS
+
+Xcode Command Line Tools (usually pre-installed):
+```bash
+xcode-select --install
+```
+
+#### Fedora/RHEL
+
+```bash
+sudo dnf install gcc
+```
 
 ### Building from Source
 
@@ -330,7 +350,7 @@ cd kai/kai-cli
 make build
 
 # Or build directly with Go
-go build -o kai ./cmd/kai
+CGO_ENABLED=1 go build -o kai ./cmd/kai
 
 # Verify installation
 ./kai --help
