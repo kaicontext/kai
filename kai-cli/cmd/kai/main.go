@@ -8751,7 +8751,7 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 			return nil, fmt.Errorf("creating organization: %w", err)
 		}
 		selectedOrg = newOrg
-		fmt.Printf("Created organization: %s\n\n", selectedOrg.Slug)
+		fmt.Printf("Created organization: %s (id: %s)\n\n", selectedOrg.Slug, selectedOrg.ID)
 	} else if len(orgs) == 1 {
 		// Single org - use it
 		selectedOrg = &orgs[0]
@@ -8773,6 +8773,11 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 		fmt.Printf("Using organization: %s\n", selectedOrg.Slug)
 	}
 
+	// Verify we have a valid org
+	if selectedOrg == nil || selectedOrg.Slug == "" {
+		return nil, fmt.Errorf("no organization selected (this is a bug)")
+	}
+
 	// Create the repository
 	fmt.Println()
 	fmt.Printf("Repository name [%s]: ", projectName)
@@ -8792,6 +8797,7 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 	}
 
 	fmt.Printf("Creating repository '%s/%s'...\n", selectedOrg.Slug, repoName)
+	fmt.Printf("  API: POST %s/api/v1/orgs/%s/repos\n", serverURL, selectedOrg.Slug)
 	_, err = ctrl.CreateRepo(selectedOrg.Slug, repoName, visibility)
 	if err != nil {
 		// Check if repo already exists
