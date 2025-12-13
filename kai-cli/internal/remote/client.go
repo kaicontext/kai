@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -812,6 +813,277 @@ func (c *Client) PushEdges(edges []EdgeData) (*PushEdgesResponse, error) {
 	}
 
 	var result PushEdgesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// --- Project Name Detection ---
+
+// DetectProjectName attempts to detect the project name from various sources.
+// It checks (in order): package.json, go.mod, Gemfile, Cargo.toml, pyproject.toml,
+// setup.py, then falls back to the directory name.
+func DetectProjectName() string {
+	// Try package.json (Node.js)
+	if data, err := os.ReadFile("package.json"); err == nil {
+		var pkg struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(data, &pkg) == nil && pkg.Name != "" {
+			// Handle scoped packages like @org/name
+			name := pkg.Name
+			if idx := bytes.LastIndexByte([]byte(name), '/'); idx >= 0 {
+				name = name[idx+1:]
+			}
+			return sanitizeRepoName(name)
+		}
+	}
+
+	// Try go.mod (Go)
+	if data, err := os.ReadFile("go.mod"); err == nil {
+		lines := bytes.Split(data, []byte("\n"))
+		for _, line := range lines {
+			line = bytes.TrimSpace(line)
+			if bytes.HasPrefix(line, []byte("module ")) {
+				modPath := string(bytes.TrimSpace(line[7:]))
+				// Extract last segment of module path
+				if idx := bytes.LastIndexByte([]byte(modPath), '/'); idx >= 0 {
+					return sanitizeRepoName(modPath[idx+1:])
+				}
+				return sanitizeRepoName(modPath)
+			}
+		}
+	}
+
+	// Try Gemfile with gemspec (Ruby)
+	if _, err := os.Stat("Gemfile"); err == nil {
+		// Look for .gemspec files
+		entries, _ := os.ReadDir(".")
+		for _, e := range entries {
+			if !e.IsDir() && filepath.Ext(e.Name()) == ".gemspec" {
+				name := e.Name()
+				return sanitizeRepoName(name[:len(name)-8]) // Remove .gemspec
+			}
+		}
+	}
+
+	// Try Cargo.toml (Rust)
+	if data, err := os.ReadFile("Cargo.toml"); err == nil {
+		lines := bytes.Split(data, []byte("\n"))
+		inPackage := false
+		for _, line := range lines {
+			line = bytes.TrimSpace(line)
+			if bytes.Equal(line, []byte("[package]")) {
+				inPackage = true
+				continue
+			}
+			if inPackage && bytes.HasPrefix(line, []byte("name")) {
+				// Parse name = "..."
+				if idx := bytes.Index(line, []byte("=")); idx >= 0 {
+					value := bytes.TrimSpace(line[idx+1:])
+					value = bytes.Trim(value, "\"'")
+					return sanitizeRepoName(string(value))
+				}
+			}
+			if inPackage && bytes.HasPrefix(line, []byte("[")) {
+				break // End of [package] section
+			}
+		}
+	}
+
+	// Try pyproject.toml (Python)
+	if data, err := os.ReadFile("pyproject.toml"); err == nil {
+		lines := bytes.Split(data, []byte("\n"))
+		inProject := false
+		for _, line := range lines {
+			line = bytes.TrimSpace(line)
+			if bytes.Equal(line, []byte("[project]")) || bytes.Equal(line, []byte("[tool.poetry]")) {
+				inProject = true
+				continue
+			}
+			if inProject && bytes.HasPrefix(line, []byte("name")) {
+				if idx := bytes.Index(line, []byte("=")); idx >= 0 {
+					value := bytes.TrimSpace(line[idx+1:])
+					value = bytes.Trim(value, "\"'")
+					return sanitizeRepoName(string(value))
+				}
+			}
+			if inProject && bytes.HasPrefix(line, []byte("[")) {
+				break
+			}
+		}
+	}
+
+	// Try setup.py (Python legacy)
+	if data, err := os.ReadFile("setup.py"); err == nil {
+		// Look for name='...' or name="..."
+		content := string(data)
+		for _, prefix := range []string{"name='", "name=\"", "name = '", "name = \""} {
+			if idx := bytes.Index([]byte(content), []byte(prefix)); idx >= 0 {
+				start := idx + len(prefix)
+				quote := content[start-1]
+				if end := bytes.IndexByte([]byte(content[start:]), quote); end >= 0 {
+					return sanitizeRepoName(content[start : start+end])
+				}
+			}
+		}
+	}
+
+	// Fall back to directory name
+	wd, err := os.Getwd()
+	if err != nil {
+		return "my-project"
+	}
+	return sanitizeRepoName(filepath.Base(wd))
+}
+
+// sanitizeRepoName cleans up a name to be valid as a repo name.
+func sanitizeRepoName(name string) string {
+	// Convert to lowercase
+	name = strings.ToLower(name)
+	// Replace invalid characters with hyphens
+	var result []byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			result = append(result, c)
+		} else if c == ' ' || c == '.' {
+			result = append(result, '-')
+		}
+	}
+	// Remove leading/trailing hyphens
+	return strings.Trim(string(result), "-")
+}
+
+// --- Organization and Repo API ---
+
+// OrgInfo represents an organization.
+type OrgInfo struct {
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	Role      string `json:"role,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// RepoInfo represents a repository.
+type RepoInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Visibility string `json:"visibility"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// ControlClient communicates with kailab-control for org/repo management.
+type ControlClient struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	AuthToken  string
+}
+
+// NewControlClient creates a new control plane client.
+func NewControlClient(baseURL string) *ControlClient {
+	token, _ := GetValidAccessToken()
+	return &ControlClient{
+		BaseURL: strings.TrimSuffix(baseURL, "/"),
+		HTTPClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+		AuthToken: token,
+	}
+}
+
+// ListOrgs lists organizations the user belongs to.
+func (c *ControlClient) ListOrgs() ([]OrgInfo, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/orgs", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("not authenticated")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Orgs []OrgInfo `json:"orgs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result.Orgs, nil
+}
+
+// CreateOrg creates a new organization.
+func (c *ControlClient) CreateOrg(slug, name string) (*OrgInfo, error) {
+	body, _ := json.Marshal(map[string]string{"slug": slug, "name": name})
+	req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/orgs", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result OrgInfo
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// CreateRepo creates a new repository in an organization.
+func (c *ControlClient) CreateRepo(orgSlug, name, visibility string) (*RepoInfo, error) {
+	body, _ := json.Marshal(map[string]string{"name": name, "visibility": visibility})
+	req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/orgs/"+orgSlug+"/repos", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result RepoInfo
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}

@@ -252,7 +252,7 @@ set -e
 
 INSTALL_DIR="${KAI_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${KAI_VERSION:-latest}"
-BASE_URL="https://gitlab.com/api/v4/projects/rite-day%2Fivcs/packages/generic/kai-cli/${VERSION}"
+GITHUB_REPO="kailayerhq/kai"
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -272,7 +272,13 @@ case "$OS" in
 esac
 
 BINARY="kai-${OS}-${ARCH}"
-URL="${BASE_URL}/${BINARY}.gz"
+
+# Build download URL
+if [ "$VERSION" = "latest" ]; then
+    URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY}.gz"
+else
+    URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY}.gz"
+fi
 
 echo "Installing Kai CLI..."
 echo "  Version: $VERSION"
@@ -316,12 +322,12 @@ else
     echo ""
     if command -v go > /dev/null; then
         echo "Installing via 'go install'..."
-        CGO_ENABLED=1 go install gitlab.com/rite-day/ivcs/kai-cli/cmd/kai@latest
+        CGO_ENABLED=1 go install github.com/kailayerhq/kai/kai-cli/cmd/kai@latest
         echo ""
         echo "Kai CLI installed successfully!"
     else
         echo "Please install using Go:"
-        echo "  go install gitlab.com/rite-day/ivcs/kai-cli/cmd/kai@latest"
+        echo "  go install github.com/kailayerhq/kai/kai-cli/cmd/kai@latest"
         exit 1
     fi
 fi

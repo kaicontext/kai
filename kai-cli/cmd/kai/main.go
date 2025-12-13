@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1003,13 +1005,11 @@ var remoteDelCmd = &cobra.Command{
 
 var pushCmd = &cobra.Command{
 	Use:   "push [remote] [target...]",
-	Short: "Push workspaces, changesets, reviews, or snapshots to a remote server",
-	Long: `Push workspaces, changesets, reviews, or snapshots to a remote Kailab server.
+	Short: "Push snapshots, changesets, and reviews to a remote server",
+	Long: `Push snapshots, changesets, and reviews to a remote Kailab server.
 
-In Kai, you primarily push workspaces (the unit of collaboration). Changesets
-within the workspace are the meaningful units that collaborators review.
-Reviews can be pushed to share code review state with collaborators.
-Snapshots travel automatically as infrastructure.
+By default (no arguments), pushes all snapshots, changesets, and reviews.
+You can also push specific targets using prefixes.
 
 Targets can use prefixes:
   cs:<ref>      Push a changeset (+ its base/head snapshots)
@@ -1018,11 +1018,10 @@ Targets can use prefixes:
   <ref>         Legacy: push a ref directly
 
 Examples:
-  kai push                         # Push current workspace to origin
+  kai push                         # Push all snapshots, changesets, and reviews
+  kai push origin cs:login_fix     # Push single changeset
+  kai push origin review:abc123    # Push a specific review
   kai push origin --ws feature/auth # Push specific workspace
-  kai push origin cs:login_fix     # Push single changeset for review
-  kai push origin review:abc123    # Push a code review
-  kai push origin snap:abc123      # Push snapshot (rarely needed)
   kai push --all                   # Push all refs (legacy)`,
 	RunE: runPush,
 }
@@ -2201,10 +2200,9 @@ CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
 	fmt.Println("│  Quickstart:")
 	fmt.Println("│    kai capture        # Snapshot your code")
 	fmt.Println("│    kai diff           # See what changed")
-	fmt.Println("│    kai review open    # Commit & review")
-	fmt.Println("│    kai ci plan        # Get selective test plan")
+	fmt.Println("│    kai push           # Push to remote")
 	fmt.Println("│")
-	fmt.Println("│  That's it. Semantic commits + safe selective CI.")
+	fmt.Println("│  That's it. Semantic snapshots + push to share.")
 	fmt.Println("│")
 	fmt.Println("│  Use --explain on any command to learn more.")
 	fmt.Println("╰─────────────────────────────────────────────")
@@ -8667,6 +8665,160 @@ func runRemoteDel(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// interactivePushOnboarding handles the case when a user tries to push without a remote configured.
+// It walks them through authentication, org selection, repo creation, and remote setup.
+func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	// Determine server URL
+	serverURL := os.Getenv("KAI_SERVER")
+	if serverURL == "" {
+		serverURL = remote.DefaultServer
+	}
+
+	// Detect project name
+	projectName := remote.DetectProjectName()
+	fmt.Printf("Detected project: %s\n", projectName)
+	fmt.Printf("Server: %s\n\n", serverURL)
+
+	// Check if user is authenticated
+	_, _, loggedIn := remote.GetAuthStatus()
+	if !loggedIn {
+		fmt.Println("You're not logged in. Let's set that up first.")
+		fmt.Println()
+
+		fmt.Print("Would you like to sign in or sign up? [Y/n]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "n" || input == "no" {
+			return nil, fmt.Errorf("push requires authentication. Run 'kai auth login' when ready")
+		}
+
+		// Run the login flow
+		if err := remote.Login(serverURL); err != nil {
+			return nil, fmt.Errorf("login failed: %w", err)
+		}
+		fmt.Println()
+	}
+
+	// Create control client to manage orgs/repos
+	ctrl := remote.NewControlClient(serverURL)
+
+	// List user's orgs
+	orgs, err := ctrl.ListOrgs()
+	if err != nil {
+		return nil, fmt.Errorf("listing organizations: %w", err)
+	}
+
+	var selectedOrg *remote.OrgInfo
+
+	if len(orgs) == 0 {
+		// No orgs - offer to create one
+		fmt.Println("You don't have any organizations yet.")
+		fmt.Println()
+
+		// Use email username as default org name
+		creds, _ := remote.LoadCredentials()
+		defaultSlug := "my-org"
+		if creds != nil && creds.Email != "" {
+			if idx := strings.Index(creds.Email, "@"); idx > 0 {
+				defaultSlug = remote.DetectProjectName() // Reuse sanitizer
+				if slug := creds.Email[:idx]; len(slug) > 0 {
+					defaultSlug = strings.ToLower(strings.ReplaceAll(slug, ".", "-"))
+				}
+			}
+		}
+
+		fmt.Printf("Organization slug [%s]: ", defaultSlug)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			input = defaultSlug
+		}
+		orgSlug := input
+
+		fmt.Printf("Organization name [%s]: ", orgSlug)
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			input = orgSlug
+		}
+		orgName := input
+
+		fmt.Printf("Creating organization '%s'...\n", orgSlug)
+		newOrg, err := ctrl.CreateOrg(orgSlug, orgName)
+		if err != nil {
+			return nil, fmt.Errorf("creating organization: %w", err)
+		}
+		selectedOrg = newOrg
+		fmt.Printf("Created organization: %s\n\n", selectedOrg.Slug)
+	} else if len(orgs) == 1 {
+		// Single org - use it
+		selectedOrg = &orgs[0]
+		fmt.Printf("Using organization: %s\n", selectedOrg.Slug)
+	} else {
+		// Multiple orgs - let user choose
+		fmt.Println("Select an organization:")
+		for i, org := range orgs {
+			fmt.Printf("  [%d] %s (%s)\n", i+1, org.Slug, org.Name)
+		}
+		fmt.Print("Enter number: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		idx, err := strconv.Atoi(input)
+		if err != nil || idx < 1 || idx > len(orgs) {
+			return nil, fmt.Errorf("invalid selection")
+		}
+		selectedOrg = &orgs[idx-1]
+		fmt.Printf("Using organization: %s\n", selectedOrg.Slug)
+	}
+
+	// Create the repository
+	fmt.Println()
+	fmt.Printf("Repository name [%s]: ", projectName)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+	if input == "" {
+		input = projectName
+	}
+	repoName := input
+
+	fmt.Print("Visibility (private/public) [private]: ")
+	input, _ = reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+	visibility := "private"
+	if input == "public" {
+		visibility = "public"
+	}
+
+	fmt.Printf("Creating repository '%s/%s'...\n", selectedOrg.Slug, repoName)
+	_, err = ctrl.CreateRepo(selectedOrg.Slug, repoName, visibility)
+	if err != nil {
+		// Check if repo already exists
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "409") {
+			fmt.Printf("Repository already exists, using existing.\n")
+		} else {
+			return nil, fmt.Errorf("creating repository: %w", err)
+		}
+	} else {
+		fmt.Printf("Created repository: %s/%s\n", selectedOrg.Slug, repoName)
+	}
+
+	// Set up the remote
+	remoteEntry := &remote.RemoteEntry{
+		URL:    serverURL,
+		Tenant: selectedOrg.Slug,
+		Repo:   repoName,
+	}
+	if err := remote.SetRemote(remoteName, remoteEntry); err != nil {
+		return nil, fmt.Errorf("saving remote: %w", err)
+	}
+	fmt.Printf("\nRemote '%s' configured: %s/%s\n\n", remoteName, selectedOrg.Slug, repoName)
+
+	// Create and return the client
+	return remote.NewClient(serverURL, selectedOrg.Slug, repoName), nil
+}
+
 func runPush(cmd *cobra.Command, args []string) error {
 	// Show explain if requested
 	if pushExplain {
@@ -8706,7 +8858,33 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Create client for remote
 	client, err := remote.NewClientForRemote(remoteName)
 	if err != nil {
-		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+		// Remote not configured - check if this is the default "origin" and offer onboarding
+		if remoteName == "origin" {
+			// Check if remote config exists but with default tenant/repo (means not properly configured)
+			entry, getErr := remote.GetRemote("origin")
+			if getErr != nil || entry.Tenant == "default" {
+				// Offer interactive onboarding
+				fmt.Println("No remote repository configured.")
+				fmt.Println()
+				fmt.Print("Would you like to set one up now? [Y/n]: ")
+				reader := bufio.NewReader(os.Stdin)
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(strings.ToLower(input))
+				if input == "n" || input == "no" {
+					return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+				}
+				fmt.Println()
+
+				client, err = interactivePushOnboarding(remoteName)
+				if err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+			}
+		} else {
+			return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+		}
 	}
 
 	// Check server health
@@ -8720,7 +8898,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	reviewMgr := review.NewManager(db)
 	var refsToSync []*ref.Ref
 	var workspaceToPush *workspace.Workspace
-	var reviewToPush *review.Review
+	var reviewsToPush []*review.Review
 
 	if pushAll {
 		// Legacy: push all refs
@@ -8781,7 +8959,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 				if err != nil {
 					return fmt.Errorf("getting review '%s': %w", reviewRef, err)
 				}
-				reviewToPush = rev
+				reviewsToPush = append(reviewsToPush, rev)
 			} else {
 				// Legacy: direct ref name
 				r, err := refMgr.Get(target)
@@ -8794,15 +8972,23 @@ func runPush(cmd *cobra.Command, args []string) error {
 			}
 		}
 	} else {
-		// No workspace specified, no targets - push snap.latest and cs.latest
-		r, _ := refMgr.Get("snap.latest")
-		if r != nil {
-			refsToSync = append(refsToSync, r)
+		// No targets specified - push all snapshots, changesets, and reviews
+		allRefs, err := refMgr.List(nil)
+		if err != nil {
+			return fmt.Errorf("listing refs: %w", err)
 		}
-		r, _ = refMgr.Get("cs.latest")
-		if r != nil {
-			refsToSync = append(refsToSync, r)
+		for _, r := range allRefs {
+			if strings.HasPrefix(r.Name, "snap.") || strings.HasPrefix(r.Name, "cs.") {
+				refsToSync = append(refsToSync, r)
+			}
 		}
+
+		// Also get all reviews
+		allReviews, err := reviewMgr.List()
+		if err != nil {
+			return fmt.Errorf("listing reviews: %w", err)
+		}
+		reviewsToPush = allReviews
 	}
 
 	// Track pre-computed pack objects for UUID-based nodes (workspace, review)
@@ -8882,8 +9068,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Changesets: %d\n", len(workspaceToPush.OpenChangeSets))
 	}
 
-	// If pushing a review, collect it and its target changeset
-	if reviewToPush != nil {
+	// If pushing reviews, collect them and their target changesets
+	for _, reviewToPush := range reviewsToPush {
 		fmt.Printf("Pushing review '%s'...\n", reviewToPush.Title)
 
 		// Get review node to compute content-addressed digest

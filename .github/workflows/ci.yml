@@ -141,8 +141,8 @@ jobs:
           docker push $KAILAB_CONTROL_IMAGE:${{ github.sha }}
           docker push $KAILAB_CONTROL_IMAGE:latest
 
-  # Build and release kai-cli binaries
-  release-kai-cli:
+  # Build kai-cli for Linux
+  build-kai-cli-linux:
     runs-on: ubuntu-latest
     needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
@@ -157,29 +157,90 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc
 
-      - name: Build binaries
+      - name: Build Linux amd64
         run: |
           cd kai-cli
-          VERSION=$(grep 'var Version' cmd/kai/main.go | cut -d'"' -f2)
-          echo "Building kai-cli v${VERSION}"
-          mkdir -p dist
-          # Linux amd64
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/kai-linux-amd64 ./cmd/kai
-          gzip -k dist/kai-linux-amd64
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o kai-linux-amd64 ./cmd/kai
+          gzip -k kai-linux-amd64
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kai-cli-binaries
-          path: kai-cli/dist/
-          retention-days: 7
+          name: kai-linux-amd64
+          path: kai-cli/kai-linux-amd64.gz
 
-      - name: Upload to GitHub Release
+  # Build kai-cli for macOS
+  build-kai-cli-darwin:
+    runs-on: macos-latest
+    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build macOS arm64
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o kai-darwin-arm64 ./cmd/kai
+          gzip -k kai-darwin-arm64
+
+      - name: Build macOS amd64
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o kai-darwin-amd64 ./cmd/kai
+          gzip -k kai-darwin-amd64
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-darwin-arm64
+          path: kai-cli/kai-darwin-arm64.gz
+
+      - name: Upload amd64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-darwin-amd64
+          path: kai-cli/kai-darwin-amd64.gz
+
+  # Create release with all binaries
+  release-kai-cli:
+    runs-on: ubuntu-latest
+    needs: [build-kai-cli-linux, build-kai-cli-darwin]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp dist/kai-linux-amd64/kai-linux-amd64.gz release/
+          cp dist/kai-darwin-arm64/kai-darwin-arm64.gz release/
+          cp dist/kai-darwin-amd64/kai-darwin-amd64.gz release/
+          ls -la release/
+
+      - name: Update latest release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: Latest Build
+          prerelease: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create versioned release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            kai-cli/dist/kai-linux-amd64.gz
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
