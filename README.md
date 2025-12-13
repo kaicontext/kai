@@ -2,94 +2,81 @@
   <img src="kai.webp" alt="Kai Logo" width="400">
 </p>
 
-> **Kai** is a semantic analysis engine that sits *on top of Git*. It captures **meaningful changes**, generates **semantic diffs**, and produces **safe selective CI plans**.
 
-Kai does **not** replace Git. You keep your workflow, your repo, your branches, your PRs, your remotes.
-Kai simply adds the missing layer Git can’t express: **what your change actually *means***.
+## Why Kai exists
+Modern software tools only understand **text**, but developers think in **meaning**.  
+Git tells you what lines changed — but not what actually happened.
 
-```text
-Git:   "16 lines changed in auth/session.ts"
-Kai:   "Reduced session timeout from 3600 → 1800 seconds (Auth module)"
-```
+It cannot tell you:
 
-Kai reads your Git refs, parses your code semantically, and computes structured snapshots, changesets, and impact analysis.
-It works entirely alongside Git—zero migrations, zero branching changes, zero workflow replacement.
+- whether a refactor changed behavior  
+- whether a rename is truly a rename  
+- whether a parameter change breaks API contracts  
+- which modules or tests are impacted  
+- what the developer intended  
+- how the change propagates through the system  
 
----
+AI coding tools run into the same wall: without semantic grounding, they guess.
 
-# 🔍 What Kai Does
+CI systems run the entire test suite because they can't reliably detect impact.
 
-### **✔ Semantic Snapshots (from Git)**
-
-Point Kai at any Git ref (`main`, `feature/x`, commit SHA) and it builds a structured, content-addressed snapshot of your codebase and symbols.
-
-### **✔ Semantic Diffs & Change Classification**
-
-Kai tells you **what actually changed**, not just where text moved:
-
-* function signatures
-* conditions
-* constants
-* API surface
-* module impact
-* JSON/YAML/SQL modifications
-  …and more
-
-### **✔ Intent Detection**
-
-Each changeset gets a human-readable intent like:
-
-```
-"Reduce Auth session timeout"
-"Update Billing invoice calculation"
-"Modify login signature"
-```
-
-### **✔ Safe Selective CI**
-
-Kai generates test plans that:
-
-* run only tests affected by your changes
-* detect risky patterns & automatically expand
-* support shadow/guarded/strict modes
-* include tripwire runtime detection
-* integrate cleanly into any CI system
-
-### **✔ Local or Remote**
-
-Kai can run entirely locally (via `.kai/`) or push snapshots to a lightweight remote server (`kailab`) for team use.
+**We are building larger and larger systems on top of tools that can’t see meaning.**  
+Kai exists to fix that.
 
 ---
 
-# ❌ What Kai Is *Not*
+## What Kai is
+**Kai is a semantic engine for your codebase.**  
+It builds a meaning-aware model of your project and computes:
 
-### 🔒 Kai is **NOT**:
+- **Semantic Snapshots** of any Git ref or working directory  
+- **Semantic Diffs (ChangeSets)** that describe behavior-level change  
+- **Impact Maps** showing exactly what depends on what  
+- **Intent Summaries** explaining the purpose of a change  
+- **Selective CI Plans** that run only the tests affected — safely
 
-* a Git replacement
-* a new SCM
-* a branching model
-* a Git alternative
-* a new source of truth
-* a hosting platform
+Kai works **on top of Git**, not instead of it.  
+Your repo, branches, commits, and PRs stay exactly the same.
 
-You continue using:
-
-* GitHub/GitLab/Bitbucket
-* Git branching
-* Git-based PR reviews
-
-Kai adds **semantic intelligence** on top of the Git workflow you already use.
-
-Think of it as:
-
-```
-Git = storage + diffs + history
-Kai = semantics + meaning + impact
-```
-
-Git stays the backbone. Kai explains the changes.
+Kai provides the missing semantic layer Git can’t express.
 
 ---
+
+## What you can use Kai to do
+
+### Understand code changes at a human level
+Replace noisy line diffs with clean semantic deltas, for example:  
+> Reduced session timeout (3600 → 1800 seconds)
+
+### Generate safe selective CI plans
+Kai maps changes to affected tests via semantic analysis.  
+CI runs only what matters — with strict safety guarantees.
+
+### Detect refactors vs behavior changes
+Kai classifies each change as:
+- refactor  
+- feature  
+- risky  
+- breaking  
+- structural  
+
+### Power AI coding agents with real semantics
+LLMs get:
+- structured diffs  
+- stable symbol identity  
+- deterministic context  
+- dependency-aware reasoning  
+
+### Analyze module-level impact
+Kai reveals which subsystems were touched and how the change propagates.
+
+### Review PRs faster
+Human-readable intent summaries make changes clear at a glance.
+
+---
+
+## One-line summary
+**Kai reveals the meaning of change — for humans, CI, and AI.**
 
 # 🧠 Why Developers Use Kai
 
