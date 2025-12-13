@@ -1,10 +1,10 @@
 .PHONY: build test fmt clean
 
 build:
-	go build -o kai ./cmd/kai
+	CGO_ENABLED=1 go build -o kai ./cmd/kai
 
 test:
-	go test ./...
+	CGO_ENABLED=1 go test ./...
 
 fmt:
 	gofmt -s -w .
