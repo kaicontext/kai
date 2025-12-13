@@ -8885,32 +8885,26 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Create client for remote
 	client, err := remote.NewClientForRemote(remoteName)
 	if err != nil {
-		// Remote not configured - check if this is the default "origin" and offer onboarding
-		if remoteName == "origin" {
-			// Check if remote config exists but with default tenant/repo (means not properly configured)
-			entry, getErr := remote.GetRemote("origin")
-			if getErr != nil || entry.Tenant == "default" {
-				// Offer interactive onboarding
-				fmt.Println("No remote repository configured.")
-				fmt.Println()
-				fmt.Print("Would you like to set one up now? [Y/n]: ")
-				reader := bufio.NewReader(os.Stdin)
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(strings.ToLower(input))
-				if input == "n" || input == "no" {
-					return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
-				}
-				fmt.Println()
+		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+	}
 
-				client, err = interactivePushOnboarding(remoteName)
-				if err != nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
-			}
-		} else {
+	// Check if this is a default/unconfigured remote (tenant="default" means GetRemote fell back to defaults)
+	if remoteName == "origin" && client.Tenant == "default" {
+		// Offer interactive onboarding
+		fmt.Println("No remote repository configured.")
+		fmt.Println()
+		fmt.Print("Would you like to set one up now? [Y/n]: ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "n" || input == "no" {
 			return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+		}
+		fmt.Println()
+
+		client, err = interactivePushOnboarding(remoteName)
+		if err != nil {
+			return err
 		}
 	}
 
