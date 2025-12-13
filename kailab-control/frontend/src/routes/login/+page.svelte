@@ -134,7 +134,7 @@
 		<div class="w-full max-w-md">
 			<div class="card">
 				<h1 class="text-center text-2xl font-semibold mb-2 lg:hidden">Kai</h1>
-				<h2 class="text-center text-xl font-semibold mb-6 hidden lg:block">Sign in</h2>
+				<h2 class="text-center text-xl font-semibold mb-6 hidden lg:block">Sign in or sign up</h2>
 				<p class="text-center text-kai-text-muted mb-6 lg:hidden">
 					Semantic Grounding for AI-Driven Code
 				</p>
