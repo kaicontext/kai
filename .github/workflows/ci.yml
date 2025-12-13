@@ -161,7 +161,7 @@ jobs:
         run: |
           cd kai-cli
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o kai-linux-amd64 ./cmd/kai
-          gzip -k kai-linux-amd64
+          gzip -kf kai-linux-amd64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -186,13 +186,13 @@ jobs:
         run: |
           cd kai-cli
           CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o kai-darwin-arm64 ./cmd/kai
-          gzip -k kai-darwin-arm64
+          gzip -kf kai-darwin-arm64
 
       - name: Build macOS amd64
         run: |
           cd kai-cli
           CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o kai-darwin-amd64 ./cmd/kai
-          gzip -k kai-darwin-amd64
+          gzip -kf kai-darwin-amd64
 
       - name: Upload arm64 artifact
         uses: actions/upload-artifact@v4
