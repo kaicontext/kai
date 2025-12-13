@@ -2,39 +2,213 @@
   <img src="kai.webp" alt="Kai Logo" width="400">
 </p>
 
-# Kai - Intent Version Control System
+> **Kai** is a semantic analysis engine that sits *on top of Git*. It captures **meaningful changes**, generates **semantic diffs**, and produces **safe selective CI plans**.
 
-Kai is a semantic, intent-based version control system that understands *what* your code changes mean, not just *what* changed. It creates semantic snapshots from Git refs, computes changesets with classified change types, maps changes to logical modules, and generates human-readable intent sentences describing the purpose of changes.
+Kai does **not** replace Git. You keep your workflow, your repo, your branches, your PRs, your remotes.
+Kai simply adds the missing layer Git can’t express: **what your change actually *means***.
 
-Unlike traditional diff tools that show line-by-line text changes, Kai understands your code at a semantic level—identifying functions, classes, variables, and how they relate to your project's architecture.
-
-## Design Principles
-
-### Idempotency
-Every command in Kai is idempotent—the same command always produces the same result, regardless of when or how many times you run it. There is no hidden state that changes behavior.
-
-```bash
-kai push origin --ws feature/auth   # Always pushes feature/auth
-kai snapshot create --dir ./src     # Same dir = same snapshot hash
-kai changeset create snap.a snap.b  # Same inputs = same changeset
+```text
+Git:   "16 lines changed in auth/session.ts"
+Kai:   "Reduced session timeout from 3600 → 1800 seconds (Auth module)"
 ```
 
-This is possible because everything in Kai is **content-addressed** and **immutable**. Objects are identified by their content hash, not by mutable pointers. Commands are explicit about what they operate on.
+Kai reads your Git refs, parses your code semantically, and computes structured snapshots, changesets, and impact analysis.
+It works entirely alongside Git—zero migrations, zero branching changes, zero workflow replacement.
 
-### Immutability
-Once created, snapshots and changesets never change. They are permanent records identified by cryptographic hashes. This enables:
-- Safe concurrent operations (no race conditions)
-- Reliable caching and deduplication
-- Trustworthy history that can't be rewritten
+---
 
-### Semantic Over Syntactic
-Kai operates on meaning, not text. Instead of "line 47 changed," Kai tells you "function `validateToken` signature changed." This makes changes understandable to humans and machines alike.
+# 🔍 What Kai Does
 
-### Explicit Over Implicit
-Commands require explicit targets rather than relying on hidden state. There's no "current workspace" that changes behavior—you always specify what you're operating on.
+### **✔ Semantic Snapshots (from Git)**
 
-### Speed as a Feature
-Kai is designed to be fast enough that you never wait. Content-addressed storage enables O(1) lookups. Push/pull operations transfer only missing objects. Snapshots are computed in parallel. The goal is sub-second response times for all common operations.
+Point Kai at any Git ref (`main`, `feature/x`, commit SHA) and it builds a structured, content-addressed snapshot of your codebase and symbols.
+
+### **✔ Semantic Diffs & Change Classification**
+
+Kai tells you **what actually changed**, not just where text moved:
+
+* function signatures
+* conditions
+* constants
+* API surface
+* module impact
+* JSON/YAML/SQL modifications
+  …and more
+
+### **✔ Intent Detection**
+
+Each changeset gets a human-readable intent like:
+
+```
+"Reduce Auth session timeout"
+"Update Billing invoice calculation"
+"Modify login signature"
+```
+
+### **✔ Safe Selective CI**
+
+Kai generates test plans that:
+
+* run only tests affected by your changes
+* detect risky patterns & automatically expand
+* support shadow/guarded/strict modes
+* include tripwire runtime detection
+* integrate cleanly into any CI system
+
+### **✔ Local or Remote**
+
+Kai can run entirely locally (via `.kai/`) or push snapshots to a lightweight remote server (`kailab`) for team use.
+
+---
+
+# ❌ What Kai Is *Not*
+
+### 🔒 Kai is **NOT**:
+
+* a Git replacement
+* a new SCM
+* a branching model
+* a Git alternative
+* a new source of truth
+* a hosting platform
+
+You continue using:
+
+* GitHub/GitLab/Bitbucket
+* Git branching
+* Git-based PR reviews
+
+Kai adds **semantic intelligence** on top of the Git workflow you already use.
+
+Think of it as:
+
+```
+Git = storage + diffs + history
+Kai = semantics + meaning + impact
+```
+
+Git stays the backbone. Kai explains the changes.
+
+---
+
+# 🧠 Why Developers Use Kai
+
+### **1. Understand changes at a human level**
+
+No more reading raw diffs to guess intent.
+
+### **2. Ship faster with safe selective CI**
+
+Most repos run **far too many tests**.
+Kai runs only the ones that matter—*safely*.
+
+### **3. Better reviews**
+
+Kai’s semantic hunks make PRs dramatically easier to understand.
+
+### **4. Automated intent & change summaries**
+
+Kai gives reviewers and AI assistants better tooling than Git’s text diffs.
+
+### **5. High-fidelity semantic tooling**
+
+Because Kai sees symbols and AST structure, downstream tools become smarter.
+
+---
+
+# 🚀 Quick Start
+
+```bash
+kai init
+kai snapshot create --git main
+kai snapshot create --git feature/login
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+kai ci plan @cs:last --explain
+```
+
+No new source-control model.
+No branching semantics.
+Just Git → snapshot → semantic insight.
+
+---
+
+# 🧩 How Kai Fits Into Your Workflow
+
+You already have:
+
+```
+Git repo → GitHub PR → CI
+```
+
+Kai plugs into the middle:
+
+```
+Git repo → Kai semantic understanding → GitHub PR  
+                                   ↘ selective CI
+```
+
+You still:
+
+* branch normally
+* commit normally
+* push normally
+* open PRs normally
+
+Kai just gives you:
+
+* clearer diffs
+* stronger signals
+* faster CI
+* better reviews
+
+Zero disruption.
+
+---
+
+# 🔑 Key Concepts (Git-Safe Definitions)
+
+### **Snapshot**
+
+A semantic capture of a Git ref (not a commit replacement).
+
+### **ChangeSet**
+
+The semantic difference between two snapshots:
+
+* functions changed
+* conditions updated
+* API surface modified
+* which modules affected
+
+### **Intent**
+
+A one-line summary describing what the diff *means*.
+
+### **Modules**
+
+Logical areas of your project defined by path patterns.
+
+### **Selective Test Plan**
+
+Kai’s CI engine determines which tests are meaningfully connected to what changed.
+
+---
+
+# 🛡 Safety First: Selective CI
+
+Kai never silently skips tests incorrectly.
+
+The safety model:
+
+1. **Shadow mode** – Learn without risk
+2. **Guarded mode** – Auto-expand when uncertain
+3. **Strict mode** – Mature teams only
+4. **Tripwire** – Runtime fallback triggers full suite
+
+Kai treats correctness as sacred.
+
+---
 
 ## Table of Contents
 
@@ -56,8 +230,6 @@ Kai is designed to be fast enough that you never wait. Content-addressed storage
 - [Development](#development)
 - [Kailab Server](#kailab-server)
 - [Kailab Control Plane](#kailab-control-plane)
-- [Northstar & Critical Risks](#northstar--critical-risks)
-- [Roadmap](#roadmap)
 
 ---
 
@@ -3419,185 +3591,6 @@ make web
 # Build Go binary (embeds frontend)
 make build
 ```
-
----
-
-## Northstar & Critical Risks
-
-This section is a ruthless, founder-grade teardown of Kai: what's brittle, what's risky, and what must change before we scale. It serves as the northstar for development priorities.
-
-### One-Sentence Thesis
-
-Kai's core idea—semantic changesets with selective CI—is compelling, but we're skating on thin ice across **correctness**, **performance at scale**, and **mental-model clarity**. If we don't nail those three, we'll get relegated to "neat dev tool" instead of "critical path infra."
-
----
-
-### Product & Strategy Risks
-
-* **Value depends on "safe skipping."** If selective CI ever skips a test that should've run, users will disable Kai the next day. Our bar is "better than running everything" **and** "never silently wrong." That's hard.
-* **Overlap with incumbents.** Review UI + semantic diffs + test selection overlaps with GitHub (stacked PRs/Code View), Sourcegraph (code intel), Launchable/TestImpact (selection), Graphite (stacks). We must be **10× easier** or **provably safer**.
-* **"Yet another system of record."** We're introducing a new graph of truth (snapshots/changesets/symbols). Enterprises already have Git, CI, test analytics, SAST/DAST, coverage DBs. Selling a *new* core store is uphill unless ROI is immediate and obvious.
-* **Multi-language promise vs. reality.** If TS/JS is great but Python/Go/Rust lag, teams will conclude Kai isn't "ready." Partial language coverage kills perception.
-
----
-
-### Core Model Risks
-
-* **Snapshots are global, workspaces are overlays—good—but selectors are confusing.** Global selectors like `@snap:prev` mixed with workspace mental models cause user error. If users have to ask "prev relative to what?" you already lost.
-* **ChangeSets are global "meaning units," but…** most teams still review & gate on *PRs*. If ChangeSets ≠ PRs, you need a crisp 1:1 mapping or people will ignore your model and stay in GitHub.
-* **AST semantic diffs are brittle on dynamic languages.** Tree-sitter can parse structure but not resolve semantics (imports, types, aliasing) reliably at scale without a type system (TS OK, JS meh, Python worse). "Semantic rename/move" correctness is non-trivial.
-
----
-
-### Selective CI: Correctness & Safety (Biggest Existential Risk)
-
-* **Dynamic imports / reflection / DI / runtime plugin loading.** Our graph will miss edges; false negatives will slip. We must default to **over-selection** with explicit uncertainty reporting.
-* **Mocks/stubs hide dependencies.** Test code might import an interface while real dependency changes elsewhere. Static analysis won't see the coupling; coverage can be flaky.
-* **Cross-repo & contract tests.** If service A changes public API used by B, you need contract edges or you'll under-run. Single-repo analysis isn't enough in microservices.
-* **Generated code / codegen steps.** If codegen artifacts are the real dependencies but aren't in the repo, plans are wrong unless you model the build graph.
-* **Flaky tests & nondeterminism.** Even when your plan is right, flake will be blamed on "Kai skipped something." You need a flake strategy (quarantine, auto-rerun).
-
-**Bluntly:** shipping selection without a **provable safety layer** and **transparent uncertainty** will burn trust.
-
----
-
-### Parsing & Symbol Graph Limitations
-
-* **Name resolution.** Without full TS program analysis (or language server integration), symbol "USES" edges will be lossy (aliasing, re-exports, barrel files).
-* **Macros / transpilers.** Babel/TS transforms, decorators, tsc path mapping, module aliases—our static import walker must honor toolchain configs or miss edges.
-* **Multi-language edges.** SQL embedded in strings, protobuf schemas, GraphQL—real systems cross language boundaries. If Kai ignores these, impact analysis is incomplete.
-
----
-
-### Performance & Scale
-
-* **SQLite as per-repo store:** great for local dev; risky for multi-tenant server scale. Concurrency (WAL), long-running writes (bulk ingest), and vacuum/GC will bite you. We'll need sharding & compaction sooner than expected.
-* **Snapshot frequency explosion.** `ws stage` creates snapshots constantly. Graph growth can be O(N changes × files). We need aggressive dedup, segment compaction, and reachability indexes or lists will blow up.
-* **Cold-start indexing.** First run on monorepos (100k+ files) must finish in minutes, not hours. Tree-sitter parallelization, incremental parsing, and caching are mandatory.
-* **Pack protocol.** If we roll our own and it's not resumable, chunked, and content-address negotiation is naive, WAN pushes will be painful.
-
----
-
-### Merge & Integration
-
-* **AST-merge correctness.** Three-way symbol-merge is easy to demo, hard to make bulletproof (reordering, formatting, comments, trailing commas, import sorting). If conflicts surface as malformed code, we'll be blamed.
-* **Hidden coupling across files.** Per-file merges won't catch invariant breaks (e.g., function signature + call sites across files). If we don't run type checks/tests post-merge, we ship broken code.
-
----
-
-### UX / DevEx Friction
-
-* **Too many new nouns.** Snapshot, ChangeSet, Workspace, Review, Selector types, Module, ChangeType, Symbol—this is a lot. If newcomers can't get value in 2–3 commands, you lose PLG.
-* **Ambiguous commands.** Anything that can be interpreted as Git vs Dir mode must be banned or explicit (you already moved that way; keep going).
-* **YAML fatigue.** "Define modules in YAML" is not delightful. Wizarding and preview are a must; otherwise users will skip modules and your impact analysis loses value.
-
----
-
-### Security & Compliance
-
-* **Pushing source to a remote graph.** Enterprises will balk unless you support self-hosting, SSO/SAML, audit trails, encryption at rest, tenant isolation, and strict data retention. Also: PII scanning in stored snapshots.
-* **Provenance & tamper evidence.** If Kai claims to be a trusted history, you need a signed ref-log / hash chain (you mention it—make it default) and key management.
-
----
-
-### Immediate Action Items
-
-1. **Make selection provably safe.**
-   * Always emit an **uncertainty budget**; if non-empty, expand selection until `risk: low`, or fail (configurable).
-   * Add a **"paranoia mode"** flag per change type (e.g., `API_SURFACE_CHANGED` forces module-wide tests).
-
-2. **Tighten selectors; remove ambiguity.**
-   * Prefer `@ws:<name>:base|head` or `@ws:base` when inside a workspace.
-   * Hard deprecate `@snap:prev` in tutorials for integrate.
-
-3. **Language-accurate import resolution.**
-   * For TS/JS, read tsconfig paths, package.json exports, Babel aliases.
-   * Cache a project graph (like tsc) and reuse it.
-
-4. **Ship a delightful modules wizard.**
-   * `kai modules init --infer --write` + `modules preview` + TUI rename.
-
-5. **Performance guardrails.**
-   * Incremental parsing caches per file hash.
-   * Parallelize symbol extraction aggressively.
-   * Add "slow repo" telemetry with opt-in.
-
-6. **Storage/GC defaults.**
-   * Auto-prune unreachable older than N days by default on local (with prompt).
-   * Surface storage footprint in `kai status`.
-
-7. **Minimal CI integration path.**
-   * One page: copy this step → it prints a plan → your CI uses it.
-   * No runner bindings in CLI.
-
-8. **Telemetry for trust.**
-   * Emit post-run reconciliation: "Kai selected 132 tests; 0 failed due to missing dependency; uncertainty=0."
-   * If any failure strongly suggests under-selection (e.g., import error), auto-mark `risk: high` next plan.
-
-9. **Hard boundaries in UX.**
-   * `kai snapshot` without args → error.
-   * `kai snap` is the blessed local shortcut.
-   * `kai ws stage` with no current workspace → error with fix hint.
-
-10. **Kill-switch plan.**
-    * If selection produces a failure pattern indicating possible miss, CI should retry with **full suite** automatically and flag Kai for inspection. Better to cost more than to lose trust.
-
----
-
-### Experiments & Metrics (Prove It Works)
-
-* **Primary metric:** P95 CI wall-time reduction per PR **with** stable failure rate (no increase in flake/rollback).
-* **Secondary:** % of plans with `risk: low`; % plans that expanded; average tests selected vs. total.
-* **Trust metric:** # of "fallback to full run" events per 100 plans; # of confirmed under-selections (must be ~0).
-* **Adoption:** # repos with plan in CI; # devs using `ws stage` weekly.
-* **Perf:** time to produce plan on repo sizes (10k, 50k, 200k files).
-
-Run a **90-day bake-off** with 3–5 design partners; publish a case study ("70% CI time reduction, zero misses").
-
----
-
-### Red-Flag Kill Criteria (Be Willing to Pivot)
-
-* If under-selection (confirmed) > **0.1%** of plans after uncertainty expansion → selection engine not production-safe.
-* If plan computation P95 > **10s** on 50k-file repo → not viable for inner loop.
-* If < **30%** CI time reduction on average after 1 month across partners → wedge isn't sharp enough; focus on review semantics or analytics instead.
-
----
-
-### Where Kai *Is* Uniquely Strong (Double Down)
-
-* **Stacked semantic changesets** as first-class; superseding reviews with AST-aware diffs.
-* **Content-addressed, immutable history** you can query (not just text diffs).
-* **Orchestrator of *what to run*** across tests/builds—if it's **safe** and **fast**.
-
-Make those three world-class; everything else is ornament.
-
----
-
-## Roadmap
-
-### Near-term
-
-- [ ] Dependency graph analysis (imports/exports between files)
-- [ ] Test mapping (which tests cover which symbols)
-- [ ] CODEOWNERS integration
-- [ ] Watch mode for continuous analysis
-- [ ] CI plan with cached .kai database (Option B) - reuse existing snapshots when available, create temp DB if not
-- [ ] Server-side CI plan (Option C) - `kai ci plan --remote origin --git-range BASE..HEAD` delegates to kailab server
-
-### Medium-term
-
-- [ ] Web UI for changeset visualization
-- [ ] VS Code extension
-- [ ] GitHub Action for PR analysis
-- [ ] Additional languages (Go, Python, Rust)
-
-### Long-term
-
-- [ ] ML-based change type classification
-- [ ] Natural language intent generation
-- [ ] Cross-repository analysis
-- [ ] Time-series analysis (change patterns over time)
 
 ---
 
