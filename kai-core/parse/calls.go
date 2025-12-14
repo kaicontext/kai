@@ -57,6 +57,10 @@ func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error)
 		result.Imports = extractRubyImports(root, content)
 		result.Calls = extractRubyCallSites(root, content)
 		result.Exports = extractRubyExports(root, content)
+	case "rs", "rust":
+		result.Imports = extractRustImports(root, content)
+		result.Calls = extractRustCallSites(root, content)
+		result.Exports = extractRustExports(root, content)
 	default:
 		// JavaScript/TypeScript/Python
 		result.Imports = extractImports(root, content)
@@ -705,6 +709,20 @@ func FindTestsForFile(sourcePath string, allFiles []string) []string {
 		)
 	}
 
+	// Rust patterns: src/foo.rs -> tests/foo.rs, tests/test_foo.rs
+	if ext == ".rs" {
+		// Strip src/ prefix if present for tests/ directory
+		testBase := baseName
+		if strings.HasPrefix(sourcePath, "src/") {
+			testBase = strings.TrimPrefix(basePath, "src/")
+		}
+		patterns = append(patterns,
+			filepath.Join("tests", testBase+".rs"),
+			filepath.Join("tests", "test_"+baseName+".rs"),
+			basePath+"_test.rs",
+		)
+	}
+
 	// Check which patterns exist in allFiles
 	fileSet := make(map[string]bool)
 	for _, f := range allFiles {
@@ -1290,4 +1308,280 @@ func extractRubyExports(node *sitter.Node, content []byte) []string {
 	}
 
 	return exports
+}
+
+// ==================== Rust Import/Call Extraction ====================
+
+// extractRustImports finds all use/mod/extern crate statements in Rust source.
+func extractRustImports(node *sitter.Node, content []byte) []*Import {
+	var imports []*Import
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "use_declaration":
+			imp := parseRustUseDeclaration(n, content)
+			if imp != nil {
+				imports = append(imports, imp)
+			}
+		case "extern_crate_declaration":
+			imp := parseRustExternCrate(n, content)
+			if imp != nil {
+				imports = append(imports, imp)
+			}
+		}
+	}
+
+	return imports
+}
+
+// parseRustUseDeclaration parses use statements.
+// Handles:
+//   - use std::io;
+//   - use std::io::Read;
+//   - use std::collections::{HashMap, HashSet};
+//   - use crate::module;
+//   - use super::parent;
+func parseRustUseDeclaration(node *sitter.Node, content []byte) *Import {
+	var source string
+	named := make(map[string]string)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "scoped_identifier", "identifier", "scoped_use_list", "use_wildcard":
+			source = child.Content(content)
+		}
+	}
+
+	if source == "" {
+		return nil
+	}
+
+	// Check if it's a relative import (crate::, super::, self::)
+	isRelative := strings.HasPrefix(source, "crate::") ||
+		strings.HasPrefix(source, "super::") ||
+		strings.HasPrefix(source, "self::")
+
+	// Extract the crate/module name (first part before ::)
+	parts := strings.Split(source, "::")
+	crateName := parts[0]
+	if len(parts) > 1 {
+		// Last part is what's being imported
+		lastPart := parts[len(parts)-1]
+		// Handle braced imports {A, B}
+		if strings.HasPrefix(lastPart, "{") {
+			lastPart = strings.Trim(lastPart, "{}")
+			for _, name := range strings.Split(lastPart, ",") {
+				name = strings.TrimSpace(name)
+				if name != "" {
+					named[name] = name
+				}
+			}
+		} else if lastPart != "*" {
+			named[lastPart] = lastPart
+		}
+	}
+
+	return &Import{
+		Source:     source,
+		IsRelative: isRelative,
+		Default:    crateName,
+		Named:      named,
+		Range:      nodeRange(node),
+	}
+}
+
+// parseRustExternCrate parses extern crate statements.
+func parseRustExternCrate(node *sitter.Node, content []byte) *Import {
+	var crateName string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			crateName = child.Content(content)
+			break
+		}
+	}
+
+	if crateName == "" {
+		return nil
+	}
+
+	return &Import{
+		Source:     crateName,
+		IsRelative: false,
+		Default:    crateName,
+		Named:      make(map[string]string),
+		Range:      nodeRange(node),
+	}
+}
+
+// extractRustCallSites finds all function/method calls in Rust source.
+func extractRustCallSites(node *sitter.Node, content []byte) []*CallSite {
+	var calls []*CallSite
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "call_expression":
+			call := parseRustCallExpression(n, content)
+			if call != nil {
+				calls = append(calls, call)
+			}
+		case "method_call_expression":
+			call := parseRustMethodCall(n, content)
+			if call != nil {
+				calls = append(calls, call)
+			}
+		case "macro_invocation":
+			call := parseRustMacroInvocation(n, content)
+			if call != nil {
+				calls = append(calls, call)
+			}
+		}
+	}
+
+	return calls
+}
+
+// parseRustCallExpression parses function call expressions.
+func parseRustCallExpression(node *sitter.Node, content []byte) *CallSite {
+	call := &CallSite{
+		Range: nodeRange(node),
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			call.CalleeName = child.Content(content)
+		case "scoped_identifier":
+			// e.g., std::io::read
+			call.CalleeName = child.Content(content)
+		case "field_expression":
+			// e.g., self.method
+			call.CalleeObject = "(field)"
+			call.IsMethodCall = true
+		}
+	}
+
+	if call.CalleeName == "" {
+		return nil
+	}
+
+	return call
+}
+
+// parseRustMethodCall parses method call expressions.
+func parseRustMethodCall(node *sitter.Node, content []byte) *CallSite {
+	call := &CallSite{
+		Range:        nodeRange(node),
+		IsMethodCall: true,
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			// Method name
+			call.CalleeName = child.Content(content)
+		case "field_identifier":
+			// Method name in method call position
+			call.CalleeName = child.Content(content)
+		}
+	}
+
+	if call.CalleeName == "" {
+		return nil
+	}
+
+	return call
+}
+
+// parseRustMacroInvocation parses macro invocations.
+func parseRustMacroInvocation(node *sitter.Node, content []byte) *CallSite {
+	call := &CallSite{
+		Range: nodeRange(node),
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			call.CalleeName = child.Content(content) + "!"
+			break
+		}
+	}
+
+	if call.CalleeName == "" {
+		return nil
+	}
+
+	return call
+}
+
+// extractRustExports finds public items in Rust source.
+func extractRustExports(node *sitter.Node, content []byte) []string {
+	var exports []string
+	seen := make(map[string]bool)
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		// Check if this item has pub visibility
+		isPub := false
+		for i := 0; i < int(n.ChildCount()); i++ {
+			child := n.Child(i)
+			if child.Type() == "visibility_modifier" {
+				isPub = true
+				break
+			}
+		}
+
+		if !isPub {
+			continue
+		}
+
+		var name string
+		switch n.Type() {
+		case "function_item":
+			name = extractRustItemName(n, content, "identifier")
+		case "struct_item", "enum_item", "trait_item", "type_item":
+			name = extractRustItemName(n, content, "type_identifier")
+		case "const_item", "static_item", "mod_item":
+			name = extractRustItemName(n, content, "identifier")
+		}
+
+		if name != "" && !seen[name] {
+			seen[name] = true
+			exports = append(exports, name)
+		}
+	}
+
+	return exports
+}
+
+// extractRustItemName finds the name of a Rust item by looking for the given node type.
+func extractRustItemName(node *sitter.Node, content []byte, nodeType string) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == nodeType {
+			return child.Content(content)
+		}
+	}
+	return ""
 }

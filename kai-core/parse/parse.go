@@ -1,4 +1,4 @@
-// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, and Ruby.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, Ruby, and Rust.
 package parse
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/ruby"
+	"github.com/smacker/go-tree-sitter/rust"
 )
 
 // Range represents a source code range (0-based line and column).
@@ -40,9 +41,10 @@ type Parser struct {
 	pyParser *sitter.Parser
 	goParser *sitter.Parser
 	rbParser *sitter.Parser
+	rsParser *sitter.Parser
 }
 
-// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, and Ruby.
+// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, Ruby, and Rust.
 func NewParser() *Parser {
 	jsParser := sitter.NewParser()
 	jsParser.SetLanguage(javascript.GetLanguage())
@@ -56,11 +58,15 @@ func NewParser() *Parser {
 	rbParser := sitter.NewParser()
 	rbParser.SetLanguage(ruby.GetLanguage())
 
+	rsParser := sitter.NewParser()
+	rsParser.SetLanguage(rust.GetLanguage())
+
 	return &Parser{
 		jsParser: jsParser,
 		pyParser: pyParser,
 		goParser: goParser,
 		rbParser: rbParser,
+		rsParser: rsParser,
 	}
 }
 
@@ -82,6 +88,9 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 	case "rb", "ruby":
 		parser = p.rbParser
 		extractFn = extractRubySymbols
+	case "rs", "rust":
+		parser = p.rsParser
+		extractFn = extractRustSymbols
 	default:
 		// Default to JavaScript parser for unknown languages
 		parser = p.jsParser
@@ -1189,4 +1198,376 @@ func extractRubyAssignment(node *sitter.Node, content []byte) []*Symbol {
 	}
 
 	return symbols
+}
+
+// ============================================================================
+// Rust symbol extraction
+// ============================================================================
+
+func extractRustSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil {
+			break
+		}
+		if n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "function_item":
+			sym := extractRustFunction(n, content, "")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "struct_item":
+			sym := extractRustStruct(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "enum_item":
+			sym := extractRustEnum(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "trait_item":
+			sym := extractRustTrait(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			// Also extract methods within the trait
+			methods := extractRustTraitMethods(n, content)
+			symbols = append(symbols, methods...)
+		case "impl_item":
+			// Extract methods within impl blocks
+			methods := extractRustImplMethods(n, content)
+			symbols = append(symbols, methods...)
+		case "type_item":
+			sym := extractRustTypeAlias(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "const_item":
+			sym := extractRustConst(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "static_item":
+			sym := extractRustStatic(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "mod_item":
+			sym := extractRustMod(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "macro_definition":
+			sym := extractRustMacro(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractRustFunction(node *sitter.Node, content []byte, implType string) *Symbol {
+	var name string
+	var params string
+	var returnType string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "parameters":
+			params = child.Content(content)
+		case "type_identifier", "generic_type", "reference_type", "pointer_type",
+			"array_type", "tuple_type", "unit_type", "scoped_type_identifier":
+			returnType = child.Content(content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	fullName := name
+	if implType != "" {
+		fullName = implType + "::" + name
+	}
+
+	signature := "fn " + name + params
+	if returnType != "" {
+		signature += " -> " + returnType
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: signature,
+	}
+}
+
+func extractRustStruct(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: "struct " + name,
+	}
+}
+
+func extractRustEnum(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: "enum " + name,
+	}
+}
+
+func extractRustTrait(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "type",
+		Range:     nodeRange(node),
+		Signature: "trait " + name,
+	}
+}
+
+func extractRustTraitMethods(node *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+	var traitName string
+
+	// Get trait name
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			traitName = child.Content(content)
+			break
+		}
+	}
+
+	// Find declaration_list and extract function signatures
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "declaration_list" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				item := child.Child(j)
+				if item.Type() == "function_item" || item.Type() == "function_signature_item" {
+					sym := extractRustFunction(item, content, traitName)
+					if sym != nil {
+						methods = append(methods, sym)
+					}
+				}
+			}
+		}
+	}
+
+	return methods
+}
+
+func extractRustImplMethods(node *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+	var implType string
+
+	// Get the type being implemented (e.g., "MyStruct" or "MyTrait for MyStruct")
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			if implType == "" {
+				implType = child.Content(content)
+			}
+		case "generic_type":
+			if implType == "" {
+				implType = child.Content(content)
+			}
+		}
+	}
+
+	// Find declaration_list and extract functions
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "declaration_list" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				item := child.Child(j)
+				if item.Type() == "function_item" {
+					sym := extractRustFunction(item, content, implType)
+					if sym != nil {
+						methods = append(methods, sym)
+					}
+				}
+			}
+		}
+	}
+
+	return methods
+}
+
+func extractRustTypeAlias(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "type",
+		Range:     nodeRange(node),
+		Signature: "type " + name,
+	}
+}
+
+func extractRustConst(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "variable",
+		Range:     nodeRange(node),
+		Signature: "const " + name,
+	}
+}
+
+func extractRustStatic(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "variable",
+		Range:     nodeRange(node),
+		Signature: "static " + name,
+	}
+}
+
+func extractRustMod(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "module",
+		Range:     nodeRange(node),
+		Signature: "mod " + name,
+	}
+}
+
+func extractRustMacro(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      name + "!",
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: "macro_rules! " + name,
+	}
 }
