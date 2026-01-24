@@ -271,6 +271,145 @@ var DefaultTemplates = []Template{
 		},
 	},
 
+	// === Semantic Config Templates ===
+
+	// Feature flag changes
+	{
+		ID:             "toggle_feature_flag",
+		Pattern:        "Toggle {configField} feature flag in {module}",
+		Priority:       72,
+		BaseConfidence: 0.85,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "FEATURE_FLAG_CHANGED"},
+		},
+	},
+
+	// Timeout changes
+	{
+		ID:             "update_timeout",
+		Pattern:        "Update {configField} timeout in {module}",
+		Priority:       68,
+		BaseConfidence: 0.80,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "TIMEOUT_CHANGED"},
+		},
+	},
+
+	// Limit changes
+	{
+		ID:             "update_limit",
+		Pattern:        "Update {configField} limit in {module}",
+		Priority:       68,
+		BaseConfidence: 0.80,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "LIMIT_CHANGED"},
+		},
+	},
+
+	// Retry config changes
+	{
+		ID:             "update_retry_config",
+		Pattern:        "Update retry configuration in {module}",
+		Priority:       65,
+		BaseConfidence: 0.78,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "RETRY_CONFIG_CHANGED"},
+		},
+	},
+
+	// Endpoint changes
+	{
+		ID:             "update_endpoint",
+		Pattern:        "Update {configField} endpoint in {module}",
+		Priority:       67,
+		BaseConfidence: 0.80,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "ENDPOINT_CHANGED"},
+		},
+	},
+
+	// Credential changes (high priority, security-sensitive)
+	{
+		ID:             "update_credential",
+		Pattern:        "Update {configField} credential in {module}",
+		Priority:       78,
+		BaseConfidence: 0.88,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "CREDENTIAL_CHANGED"},
+		},
+	},
+
+	// === Schema/Migration Templates ===
+
+	// Schema field added
+	{
+		ID:             "add_schema_field",
+		Pattern:        "Add {schemaField} to {schemaEntity}",
+		Priority:       82,
+		BaseConfidence: 0.90,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "SCHEMA_FIELD_ADDED"},
+		},
+	},
+
+	// Schema field removed (breaking)
+	{
+		ID:             "remove_schema_field",
+		Pattern:        "Remove {schemaField} from {schemaEntity}",
+		Priority:       82,
+		BaseConfidence: 0.90,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "SCHEMA_FIELD_REMOVED"},
+		},
+	},
+
+	// Schema field changed
+	{
+		ID:             "update_schema_field",
+		Pattern:        "Update {schemaField} in {schemaEntity}",
+		Priority:       80,
+		BaseConfidence: 0.88,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "SCHEMA_FIELD_CHANGED"},
+		},
+	},
+
+	// Migration added
+	{
+		ID:             "add_migration",
+		Pattern:        "Add database migration for {migrationName}",
+		Priority:       88,
+		BaseConfidence: 0.92,
+		Conditions: []MatchCondition{
+			{Type: "has_category", Category: "MIGRATION_ADDED"},
+		},
+	},
+
+	// === Auth/Security Templates ===
+
+	// Generic auth flow change (compound: function changed + has auth-related symbols)
+	{
+		ID:             "update_auth_flow",
+		Pattern:        "Update authentication flow in {module}",
+		Priority:       76,
+		BaseConfidence: 0.85,
+		Conditions: []MatchCondition{
+			{Type: "has_tag", Value: "security"},
+			{Type: "has_category", Category: "FUNCTION_BODY_CHANGED"},
+		},
+	},
+
+	// Permission change
+	{
+		ID:             "update_permissions",
+		Pattern:        "Update permission checks in {module}",
+		Priority:       74,
+		BaseConfidence: 0.82,
+		Conditions: []MatchCondition{
+			{Type: "has_tag", Value: "security"},
+		},
+	},
+
 	// === Fallback templates (lowest confidence) ===
 
 	// Generic file content change
@@ -306,6 +445,16 @@ type TemplateVariables struct {
 	ConfigField    string
 	DependencyName string
 	Version        string
+
+	// Schema/migration variables
+	SchemaField    string
+	SchemaEntity   string
+	MigrationName  string
+
+	// Security variables
+	Permission     string
+	Flow           string
+	Setting        string
 }
 
 // MatchTemplate checks if a cluster matches a template's conditions.
@@ -406,6 +555,14 @@ func RenderTemplate(pattern string, vars *TemplateVariables) string {
 		"{configField}":    vars.ConfigField,
 		"{dependencyName}": vars.DependencyName,
 		"{version}":        vars.Version,
+		// Schema/migration placeholders
+		"{schemaField}":    vars.SchemaField,
+		"{schemaEntity}":   vars.SchemaEntity,
+		"{migrationName}":  vars.MigrationName,
+		// Security placeholders
+		"{permission}":     vars.Permission,
+		"{flow}":           vars.Flow,
+		"{setting}":        vars.Setting,
 	}
 
 	for placeholder, value := range replacements {
@@ -496,7 +653,70 @@ func ExtractVariables(cluster *ChangeCluster, modules []string) *TemplateVariabl
 		}
 	}
 
+	// Extract semantic config fields
+	for _, sig := range cluster.Signals {
+		if sig.Category == detect.FeatureFlagChanged ||
+			sig.Category == detect.TimeoutChanged ||
+			sig.Category == detect.LimitChanged ||
+			sig.Category == detect.RetryConfigChanged ||
+			sig.Category == detect.EndpointChanged ||
+			sig.Category == detect.CredentialChanged {
+			if len(sig.Evidence.Symbols) > 0 {
+				vars.ConfigField = extractConfigFieldName(sig.Evidence.Symbols[0])
+			}
+			if sig.Evidence.ConfigChange != nil {
+				vars.Setting = sig.Evidence.ConfigChange.Key
+			}
+			break
+		}
+	}
+
+	// Extract schema/migration info
+	for _, sig := range cluster.Signals {
+		if sig.Category == detect.SchemaFieldAdded ||
+			sig.Category == detect.SchemaFieldRemoved ||
+			sig.Category == detect.SchemaFieldChanged {
+			if len(sig.Evidence.Symbols) > 0 {
+				entity, field := parseSchemaSymbol(sig.Evidence.Symbols[0])
+				vars.SchemaEntity = entity
+				vars.SchemaField = field
+			}
+			break
+		}
+		if sig.Category == detect.MigrationAdded {
+			if len(sig.Evidence.Symbols) > 0 {
+				vars.MigrationName = sig.Evidence.Symbols[0]
+			}
+			break
+		}
+	}
+
 	return vars
+}
+
+// extractConfigFieldName extracts a clean field name from a config path.
+func extractConfigFieldName(path string) string {
+	// Get the last part of dot-separated path
+	parts := strings.Split(path, ".")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return path
+}
+
+// parseSchemaSymbol parses a schema symbol like "model:User" or "table:users.email"
+func parseSchemaSymbol(sym string) (entity, field string) {
+	// Handle prefixed symbols like "model:User" or "type:Query"
+	if idx := strings.Index(sym, ":"); idx > 0 {
+		sym = sym[idx+1:]
+	}
+
+	// Handle table.column format
+	if idx := strings.Index(sym, "."); idx > 0 {
+		return sym[:idx], sym[idx+1:]
+	}
+
+	return sym, ""
 }
 
 // formatFunctionList formats a list of function names.

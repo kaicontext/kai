@@ -2,6 +2,7 @@
 package intent
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -31,7 +32,15 @@ type ChangeCluster struct {
 	PrimaryArea string                 `json:"primaryArea"`
 	ClusterType ClusterType            `json:"clusterType"`
 	Cohesion    float64                `json:"cohesion"` // 0.0-1.0 how related changes are
+	IsMixed     bool                   `json:"isMixed"`  // True if cluster has low cohesion
+	SubIntents  []string               `json:"subIntents,omitempty"` // For split clusters
 }
+
+// CohesionThreshold is the minimum cohesion for a cluster to be considered cohesive.
+const CohesionThreshold = 0.5
+
+// MaxClusterSize is the maximum number of signals before considering a split.
+const MaxClusterSize = 8
 
 // Clusterer groups related changes together.
 type Clusterer struct {
@@ -79,6 +88,7 @@ func (c *Clusterer) ClusterChanges(signals []*detect.ChangeSignal, moduleNames [
 
 		for _, subCluster := range subClusters {
 			clusterID++
+			cohesion := computeCohesion(subCluster)
 			cluster := &ChangeCluster{
 				ID:          generateClusterID(clusterID),
 				Signals:     subCluster,
@@ -86,7 +96,8 @@ func (c *Clusterer) ClusterChanges(signals []*detect.ChangeSignal, moduleNames [
 				Modules:     []string{module},
 				PrimaryArea: determinePrimaryArea(subCluster),
 				ClusterType: classifyCluster(subCluster),
-				Cohesion:    computeCohesion(subCluster),
+				Cohesion:    cohesion,
+				IsMixed:     cohesion < CohesionThreshold,
 			}
 			clusters = append(clusters, cluster)
 		}
@@ -95,14 +106,264 @@ func (c *Clusterer) ClusterChanges(signals []*detect.ChangeSignal, moduleNames [
 	// Step 3: Merge small clusters into related larger ones
 	clusters = c.mergeSmallClusters(clusters)
 
-	// Sort clusters by importance (cohesion * signal count)
+	// Step 4: Split large/low-cohesion clusters
+	clusters = c.splitLargeClusters(clusters, &clusterID)
+
+	// Step 5: Mark mixed clusters and compute sub-intents
+	for _, cluster := range clusters {
+		if cluster.IsMixed || len(cluster.Signals) > MaxClusterSize {
+			cluster.SubIntents = computeSubIntents(cluster.Signals)
+		}
+	}
+
+	// Sort clusters by importance (cohesion * signal weight)
 	sort.Slice(clusters, func(i, j int) bool {
-		scoreI := clusters[i].Cohesion * float64(len(clusters[i].Signals))
-		scoreJ := clusters[j].Cohesion * float64(len(clusters[j].Signals))
+		scoreI := clusters[i].Cohesion * clusters[i].TotalWeight()
+		scoreJ := clusters[j].Cohesion * clusters[j].TotalWeight()
 		return scoreI > scoreJ
 	})
 
 	return clusters
+}
+
+// splitLargeClusters breaks up large clusters with low cohesion.
+func (c *Clusterer) splitLargeClusters(clusters []*ChangeCluster, clusterID *int) []*ChangeCluster {
+	var result []*ChangeCluster
+
+	for _, cluster := range clusters {
+		// Only split if cluster is large and has low cohesion
+		if len(cluster.Signals) > MaxClusterSize && cluster.Cohesion < CohesionThreshold {
+			subClusters := c.splitBySymbolAffinity(cluster, clusterID)
+			result = append(result, subClusters...)
+		} else {
+			result = append(result, cluster)
+		}
+	}
+
+	return result
+}
+
+// splitBySymbolAffinity splits a cluster based on shared symbols between signals.
+func (c *Clusterer) splitBySymbolAffinity(cluster *ChangeCluster, clusterID *int) []*ChangeCluster {
+	signals := cluster.Signals
+	n := len(signals)
+
+	if n <= 2 {
+		return []*ChangeCluster{cluster}
+	}
+
+	// Build affinity matrix based on shared symbols
+	affinity := make([][]float64, n)
+	for i := range affinity {
+		affinity[i] = make([]float64, n)
+	}
+
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			aff := computeSymbolAffinity(signals[i], signals[j])
+			affinity[i][j] = aff
+			affinity[j][i] = aff
+		}
+	}
+
+	// Simple greedy clustering by affinity
+	assigned := make([]int, n)
+	for i := range assigned {
+		assigned[i] = -1
+	}
+
+	groupID := 0
+	for i := 0; i < n; i++ {
+		if assigned[i] == -1 {
+			// Start a new group
+			assigned[i] = groupID
+			// Add all signals with high affinity to this group
+			for j := i + 1; j < n; j++ {
+				if assigned[j] == -1 && affinity[i][j] > 0.3 {
+					assigned[j] = groupID
+				}
+			}
+			groupID++
+		}
+	}
+
+	// Create new clusters from groups
+	groups := make(map[int][]*detect.ChangeSignal)
+	for i, gid := range assigned {
+		groups[gid] = append(groups[gid], signals[i])
+	}
+
+	var result []*ChangeCluster
+	for _, groupSignals := range groups {
+		*clusterID++
+		cohesion := computeCohesion(groupSignals)
+		newCluster := &ChangeCluster{
+			ID:          generateClusterID(*clusterID),
+			Signals:     groupSignals,
+			Files:       extractFiles(groupSignals),
+			Modules:     cluster.Modules,
+			PrimaryArea: determinePrimaryArea(groupSignals),
+			ClusterType: classifyCluster(groupSignals),
+			Cohesion:    cohesion,
+			IsMixed:     cohesion < CohesionThreshold,
+		}
+		result = append(result, newCluster)
+	}
+
+	return result
+}
+
+// computeSymbolAffinity computes how related two signals are based on shared symbols.
+func computeSymbolAffinity(a, b *detect.ChangeSignal) float64 {
+	// Check for same file
+	filesA := extractFilesFromSignal(a)
+	filesB := extractFilesFromSignal(b)
+	sameFile := hasOverlap(filesA, filesB)
+
+	// Check for shared symbols
+	symA := extractSymbolNames(a)
+	symB := extractSymbolNames(b)
+	sharedSymbols := countOverlap(symA, symB)
+
+	// Check for same category
+	sameCategory := a.Category == b.Category
+
+	// Check for same tags
+	tagA := a.Tags
+	tagB := b.Tags
+	sharedTags := countOverlap(tagA, tagB)
+
+	// Compute weighted affinity
+	affinity := 0.0
+	if sameFile {
+		affinity += 0.4
+	}
+	if sharedSymbols > 0 {
+		affinity += 0.3 * float64(sharedSymbols) / float64(max(len(symA), len(symB), 1))
+	}
+	if sameCategory {
+		affinity += 0.2
+	}
+	if sharedTags > 0 {
+		affinity += 0.1 * float64(sharedTags) / float64(max(len(tagA), len(tagB), 1))
+	}
+
+	return affinity
+}
+
+// extractFilesFromSignal extracts file paths from a single signal.
+func extractFilesFromSignal(sig *detect.ChangeSignal) []string {
+	var files []string
+	for _, fr := range sig.Evidence.FileRanges {
+		files = append(files, fr.Path)
+	}
+	return files
+}
+
+// extractSymbolNames extracts symbol names from a signal.
+func extractSymbolNames(sig *detect.ChangeSignal) []string {
+	var names []string
+	for _, sym := range sig.Evidence.Symbols {
+		if strings.HasPrefix(sym, "name:") {
+			names = append(names, strings.TrimPrefix(sym, "name:"))
+		}
+	}
+	return names
+}
+
+// hasOverlap checks if two string slices have any common elements.
+func hasOverlap(a, b []string) bool {
+	set := make(map[string]bool)
+	for _, s := range a {
+		set[s] = true
+	}
+	for _, s := range b {
+		if set[s] {
+			return true
+		}
+	}
+	return false
+}
+
+// countOverlap counts common elements between two string slices.
+func countOverlap(a, b []string) int {
+	set := make(map[string]bool)
+	for _, s := range a {
+		set[s] = true
+	}
+	count := 0
+	for _, s := range b {
+		if set[s] {
+			count++
+		}
+	}
+	return count
+}
+
+// max returns the maximum of variadic ints.
+func max(vals ...int) int {
+	if len(vals) == 0 {
+		return 0
+	}
+	m := vals[0]
+	for _, v := range vals[1:] {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// computeSubIntents generates sub-intent descriptions for mixed clusters.
+func computeSubIntents(signals []*detect.ChangeSignal) []string {
+	// Group signals by category
+	byCategory := make(map[detect.ChangeCategory][]*detect.ChangeSignal)
+	for _, sig := range signals {
+		byCategory[sig.Category] = append(byCategory[sig.Category], sig)
+	}
+
+	var subIntents []string
+	for cat, sigs := range byCategory {
+		if len(sigs) > 0 {
+			desc := describeSignalGroup(cat, sigs)
+			if desc != "" {
+				subIntents = append(subIntents, desc)
+			}
+		}
+	}
+
+	return subIntents
+}
+
+// describeSignalGroup creates a brief description for a group of signals.
+func describeSignalGroup(cat detect.ChangeCategory, signals []*detect.ChangeSignal) string {
+	count := len(signals)
+	switch cat {
+	case detect.FunctionAdded:
+		return formatCount(count, "function added", "functions added")
+	case detect.FunctionRemoved:
+		return formatCount(count, "function removed", "functions removed")
+	case detect.FunctionRenamed:
+		return formatCount(count, "function renamed", "functions renamed")
+	case detect.FunctionBodyChanged:
+		return formatCount(count, "function modified", "functions modified")
+	case detect.DependencyAdded, detect.DependencyRemoved, detect.DependencyUpdated:
+		return formatCount(count, "dependency change", "dependency changes")
+	case detect.JSONValueChanged, detect.YAMLValueChanged:
+		return formatCount(count, "config value changed", "config values changed")
+	case detect.SchemaFieldAdded, detect.SchemaFieldRemoved, detect.SchemaFieldChanged:
+		return formatCount(count, "schema change", "schema changes")
+	default:
+		return ""
+	}
+}
+
+// formatCount formats a count with singular/plural forms.
+func formatCount(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, plural)
 }
 
 // groupByModule groups signals by their module.

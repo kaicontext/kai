@@ -268,3 +268,20 @@ func FormatYAMLPath(path string) string {
 	}
 	return path
 }
+
+// DetectYAMLChangesWithSemantics detects YAML changes and enriches them with semantic config information.
+func DetectYAMLChangesWithSemantics(path string, before, after []byte) ([]*ChangeSignal, error) {
+	changes, err := DetectYAMLChanges(path, before, after)
+	if err != nil {
+		return nil, err
+	}
+
+	signals := make([]*ChangeSignal, 0, len(changes))
+	for _, ct := range changes {
+		sig := NewChangeSignal(ct)
+		EnrichConfigSignal(sig)
+		signals = append(signals, sig)
+	}
+
+	return signals, nil
+}

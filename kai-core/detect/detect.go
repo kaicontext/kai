@@ -54,6 +54,20 @@ const (
 	DependencyAdded   ChangeCategory = "DEPENDENCY_ADDED"
 	DependencyRemoved ChangeCategory = "DEPENDENCY_REMOVED"
 	DependencyUpdated ChangeCategory = "DEPENDENCY_UPDATED"
+
+	// Semantic config changes
+	FeatureFlagChanged  ChangeCategory = "FEATURE_FLAG_CHANGED"
+	TimeoutChanged      ChangeCategory = "TIMEOUT_CHANGED"
+	LimitChanged        ChangeCategory = "LIMIT_CHANGED"
+	RetryConfigChanged  ChangeCategory = "RETRY_CONFIG_CHANGED"
+	EndpointChanged     ChangeCategory = "ENDPOINT_CHANGED"
+	CredentialChanged   ChangeCategory = "CREDENTIAL_CHANGED"
+
+	// Schema/migration changes
+	SchemaFieldAdded   ChangeCategory = "SCHEMA_FIELD_ADDED"
+	SchemaFieldRemoved ChangeCategory = "SCHEMA_FIELD_REMOVED"
+	SchemaFieldChanged ChangeCategory = "SCHEMA_FIELD_CHANGED"
+	MigrationAdded     ChangeCategory = "MIGRATION_ADDED"
 )
 
 // FileRange represents a range in a file.

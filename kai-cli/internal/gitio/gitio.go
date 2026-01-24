@@ -228,10 +228,24 @@ func (r *Repository) DiffFiles(baseCommit, headCommit *object.Commit) (added, mo
 func detectLang(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
+	case ".go":
+		return "go"
+	case ".json":
+		return "json"
 	case ".ts", ".tsx":
 		return "ts"
 	case ".js", ".jsx":
 		return "js"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".sql":
+		return "sql"
+	case ".proto":
+		return "proto"
+	case ".graphql", ".gql":
+		return "graphql"
+	case ".toml":
+		return "toml"
 	default:
 		return ""
 	}

@@ -354,6 +354,99 @@ func extractMajorVersion(version string) string {
 	return version
 }
 
+// EnrichConfigSignal enriches a JSON/YAML change signal with semantic config information.
+// It analyzes the key path and value to determine if this is a feature flag, timeout, limit, etc.
+func EnrichConfigSignal(sig *ChangeSignal) {
+	if len(sig.Evidence.Symbols) == 0 {
+		return
+	}
+
+	keyPath := sig.Evidence.Symbols[0]
+	keyCategory := InferConfigKeyCategory(keyPath)
+
+	// Create config change info
+	sig.Evidence.ConfigChange = &ConfigChangeInfo{
+		Key:         keyPath,
+		KeyCategory: keyCategory,
+	}
+
+	// Set old/new values if available
+	if sig.Evidence.BeforeValue != "" {
+		sig.Evidence.ConfigChange.OldValue = sig.Evidence.BeforeValue
+	}
+	if sig.Evidence.AfterValue != "" {
+		sig.Evidence.ConfigChange.NewValue = sig.Evidence.AfterValue
+	}
+
+	// Upgrade generic JSON/YAML change to semantic category
+	switch keyCategory {
+	case ConfigFeatureFlag:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = FeatureFlagChanged
+			sig.Weight = SignalWeight[FeatureFlagChanged]
+			sig.Tags = appendUnique(sig.Tags, "feature-flag")
+		}
+	case ConfigTimeout:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = TimeoutChanged
+			sig.Weight = SignalWeight[TimeoutChanged]
+			sig.Tags = appendUnique(sig.Tags, "tuning")
+		}
+	case ConfigLimit:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = LimitChanged
+			sig.Weight = SignalWeight[LimitChanged]
+			sig.Tags = appendUnique(sig.Tags, "tuning")
+		}
+	case ConfigRetry:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = RetryConfigChanged
+			sig.Weight = SignalWeight[RetryConfigChanged]
+			sig.Tags = appendUnique(sig.Tags, "tuning")
+		}
+	case ConfigEndpoint:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = EndpointChanged
+			sig.Weight = SignalWeight[EndpointChanged]
+			sig.Tags = appendUnique(sig.Tags, "config")
+		}
+	case ConfigCredential:
+		if sig.Category == JSONValueChanged || sig.Category == YAMLValueChanged {
+			sig.Category = CredentialChanged
+			sig.Weight = SignalWeight[CredentialChanged]
+			sig.Tags = appendUnique(sig.Tags, "security")
+			// Add warning about credential changes
+		}
+	}
+}
+
+// appendUnique appends a string to a slice if not already present.
+func appendUnique(slice []string, item string) []string {
+	for _, s := range slice {
+		if s == item {
+			return slice
+		}
+	}
+	return append(slice, item)
+}
+
+// DetectJSONChangesWithSemantics detects JSON changes and enriches them with semantic config information.
+func DetectJSONChangesWithSemantics(path string, before, after []byte) ([]*ChangeSignal, error) {
+	changes, err := DetectJSONChanges(path, before, after)
+	if err != nil {
+		return nil, err
+	}
+
+	signals := make([]*ChangeSignal, 0, len(changes))
+	for _, ct := range changes {
+		sig := NewChangeSignal(ct)
+		EnrichConfigSignal(sig)
+		signals = append(signals, sig)
+	}
+
+	return signals, nil
+}
+
 // MergeDependencySignals merges dependency-specific signals with regular JSON change signals.
 // This provides richer information for package.json files while maintaining backward compatibility.
 func MergeDependencySignals(depSignals []*ChangeSignal, jsonChanges []*ChangeType) []*ChangeSignal {
