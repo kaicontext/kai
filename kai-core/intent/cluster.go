@@ -109,7 +109,13 @@ func (c *Clusterer) ClusterChanges(signals []*detect.ChangeSignal, moduleNames [
 	// Step 4: Split large/low-cohesion clusters
 	clusters = c.splitLargeClusters(clusters, &clusterID)
 
-	// Step 5: Mark mixed clusters and compute sub-intents
+	// Step 5: Refresh cohesion/mixed status after merges/splits
+	for _, cluster := range clusters {
+		cluster.Cohesion = computeCohesion(cluster.Signals)
+		cluster.IsMixed = cluster.Cohesion < CohesionThreshold || shouldForceMixed(cluster.Signals)
+	}
+
+	// Step 6: Mark mixed clusters and compute sub-intents
 	for _, cluster := range clusters {
 		if cluster.IsMixed || len(cluster.Signals) > MaxClusterSize {
 			cluster.SubIntents = computeSubIntents(cluster.Signals)
@@ -761,6 +767,47 @@ func computeCohesion(signals []*detect.ChangeSignal) float64 {
 	score += 0.2 * (totalConf / float64(len(signals)))
 
 	return score
+}
+
+// shouldForceMixed returns true when category diversity suggests mixed intent.
+func shouldForceMixed(signals []*detect.ChangeSignal) bool {
+	if len(signals) == 0 {
+		return false
+	}
+
+	categories := make(map[detect.ChangeCategory]bool)
+	hasConfig := false
+	hasCode := false
+	hasSchema := false
+	hasDependency := false
+
+	for _, sig := range signals {
+		categories[sig.Category] = true
+
+		switch sig.Category {
+		case detect.JSONValueChanged, detect.JSONFieldAdded, detect.JSONFieldRemoved,
+			detect.YAMLValueChanged, detect.YAMLKeyAdded, detect.YAMLKeyRemoved,
+			detect.FeatureFlagChanged, detect.TimeoutChanged, detect.LimitChanged,
+			detect.RetryConfigChanged, detect.EndpointChanged, detect.CredentialChanged:
+			hasConfig = true
+		case detect.SchemaFieldAdded, detect.SchemaFieldRemoved, detect.SchemaFieldChanged, detect.MigrationAdded:
+			hasSchema = true
+		case detect.DependencyAdded, detect.DependencyRemoved, detect.DependencyUpdated:
+			hasDependency = true
+		default:
+			hasCode = true
+		}
+	}
+
+	if len(categories) >= 3 {
+		return true
+	}
+
+	if hasConfig && (hasCode || hasSchema || hasDependency) {
+		return true
+	}
+
+	return false
 }
 
 // hasCommonModule checks if two module lists share any module.

@@ -774,5 +774,76 @@ func BuiltinTestCases() []*EvalCase {
 			ExpectedTemplate: "add_migration",
 			MinConfidence:    0.8,
 		},
+
+		// Mixed changes summary
+		{
+			ID:          "mixed_summary",
+			Description: "Mixed changes across code, deps, and schema",
+			Category:    "mixed",
+			Signals: []*detect.ChangeSignal{
+				{
+					Category: detect.FunctionAdded,
+					Evidence: detect.ExtendedEvidence{
+						FileRanges: []detect.FileRange{{Path: "src/api/users.go"}},
+						Symbols:    []string{"name:createUser"},
+					},
+					Weight:     0.8,
+					Confidence: 0.9,
+				},
+				{
+					Category: detect.DependencyUpdated,
+					Evidence: detect.ExtendedEvidence{
+						FileRanges: []detect.FileRange{{Path: "go.mod"}},
+						NewName:    "github.com/foo/bar",
+						AfterValue: "v1.2.3",
+					},
+					Weight:     0.7,
+					Confidence: 0.9,
+				},
+				{
+					Category: detect.SchemaFieldRemoved,
+					Evidence: detect.ExtendedEvidence{
+						FileRanges: []detect.FileRange{{Path: "db/schema.sql"}},
+						Symbols:    []string{"table:users.legacy_id"},
+					},
+					Weight:     0.85,
+					Confidence: 0.9,
+				},
+			},
+			Files:            []string{"src/api/users.go", "go.mod", "db/schema.sql"},
+			ExpectedIntent:   "Mixed changes in General: 1 function added, 1 dependency change, and 1 schema change",
+			AcceptableIntents: []string{
+				"Mixed changes in General: 1 dependency change, 1 schema change, and 1 function added",
+				"Mixed changes in General: 1 schema change, 1 function added, and 1 dependency change",
+			},
+			ExpectedTemplate: "mixed_summary",
+			MinConfidence:    0.45,
+		},
+
+		// Config timeout wording
+		{
+			ID:          "config_timeout_wording",
+			Description: "Timeout change should avoid duplicated keyword",
+			Category:    "config",
+			Signals: []*detect.ChangeSignal{
+				{
+					Category: detect.TimeoutChanged,
+					Evidence: detect.ExtendedEvidence{
+						FileRanges: []detect.FileRange{{Path: "config.yaml"}},
+						Symbols:    []string{"auth.session.timeout"},
+						BeforeValue: "5s",
+						AfterValue:  "10s",
+					},
+					Weight:     0.6,
+					Confidence: 0.9,
+					Tags:       []string{"config"},
+				},
+			},
+			Modules:          []string{"Auth"},
+			Files:            []string{"config.yaml"},
+			ExpectedIntent:   "Update auth session timeout in Auth",
+			ExpectedTemplate: "update_timeout",
+			MinConfidence:    0.6,
+		},
 	}
 }

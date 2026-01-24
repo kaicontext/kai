@@ -616,8 +616,8 @@ func (g *Generator) RenderIntentWithConfidence(changeSetID []byte, editText stri
 		return nil, err
 	}
 
-	// Check if confidence is too low - fall back to legacy generation
-	if result.Primary != nil && result.Primary.Confidence < minConfidence {
+	// Fall back only when the engine produced a generic update below threshold.
+	if result.Primary != nil && result.Primary.Confidence < minConfidence && result.Primary.Template == "generic_update" {
 		// Try legacy generation as fallback
 		changeTypes, _ := g.GetChangeTypesForChangeSet(changeSetID)
 		modules, _ := g.GetModulesForChangeSet(changeSetID)

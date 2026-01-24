@@ -251,6 +251,29 @@ func TestComputeCohesion_MixedCategories(t *testing.T) {
 	}
 }
 
+func TestShouldForceMixed_CategoryDiversity(t *testing.T) {
+	signals := []*detect.ChangeSignal{
+		{Category: detect.FunctionAdded},
+		{Category: detect.DependencyUpdated},
+		{Category: detect.SchemaFieldRemoved},
+	}
+
+	if !shouldForceMixed(signals) {
+		t.Error("expected force mixed for category diversity")
+	}
+}
+
+func TestShouldForceMixed_ConfigWithCode(t *testing.T) {
+	signals := []*detect.ChangeSignal{
+		{Category: detect.TimeoutChanged},
+		{Category: detect.FunctionAdded},
+	}
+
+	if !shouldForceMixed(signals) {
+		t.Error("expected force mixed for config + code")
+	}
+}
+
 func TestDeterminePrimaryArea_FunctionName(t *testing.T) {
 	signals := []*detect.ChangeSignal{
 		{

@@ -370,3 +370,21 @@ func TestDefaultTemplates_FallbackExists(t *testing.T) {
 		t.Error("expected generic_update fallback template to be defined")
 	}
 }
+
+func TestExtractVariables_ConfigFieldTimeout(t *testing.T) {
+	cluster := &ChangeCluster{
+		Signals: []*detect.ChangeSignal{
+			{
+				Category: detect.TimeoutChanged,
+				Evidence: detect.ExtendedEvidence{
+					Symbols: []string{"auth.session.timeout"},
+				},
+			},
+		},
+	}
+
+	vars := ExtractVariables(cluster, []string{"Auth"})
+	if vars.ConfigField != "auth session" {
+		t.Errorf("expected config field 'auth session', got %q", vars.ConfigField)
+	}
+}

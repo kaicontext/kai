@@ -662,7 +662,7 @@ func ExtractVariables(cluster *ChangeCluster, modules []string) *TemplateVariabl
 			sig.Category == detect.EndpointChanged ||
 			sig.Category == detect.CredentialChanged {
 			if len(sig.Evidence.Symbols) > 0 {
-				vars.ConfigField = extractConfigFieldName(sig.Evidence.Symbols[0])
+				vars.ConfigField = extractConfigFieldNameForCategory(sig.Evidence.Symbols[0], sig.Category)
 			}
 			if sig.Evidence.ConfigChange != nil {
 				vars.Setting = sig.Evidence.ConfigChange.Key
@@ -695,13 +695,45 @@ func ExtractVariables(cluster *ChangeCluster, modules []string) *TemplateVariabl
 }
 
 // extractConfigFieldName extracts a clean field name from a config path.
-func extractConfigFieldName(path string) string {
-	// Get the last part of dot-separated path
+func extractConfigFieldNameForCategory(path string, category detect.ChangeCategory) string {
 	parts := strings.Split(path, ".")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
+	if len(parts) == 0 {
+		return path
 	}
-	return path
+
+	last := parts[len(parts)-1]
+	keyword := configKeywordForCategory(category)
+	if keyword == "" || !strings.EqualFold(last, keyword) {
+		return last
+	}
+
+	// Use the parent context when the last token is the category keyword.
+	if len(parts) >= 3 {
+		return strings.Join(parts[len(parts)-3:len(parts)-1], " ")
+	}
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return last
+}
+
+func configKeywordForCategory(category detect.ChangeCategory) string {
+	switch category {
+	case detect.TimeoutChanged:
+		return "timeout"
+	case detect.LimitChanged:
+		return "limit"
+	case detect.RetryConfigChanged:
+		return "retry"
+	case detect.EndpointChanged:
+		return "endpoint"
+	case detect.CredentialChanged:
+		return "credential"
+	case detect.FeatureFlagChanged:
+		return "flag"
+	default:
+		return ""
+	}
 }
 
 // parseSchemaSymbol parses a schema symbol like "model:User" or "table:users.email"

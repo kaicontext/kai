@@ -90,6 +90,9 @@ func (e *Engine) GenerateIntent(signals []*detect.ChangeSignal, modules []string
 	// Generate candidates for the primary cluster
 	primaryCluster := clusters[0]
 	candidates := e.generateCandidates(primaryCluster, modules)
+	if primaryCluster.IsMixed && len(primaryCluster.SubIntents) > 0 {
+		candidates = append(candidates, buildMixedSummaryCandidate(primaryCluster, modules))
+	}
 
 	if len(candidates) == 0 {
 		result.Primary = &IntentCandidate{
@@ -107,6 +110,22 @@ func (e *Engine) GenerateIntent(signals []*detect.ChangeSignal, modules []string
 	})
 
 	result.Primary = candidates[0]
+	if primaryCluster.IsMixed && len(primaryCluster.SubIntents) > 0 {
+		shouldPreferMixed := len(primaryCluster.SubIntents) > 1
+		if !shouldPreferMixed {
+			shouldPreferMixed = result.Primary.Confidence < 0.6 || result.Primary.Template == "generic_update"
+		}
+
+		if shouldPreferMixed {
+			mixedCandidate := buildMixedSummaryCandidate(primaryCluster, modules)
+			if mixedCandidate != nil && mixedCandidate.Text != "" {
+				if result.Primary.Template != mixedCandidate.Template {
+					result.Alternatives = append([]*IntentCandidate{result.Primary}, result.Alternatives...)
+				}
+				result.Primary = mixedCandidate
+			}
+		}
+	}
 	if len(candidates) > 1 {
 		result.Alternatives = candidates[1:]
 	}
@@ -349,6 +368,88 @@ func GetEvidenceQuality(sig *detect.ChangeSignal) EvidenceQuality {
 	return EvidenceQualityLow
 }
 
+func buildMixedSummaryCandidate(cluster *ChangeCluster, modules []string) *IntentCandidate {
+	if cluster == nil || len(cluster.SubIntents) == 0 {
+		return nil
+	}
+
+	module := getModule(modules)
+	if len(cluster.Modules) > 0 {
+		module = cluster.Modules[0]
+	}
+
+	summary := formatSubIntentSummary(cluster.SubIntents)
+	if summary == "" {
+		return nil
+	}
+
+	return &IntentCandidate{
+		Text:       "Mixed changes in " + module + ": " + summary,
+		Confidence: mixedSummaryConfidence(cluster),
+		Template:   "mixed_summary",
+		Reasoning:  "Summarized mixed changes from sub-intents",
+	}
+}
+
+func mixedSummaryConfidence(cluster *ChangeCluster) float64 {
+	if cluster == nil {
+		return 0.55
+	}
+
+	confidence := 0.55
+	if cluster.AverageConfidence() >= 0.8 {
+		confidence += 0.1
+	}
+
+	for _, sig := range cluster.Signals {
+		if GetEvidenceQuality(sig) == EvidenceQualityHigh {
+			confidence += 0.05
+			break
+		}
+	}
+
+	if len(cluster.Signals) > MaxClusterSize {
+		confidence -= 0.05
+	}
+
+	if confidence < 0.45 {
+		confidence = 0.45
+	}
+	if confidence > 0.75 {
+		confidence = 0.75
+	}
+
+	return confidence
+}
+
+func formatSubIntentSummary(subIntents []string) string {
+	if len(subIntents) == 0 {
+		return ""
+	}
+
+	maxItems := 3
+	if len(subIntents) <= maxItems {
+		return joinWithConjunction(subIntents)
+	}
+
+	shown := subIntents[:maxItems]
+	remaining := len(subIntents) - maxItems
+	return joinWithConjunction(shown) + " and " + itoa(remaining) + " more"
+}
+
+func joinWithConjunction(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
+
 // buildReasoning explains why a template was chosen.
 func buildReasoning(t *Template, cluster *ChangeCluster) string {
 	return "Matched " + t.ID + " due to " + describeDominantSignal(cluster)
@@ -498,6 +599,7 @@ func getTemplateDescription(templateID string) string {
 		"add_schema_field":       "Detected a schema field addition",
 		"remove_schema_field":    "Detected a schema field removal",
 		"add_migration":          "Detected a new database migration",
+		"mixed_summary":          "Summarized multiple unrelated changes",
 		"generic_update":         "Fallback template - no specific pattern matched",
 	}
 
@@ -766,4 +868,3 @@ func (c *IntentCandidate) FormatReasoningVerbose(cluster *ChangeCluster) string 
 
 	return strings.Join(lines, "\n")
 }
-

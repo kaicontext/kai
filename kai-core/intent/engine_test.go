@@ -440,3 +440,55 @@ func TestIntentCandidate_FormatWithConfidence(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateIntent_MixedSummary(t *testing.T) {
+	e := NewEngine()
+
+	signals := []*detect.ChangeSignal{
+		{
+			Category: detect.FunctionAdded,
+			Evidence: detect.ExtendedEvidence{
+				FileRanges: []detect.FileRange{{Path: "src/api/users.go"}},
+				Symbols:    []string{"name:createUser"},
+			},
+			Weight:     0.8,
+			Confidence: 0.9,
+		},
+		{
+			Category: detect.DependencyUpdated,
+			Evidence: detect.ExtendedEvidence{
+				FileRanges: []detect.FileRange{{Path: "go.mod"}},
+				NewName:    "github.com/foo/bar",
+				AfterValue: "v1.2.3",
+			},
+			Weight:     0.7,
+			Confidence: 0.9,
+		},
+		{
+			Category: detect.SchemaFieldRemoved,
+			Evidence: detect.ExtendedEvidence{
+				FileRanges: []detect.FileRange{{Path: "db/schema.sql"}},
+				Symbols:    []string{"table:users.legacy_id"},
+			},
+			Weight:     0.85,
+			Confidence: 0.9,
+		},
+	}
+
+	result := e.GenerateIntent(signals, []string{}, []string{"src/api/users.go", "go.mod", "db/schema.sql"})
+
+	if result.Primary == nil {
+		t.Fatal("expected Primary to be set")
+	}
+	if result.Primary.Template != "mixed_summary" {
+		t.Fatalf("expected mixed_summary template, got %q", result.Primary.Template)
+	}
+	if !strings.Contains(result.Primary.Text, "Mixed changes in General:") {
+		t.Errorf("expected mixed summary text, got %q", result.Primary.Text)
+	}
+	if !(strings.Contains(result.Primary.Text, "schema change") ||
+		strings.Contains(result.Primary.Text, "dependency change") ||
+		strings.Contains(result.Primary.Text, "function added")) {
+		t.Errorf("expected mixed summary to include sub-intent details, got %q", result.Primary.Text)
+	}
+}

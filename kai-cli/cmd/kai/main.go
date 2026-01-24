@@ -6489,6 +6489,9 @@ func createChangesetFromSnapshots(db *graph.DB, baseSnapID, headSnapID []byte, m
 			case "json":
 				// Use JSON-specific detection
 				changes, err = classify.DetectJSONChanges(path, beforeContent, afterContent)
+			case "yaml":
+				// Use YAML-specific detection
+				changes, err = classify.DetectYAMLChanges(path, beforeContent, afterContent)
 			case "ts", "js":
 				// Use tree-sitter based detection
 				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
