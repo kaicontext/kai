@@ -14,6 +14,11 @@ type ChangeType = detect.ChangeType
 type JSONSymbol = detect.JSONSymbol
 type YAMLSymbol = detect.YAMLSymbol
 
+// Re-export new signal types
+type ChangeSignal = detect.ChangeSignal
+type ExtendedEvidence = detect.ExtendedEvidence
+type SignatureChange = detect.SignatureChange
+
 // Detector wraps kai-core/detect.Detector to use local graph.Node type
 type Detector struct {
 	inner *detect.Detector
@@ -57,6 +62,17 @@ const (
 	YAMLKeyAdded       = detect.YAMLKeyAdded
 	YAMLKeyRemoved     = detect.YAMLKeyRemoved
 	YAMLValueChanged   = detect.YAMLValueChanged
+
+	// New enhanced categories
+	FunctionRenamed     = detect.FunctionRenamed
+	FunctionBodyChanged = detect.FunctionBodyChanged
+	ParameterAdded      = detect.ParameterAdded
+	ParameterRemoved    = detect.ParameterRemoved
+	ImportAdded         = detect.ImportAdded
+	ImportRemoved       = detect.ImportRemoved
+	DependencyAdded     = detect.DependencyAdded
+	DependencyRemoved   = detect.DependencyRemoved
+	DependencyUpdated   = detect.DependencyUpdated
 )
 
 // Re-export functions from kai-core/detect
@@ -72,4 +88,15 @@ var (
 	ExtractYAMLSymbols = detect.ExtractYAMLSymbols
 	DetectYAMLChanges  = detect.DetectYAMLChanges
 	FormatYAMLPath     = detect.FormatYAMLPath
+
+	// New signal functions
+	NewChangeSignal       = detect.NewChangeSignal
+	ConvertToSignals      = detect.ConvertToSignals
+	GetSignalPayload      = detect.GetSignalPayload
+	DetectDependencyChanges = detect.DetectDependencyChanges
 )
+
+// NewRenameDetector creates a rename detector.
+func NewRenameDetector() *detect.RenameDetector {
+	return detect.NewRenameDetector()
+}

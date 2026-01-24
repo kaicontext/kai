@@ -37,6 +37,23 @@ const (
 	YAMLKeyAdded     ChangeCategory = "YAML_KEY_ADDED"
 	YAMLKeyRemoved   ChangeCategory = "YAML_KEY_REMOVED"
 	YAMLValueChanged ChangeCategory = "YAML_VALUE_CHANGED"
+
+	// Enhanced function changes
+	FunctionRenamed     ChangeCategory = "FUNCTION_RENAMED"
+	FunctionBodyChanged ChangeCategory = "FUNCTION_BODY_CHANGED"
+
+	// Parameter changes
+	ParameterAdded   ChangeCategory = "PARAMETER_ADDED"
+	ParameterRemoved ChangeCategory = "PARAMETER_REMOVED"
+
+	// Import changes
+	ImportAdded   ChangeCategory = "IMPORT_ADDED"
+	ImportRemoved ChangeCategory = "IMPORT_REMOVED"
+
+	// Dependency changes (for package.json, etc.)
+	DependencyAdded   ChangeCategory = "DEPENDENCY_ADDED"
+	DependencyRemoved ChangeCategory = "DEPENDENCY_REMOVED"
+	DependencyUpdated ChangeCategory = "DEPENDENCY_UPDATED"
 )
 
 // FileRange represents a range in a file.
@@ -117,18 +134,18 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	return changes, nil
 }
 
-// detectFunctionChanges detects added or removed functions.
+// detectFunctionChanges detects added, removed, or modified functions.
 func (d *Detector) detectFunctionChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
 	var changes []*ChangeType
 
 	// Get all function declarations from both versions
-	beforeFuncs := getAllFunctions(before, beforeContent)
-	afterFuncs := getAllFunctions(after, afterContent)
+	beforeFuncs := GetAllFunctions(before, beforeContent)
+	afterFuncs := GetAllFunctions(after, afterContent)
 
 	// Check for added functions
 	for name, afterFunc := range afterFuncs {
 		if _, exists := beforeFuncs[name]; !exists {
-			afterRange := parse.GetNodeRange(afterFunc.node)
+			afterRange := parse.GetNodeRange(afterFunc.Node)
 			// Get symbol IDs and always include the function name for intent generation
 			symbolIDs := d.findOverlappingSymbols(fileID, afterRange)
 			symbols := append([]string{"name:" + name}, symbolIDs...)
@@ -150,7 +167,7 @@ func (d *Detector) detectFunctionChanges(path string, before, after *parse.Parse
 	// Check for removed functions
 	for name, beforeFunc := range beforeFuncs {
 		if _, exists := afterFuncs[name]; !exists {
-			beforeRange := parse.GetNodeRange(beforeFunc.node)
+			beforeRange := parse.GetNodeRange(beforeFunc.Node)
 			change := &ChangeType{
 				Category: FunctionRemoved,
 				Evidence: Evidence{
@@ -166,24 +183,52 @@ func (d *Detector) detectFunctionChanges(path string, before, after *parse.Parse
 		}
 	}
 
+	// Check for body changes in functions that exist in both versions
+	for name, beforeFunc := range beforeFuncs {
+		if afterFunc, exists := afterFuncs[name]; exists {
+			// Compare function bodies
+			if beforeFunc.Body != afterFunc.Body && beforeFunc.Body != "" && afterFunc.Body != "" {
+				afterRange := parse.GetNodeRange(afterFunc.Node)
+				symbolIDs := d.findOverlappingSymbols(fileID, afterRange)
+				symbols := append([]string{"name:" + name}, symbolIDs...)
+				change := &ChangeType{
+					Category: FunctionBodyChanged,
+					Evidence: Evidence{
+						FileRanges: []FileRange{{
+							Path:  path,
+							Start: afterRange.Start,
+							End:   afterRange.End,
+						}},
+						Symbols: symbols,
+					},
+				}
+				changes = append(changes, change)
+			}
+		}
+	}
+
 	return changes
 }
 
-// funcInfo holds information about a function declaration.
-type funcInfo struct {
-	name string
-	node *sitter.Node
+// FuncInfo holds information about a function declaration.
+// Exported for use by rename detection.
+type FuncInfo struct {
+	Name string
+	Node *sitter.Node
+	Body string // function body text for similarity comparison
 }
 
-// getAllFunctions extracts all function declarations from a parsed file.
-func getAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*funcInfo {
-	funcs := make(map[string]*funcInfo)
+// GetAllFunctions extracts all function declarations from a parsed file.
+// Exported for use by rename detection.
+func GetAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*FuncInfo {
+	funcs := make(map[string]*FuncInfo)
 
 	// Function declarations: function foo() {}
 	for _, node := range parsed.FindNodesOfType("function_declaration") {
 		name := getFunctionName(node, content)
 		if name != "" {
-			funcs[name] = &funcInfo{name: name, node: node}
+			body := getFunctionBody(node, content)
+			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
 		}
 	}
 
@@ -191,7 +236,8 @@ func getAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*funcI
 	for _, node := range parsed.FindNodesOfType("lexical_declaration") {
 		name, arrowNode := getArrowFunctionName(node, content)
 		if name != "" && arrowNode != nil {
-			funcs[name] = &funcInfo{name: name, node: node}
+			body := getFunctionBody(arrowNode, content)
+			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
 		}
 	}
 
@@ -199,7 +245,8 @@ func getAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*funcI
 	for _, node := range parsed.FindNodesOfType("variable_declaration") {
 		name, funcNode := getVariableFunctionName(node, content)
 		if name != "" && funcNode != nil {
-			funcs[name] = &funcInfo{name: name, node: node}
+			body := getFunctionBody(funcNode, content)
+			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
 		}
 	}
 
@@ -207,11 +254,35 @@ func getAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*funcI
 	for _, node := range parsed.FindNodesOfType("method_definition") {
 		name := getFunctionName(node, content)
 		if name != "" {
-			funcs[name] = &funcInfo{name: name, node: node}
+			body := getFunctionBody(node, content)
+			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
 		}
 	}
 
 	return funcs
+}
+
+// getFunctionBody extracts the body content of a function.
+func getFunctionBody(node *sitter.Node, content []byte) string {
+	// Find the statement_block or body node
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "statement_block", "block", "expression_statement":
+			return parse.GetNodeContent(child, content)
+		}
+	}
+	// For arrow functions without braces, the body is the expression
+	if node.Type() == "arrow_function" {
+		// The body is usually the last child
+		if node.ChildCount() > 0 {
+			lastChild := node.Child(int(node.ChildCount()) - 1)
+			if lastChild.Type() != "formal_parameters" && lastChild.Type() != "=>" {
+				return parse.GetNodeContent(lastChild, content)
+			}
+		}
+	}
+	return ""
 }
 
 // getArrowFunctionName extracts the name from an arrow function assignment.

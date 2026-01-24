@@ -392,7 +392,7 @@ class MyClass {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	funcs := getAllFunctions(parsed, content)
+	funcs := GetAllFunctions(parsed, content)
 
 	expectedFuncs := []string{"regular", "arrow", "funcExpr", "method"}
 	for _, expected := range expectedFuncs {

@@ -8,16 +8,28 @@ import (
 	"kai/internal/classify"
 	"kai/internal/graph"
 	"kai/internal/util"
+
+	coreintent "kai-core/intent"
 )
 
 // Generator generates intent sentences.
 type Generator struct {
-	db *graph.DB
+	db     *graph.DB
+	engine *coreintent.Engine
 }
+
+// IntentResult wraps the core intent result for CLI use.
+type IntentResult = coreintent.IntentResult
+
+// IntentCandidate wraps the core intent candidate for CLI use.
+type IntentCandidate = coreintent.IntentCandidate
 
 // NewGenerator creates a new intent generator.
 func NewGenerator(db *graph.DB) *Generator {
-	return &Generator{db: db}
+	return &Generator{
+		db:     db,
+		engine: coreintent.NewEngine(),
+	}
 }
 
 // GenerateIntent generates an intent sentence for a changeset.
@@ -530,6 +542,129 @@ func (g *Generator) RenderIntent(changeSetID []byte, editText string, regenerate
 	}
 
 	return intent, nil
+}
+
+// GenerateIntentWithConfidence generates an intent with full confidence information.
+// This is the new API that provides alternatives, warnings, and reasoning.
+func (g *Generator) GenerateIntentWithConfidence(changeSetID []byte, minConfidence float64) (*IntentResult, error) {
+	changeTypes, err := g.GetChangeTypesForChangeSet(changeSetID)
+	if err != nil {
+		return nil, err
+	}
+
+	modules, err := g.GetModulesForChangeSet(changeSetID)
+	if err != nil {
+		return nil, err
+	}
+
+	files, err := g.GetChangedFilesForChangeSet(changeSetID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to signals
+	signals := classify.ConvertToSignals(changeTypes)
+
+	// Generate intent with engine
+	result := g.engine.GenerateIntent(signals, modules, files)
+
+	return result, nil
+}
+
+// RenderIntentWithConfidence renders intent with confidence info.
+// If editText is provided, it saves that text.
+// If regenerate is true, it regenerates even if intent exists.
+// Otherwise, returns existing intent or generates if none exists.
+// Returns the full IntentResult for access to alternatives and warnings.
+func (g *Generator) RenderIntentWithConfidence(changeSetID []byte, editText string, regenerate bool, minConfidence float64) (*IntentResult, error) {
+	if editText != "" {
+		// Use provided text and persist it
+		if err := g.UpdateChangeSetIntent(changeSetID, editText); err != nil {
+			return nil, err
+		}
+		return &IntentResult{
+			Primary: &IntentCandidate{
+				Text:       editText,
+				Confidence: 1.0,
+				Template:   "user_provided",
+				Reasoning:  "User-provided intent",
+			},
+		}, nil
+	}
+
+	// Check if there's already a saved intent (unless regenerating)
+	if !regenerate {
+		existingIntent, err := g.GetChangeSetIntent(changeSetID)
+		if err != nil {
+			return nil, err
+		}
+		if existingIntent != "" {
+			return &IntentResult{
+				Primary: &IntentCandidate{
+					Text:       existingIntent,
+					Confidence: 1.0,
+					Template:   "cached",
+					Reasoning:  "Previously saved intent",
+				},
+			}, nil
+		}
+	}
+
+	// Generate with confidence
+	result, err := g.GenerateIntentWithConfidence(changeSetID, minConfidence)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if confidence is too low - fall back to legacy generation
+	if result.Primary != nil && result.Primary.Confidence < minConfidence {
+		// Try legacy generation as fallback
+		changeTypes, _ := g.GetChangeTypesForChangeSet(changeSetID)
+		modules, _ := g.GetModulesForChangeSet(changeSetID)
+		symbols, _ := g.GetSymbolsForChangeSet(changeSetID)
+		files, _ := g.GetChangedFilesForChangeSet(changeSetID)
+
+		legacyIntent := g.legacyGenerateIntent(changeTypes, modules, symbols, files)
+		result.Primary = &IntentCandidate{
+			Text:       legacyIntent,
+			Confidence: minConfidence, // Set to threshold since we're using fallback
+			Template:   "legacy",
+			Reasoning:  "Fallback to legacy generation due to low confidence",
+		}
+	}
+
+	// Save the intent
+	if result.Primary != nil {
+		if err := g.UpdateChangeSetIntent(changeSetID, result.Primary.Text); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// legacyGenerateIntent is the original generation logic for backward compatibility.
+func (g *Generator) legacyGenerateIntent(changeTypes []*classify.ChangeType, modules []string, symbols []*graph.Node, changedFiles []string) string {
+	// Determine verb from change types (priority order)
+	verb := determineVerb(changeTypes)
+
+	// Determine module
+	module := "General"
+	if len(modules) > 0 {
+		module = modules[0]
+	}
+
+	// Try to get function names from change types first (most specific)
+	funcNames := extractFunctionNames(changeTypes)
+	if len(funcNames) > 0 {
+		area := formatFunctionNames(funcNames)
+		return verb + " " + area + " in " + module
+	}
+
+	// Fall back to symbol names or file paths
+	area := determineArea(symbols, changedFiles)
+
+	return verb + " " + module + " " + area
 }
 
 // Placeholder to satisfy import

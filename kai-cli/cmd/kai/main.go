@@ -1294,8 +1294,11 @@ var (
 	logLimit       int
 	repoPath      string
 	dirPath       string
-	editText       string
-	regenerateIntent bool
+	editText          string
+	regenerateIntent  bool
+	showAlternatives  bool
+	intentConfidence  float64
+	explainIntent     bool
 	jsonFlag      bool
 	checkoutDir   string
 	checkoutClean bool
@@ -1377,6 +1380,9 @@ func init() {
 	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
 	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
+	intentRenderCmd.Flags().BoolVar(&showAlternatives, "show-alternatives", false, "Show alternative intent suggestions")
+	intentRenderCmd.Flags().Float64Var(&intentConfidence, "intent-confidence", 0.5, "Minimum confidence threshold (default 0.5)")
+	intentRenderCmd.Flags().BoolVar(&explainIntent, "explain-intent", false, "Show reasoning behind intent choice")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 10, "Number of entries to show")
 	statusCmd.Flags().StringVar(&statusDir, "dir", ".", "Directory to check for changes")
@@ -6704,6 +6710,47 @@ func runIntentRender(cmd *cobra.Command, args []string) error {
 	}
 
 	gen := intent.NewGenerator(db)
+
+	// Use the new confidence-aware API when extra features are requested
+	if showAlternatives || explainIntent || intentConfidence != 0.5 {
+		result, err := gen.RenderIntentWithConfidence(changeSetID, editText, regenerateIntent, intentConfidence)
+		if err != nil {
+			return fmt.Errorf("rendering intent: %w", err)
+		}
+
+		if result.Primary != nil {
+			fmt.Printf("Intent: %s\n", result.Primary.Text)
+
+			if explainIntent {
+				fmt.Printf("  Template: %s\n", result.Primary.Template)
+				fmt.Printf("  Confidence: %.0f%%\n", result.Primary.Confidence*100)
+				if result.Primary.Reasoning != "" {
+					fmt.Printf("  Reasoning: %s\n", result.Primary.Reasoning)
+				}
+			}
+
+			if showAlternatives && len(result.Alternatives) > 0 {
+				fmt.Println("\nAlternatives:")
+				for i, alt := range result.Alternatives {
+					if i >= 3 {
+						break // Show at most 3 alternatives
+					}
+					fmt.Printf("  - %s (%.0f%%)\n", alt.Text, alt.Confidence*100)
+				}
+			}
+
+			if len(result.Warnings) > 0 {
+				fmt.Println("\nWarnings:")
+				for _, warning := range result.Warnings {
+					fmt.Printf("  - %s\n", warning)
+				}
+			}
+		}
+
+		return nil
+	}
+
+	// Use legacy API for simple cases
 	intentText, err := gen.RenderIntent(changeSetID, editText, regenerateIntent)
 	if err != nil {
 		return fmt.Errorf("rendering intent: %w", err)

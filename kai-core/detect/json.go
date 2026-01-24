@@ -225,3 +225,169 @@ func IsPackageJSON(path string) bool {
 func IsTSConfig(path string) bool {
 	return strings.HasSuffix(path, "tsconfig.json") || strings.Contains(path, "tsconfig.")
 }
+
+// DependencyChange represents a change to a package dependency.
+type DependencyChange struct {
+	Name       string
+	OldVersion string
+	NewVersion string
+	Category   ChangeCategory
+	DepType    string // "dependencies", "devDependencies", "peerDependencies", etc.
+}
+
+// DetectDependencyChanges detects changes to package.json dependencies.
+// Returns specialized ChangeSignals for dependency changes.
+func DetectDependencyChanges(path string, before, after []byte) ([]*ChangeSignal, error) {
+	var beforeData, afterData map[string]interface{}
+
+	if err := json.Unmarshal(before, &beforeData); err != nil {
+		return nil, fmt.Errorf("parsing before JSON: %w", err)
+	}
+	if err := json.Unmarshal(after, &afterData); err != nil {
+		return nil, fmt.Errorf("parsing after JSON: %w", err)
+	}
+
+	var signals []*ChangeSignal
+
+	// Check all dependency types
+	depTypes := []string{"dependencies", "devDependencies", "peerDependencies", "optionalDependencies"}
+
+	for _, depType := range depTypes {
+		beforeDeps := getDependencyMap(beforeData, depType)
+		afterDeps := getDependencyMap(afterData, depType)
+
+		// Check for removed dependencies
+		for name, oldVersion := range beforeDeps {
+			if _, exists := afterDeps[name]; !exists {
+				signals = append(signals, &ChangeSignal{
+					Category: DependencyRemoved,
+					Evidence: ExtendedEvidence{
+						FileRanges:  []FileRange{{Path: path}},
+						Symbols:     []string{depType + "." + name},
+						BeforeValue: oldVersion,
+						OldName:     name,
+					},
+					Weight:     0.75,
+					Confidence: 1.0,
+					Tags:       []string{"config", "breaking"},
+				})
+			}
+		}
+
+		// Check for added or updated dependencies
+		for name, newVersion := range afterDeps {
+			oldVersion, existed := beforeDeps[name]
+			if !existed {
+				signals = append(signals, &ChangeSignal{
+					Category: DependencyAdded,
+					Evidence: ExtendedEvidence{
+						FileRanges: []FileRange{{Path: path}},
+						Symbols:    []string{depType + "." + name},
+						AfterValue: newVersion,
+						NewName:    name,
+					},
+					Weight:     0.75,
+					Confidence: 1.0,
+					Tags:       []string{"config"},
+				})
+			} else if oldVersion != newVersion {
+				signals = append(signals, &ChangeSignal{
+					Category: DependencyUpdated,
+					Evidence: ExtendedEvidence{
+						FileRanges:  []FileRange{{Path: path}},
+						Symbols:     []string{depType + "." + name},
+						BeforeValue: oldVersion,
+						AfterValue:  newVersion,
+						OldName:     name,
+						NewName:     name,
+					},
+					Weight:     0.7,
+					Confidence: 1.0,
+					Tags:       determineDependencyTags(oldVersion, newVersion),
+				})
+			}
+		}
+	}
+
+	return signals, nil
+}
+
+// getDependencyMap extracts dependencies from a package.json structure.
+func getDependencyMap(data map[string]interface{}, depType string) map[string]string {
+	deps := make(map[string]string)
+	if depObj, ok := data[depType].(map[string]interface{}); ok {
+		for name, version := range depObj {
+			if vStr, ok := version.(string); ok {
+				deps[name] = vStr
+			}
+		}
+	}
+	return deps
+}
+
+// determineDependencyTags determines tags for a dependency update based on version change.
+func determineDependencyTags(oldVersion, newVersion string) []string {
+	tags := []string{"config"}
+
+	// Try to detect if this is a major version bump (breaking change)
+	oldMajor := extractMajorVersion(oldVersion)
+	newMajor := extractMajorVersion(newVersion)
+
+	if oldMajor != "" && newMajor != "" && oldMajor != newMajor {
+		tags = append(tags, "breaking")
+	}
+
+	return tags
+}
+
+// extractMajorVersion extracts the major version from a semver string.
+func extractMajorVersion(version string) string {
+	// Strip common prefixes
+	version = strings.TrimLeft(version, "^~>=<")
+
+	// Find the first dot
+	for i, c := range version {
+		if c == '.' {
+			return version[:i]
+		}
+	}
+	return version
+}
+
+// MergeDependencySignals merges dependency-specific signals with regular JSON change signals.
+// This provides richer information for package.json files while maintaining backward compatibility.
+func MergeDependencySignals(depSignals []*ChangeSignal, jsonChanges []*ChangeType) []*ChangeSignal {
+	// Convert JSON changes to signals, excluding dependency-related ones
+	depPaths := make(map[string]bool)
+	for _, sig := range depSignals {
+		for _, sym := range sig.Evidence.Symbols {
+			depPaths[sym] = true
+		}
+	}
+
+	result := append([]*ChangeSignal{}, depSignals...)
+
+	for _, ct := range jsonChanges {
+		// Check if this change is already covered by a dependency signal
+		isCovered := false
+		for _, sym := range ct.Evidence.Symbols {
+			if depPaths[sym] {
+				isCovered = true
+				break
+			}
+			// Check if it's a sub-path of a dependency
+			for depPath := range depPaths {
+				if strings.HasPrefix(sym, depPath+".") || strings.HasPrefix(depPath, sym+".") {
+					isCovered = true
+					break
+				}
+			}
+		}
+
+		if !isCovered {
+			result = append(result, NewChangeSignal(ct))
+		}
+	}
+
+	return result
+}
