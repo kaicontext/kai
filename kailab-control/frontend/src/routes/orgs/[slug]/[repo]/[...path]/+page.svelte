@@ -354,7 +354,8 @@
 		}
 
 		// Handle changeset selection from URL
-		if (tab === 'changes' && changesetId && refs.length > 0) {
+		// Wait for refs and payloads to be loaded before selecting changeset
+		if (tab === 'changes' && changesetId && refs.length > 0 && !changesetsLoading) {
 			const csRef = refs.find(r => r.name === `cs.${changesetId}` || r.name.startsWith(`cs.${changesetId}`));
 			if (csRef && selectedChangeset?.name !== csRef.name) {
 				selectedChangeset = csRef;
@@ -535,10 +536,11 @@
 			selectedSnapshot = snapshot;
 		}
 
-		// Load repo first (needed for path validation), then parallelize the rest
+		// Load repo first (needed for path validation), then refs
+		// loadChangesetPayloads needs refs, so must run after loadRefs
 		await loadRepo();
+		await loadRefs();
 		await Promise.all([
-			loadRefs(),
 			loadChangesetPayloads(),
 			loadReviews()
 		]);
