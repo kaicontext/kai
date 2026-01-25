@@ -32,6 +32,8 @@ type Config struct {
 	SSHAllowUsers []string
 	// SSHAllowRepos is a list of repos (tenant/repo) allowed for SSH git operations.
 	SSHAllowRepos []string
+	// SSHAllowKeys is a list of SSH key fingerprints allowed for git operations.
+	SSHAllowKeys []string
 	// SSHAudit enables audit logging for SSH git operations.
 	SSHAudit bool
 	// GitMirrorEnabled toggles Kai->Git mirroring for refs.
@@ -72,6 +74,7 @@ func FromEnv() *Config {
 		IdleTTL:                 getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
 		SSHAllowUsers:           getEnvList("KAILAB_SSH_ALLOW_USERS"),
 		SSHAllowRepos:           getEnvList("KAILAB_SSH_ALLOW_REPOS"),
+		SSHAllowKeys:            getEnvList("KAILAB_SSH_ALLOW_KEYS"),
 		SSHAudit:                getEnvBool("KAILAB_SSH_AUDIT", false),
 		GitMirrorEnabled:        getEnvBool("KAILAB_GIT_MIRROR_ENABLED", false),
 		GitMirrorDir:            getEnv("KAILAB_GIT_MIRROR_DIR", ""),

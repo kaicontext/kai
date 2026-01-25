@@ -3151,6 +3151,7 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_MAX_PACK_SIZE` | - | `256MB` | Maximum pack upload size |
 | `KAILAB_SSH_ALLOW_USERS` | - | - | Comma/semicolon-separated SSH usernames allowed |
 | `KAILAB_SSH_ALLOW_REPOS` | - | - | Comma/semicolon-separated repo allowlist (tenant/repo) |
+| `KAILAB_SSH_ALLOW_KEYS` | - | - | Comma/semicolon-separated SSH key fingerprints allowed |
 | `KAILAB_SSH_AUDIT` | - | `false` | Enable SSH git audit logging |
 | `KAILAB_SSH_SIGN_KEYS` | - | - | Comma/semicolon-separated authorized_keys files used to verify SSH changeset signatures |
 | `KAILAB_GIT_MIRROR_ENABLED` | - | `false` | Enable Kai→Git mirror sync (dual-write) |
@@ -3173,6 +3174,7 @@ Enable SSH for git operations and optionally enforce allowlists:
 KAILAB_SSH_LISTEN=:2222 \
 KAILAB_SSH_ALLOW_USERS=alice,bob \
 KAILAB_SSH_ALLOW_REPOS=acme/webapp,acme/api \
+KAILAB_SSH_ALLOW_KEYS=SHA256:... \
 KAILAB_SSH_AUDIT=true \
 ./kailabd --data ./data
 ```

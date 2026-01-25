@@ -51,6 +51,9 @@ func main() {
 	if len(cfg.SSHAllowRepos) > 0 {
 		log.Printf("  ssh_repos:    %v", cfg.SSHAllowRepos)
 	}
+	if len(cfg.SSHAllowKeys) > 0 {
+		log.Printf("  ssh_keys:     %v", cfg.SSHAllowKeys)
+	}
 	log.Printf("  ssh_audit:    %t", cfg.SSHAudit)
 	if cfg.GitMirrorDir == "" {
 		cfg.GitMirrorDir = filepath.Join(cfg.DataDir, "git-mirror")
@@ -153,8 +156,8 @@ func main() {
 			ObjectStore:         objectStore,
 		})
 		var authorizer sshserver.SessionAuthorizer
-		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {
-			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos)
+		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 || len(cfg.SSHAllowKeys) > 0 {
+			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos, cfg.SSHAllowKeys)
 		}
 		var auditor sshserver.SessionAuditor
 		if cfg.SSHAudit {
