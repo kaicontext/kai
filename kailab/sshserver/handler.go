@@ -113,7 +113,7 @@ func handleUploadPack(db *sql.DB, r io.Reader, w io.Writer) error {
 		return err
 	}
 
-	objects, err := buildPackObjects(context.Background(), newDBRefAdapter(db), req.Wants)
+	objects, err := buildPackObjects(context.Background(), NewDBRefAdapter(db), req.Wants)
 	if err != nil {
 		_ = writeGitError(w, err.Error())
 		_ = writeFlush(w)
@@ -174,7 +174,8 @@ func writeAcknowledgements(w io.Writer, req *uploadPackRequest) error {
 }
 
 func advertiseRefs(db *sql.DB, w io.Writer) error {
-	refs, err := store.ListRefs(db, "")
+	refAdapter := NewDBRefAdapter(db)
+	refs, headRef, err := refAdapter.ListRefs(context.Background())
 	if err != nil {
 		return err
 	}
@@ -182,28 +183,10 @@ func advertiseRefs(db *sql.DB, w io.Writer) error {
 		return writeFlush(w)
 	}
 
-	_, refToOID, err := buildRefCommits(db)
-	if err != nil {
-		return err
-	}
-
-	var mapped []*store.Ref
-	for _, ref := range refs {
-		mapped = append(mapped, &store.Ref{
-			Name:   mapRefName(ref.Name),
-			Target: ref.Target,
-		})
-	}
-
-	headRef := selectHeadRef(mapped)
 	caps := buildCapabilities(headRef)
 
-	for i, ref := range mapped {
-		oid, ok := refToOID[ref.Name]
-		if !ok {
-			continue
-		}
-		line := fmt.Sprintf("%s %s", oid, ref.Name)
+	for i, ref := range refs {
+		line := fmt.Sprintf("%s %s", ref.OID, ref.Name)
 		if i == 0 && caps != "" {
 			line += "\x00" + caps
 		}

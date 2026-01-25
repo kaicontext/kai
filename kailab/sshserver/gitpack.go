@@ -20,18 +20,6 @@ import (
 
 const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-type dbRefAdapter struct {
-	db *sql.DB
-}
-
-func newDBRefAdapter(db *sql.DB) RefAdapter {
-	return &dbRefAdapter{db: db}
-}
-
-func (a *dbRefAdapter) BuildRefCommits(ctx context.Context) (map[string]RefCommitInfo, map[string]string, error) {
-	return buildRefCommits(a.db)
-}
-
 func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string) ([]GitObject, error) {
 	refCommits, _, err := refAdapter.BuildRefCommits(ctx)
 	if err != nil {

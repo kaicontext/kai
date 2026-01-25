@@ -8,6 +8,7 @@ import (
 // RefAdapter provides access to ref metadata and resolved git objects.
 type RefAdapter interface {
 	BuildRefCommits(ctx context.Context) (map[string]RefCommitInfo, map[string]string, error)
+	ListRefs(ctx context.Context) ([]GitRef, string, error)
 }
 
 // SnapshotAdapter converts Kai snapshots/changesets into git objects.
