@@ -3192,6 +3192,12 @@ KAILAB_GIT_MIRROR_DIR=./data/git-mirror \
 ./kailabd --data ./data
 ```
 
+Backfill existing repos into mirrors:
+```bash
+cd kailab
+go run ./cmd/kailab-mirror --data ./data --tenant acme --repo webapp
+```
+
 ### Signed ChangeSets (SSH)
 
 Sign changesets from the CLI using an SSH private key, and have the server verify signatures.

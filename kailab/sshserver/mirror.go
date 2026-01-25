@@ -108,6 +108,22 @@ func (m *GitMirror) SyncRefs(ctx context.Context, h *repo.Handle, refNames []str
 	return nil
 }
 
+// SyncAllRefs mirrors every ref in the repo.
+func (m *GitMirror) SyncAllRefs(ctx context.Context, h *repo.Handle) error {
+	if m == nil || h == nil {
+		return nil
+	}
+	refs, err := store.ListRefs(h.DB, "")
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	return m.SyncRefs(ctx, h, names)
+}
+
 func repoAllowed(allow []string, tenant, repo string) bool {
 	if len(allow) == 0 {
 		return true

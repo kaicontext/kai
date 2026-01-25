@@ -118,7 +118,14 @@ func main() {
 
 	// Start SSH server if enabled
 	if *sshListen != "" {
-		handler := sshserver.NewGitHandler(registry, log.Default())
+		mirror := sshserver.NewGitMirror(sshserver.MirrorConfig{
+			Enabled:    cfg.GitMirrorEnabled,
+			BaseDir:    cfg.GitMirrorDir,
+			AllowRepos: cfg.GitMirrorAllowRepos,
+			Rollback:   cfg.GitMirrorRollback,
+			Logger:     log.Default(),
+		})
+		handler := sshserver.NewGitHandler(registry, log.Default(), mirror)
 		var authorizer sshserver.SessionAuthorizer
 		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {
 			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos)

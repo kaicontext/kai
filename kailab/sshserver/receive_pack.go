@@ -24,23 +24,26 @@ type receivePackRequest struct {
 	Pack    []byte
 }
 
-func handleReceivePack(db *sql.DB, r io.Reader, w io.Writer) error {
+func handleReceivePack(db *sql.DB, r io.Reader, w io.Writer) ([]string, error) {
 	reader := bufio.NewReader(r)
 	req, err := readReceivePackRequest(reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if db == nil {
-		return fmt.Errorf("repository not available")
+		return nil, fmt.Errorf("repository not available")
 	}
 
-	csDigest, err := createChangeSetFromPack(db, req)
+	csDigest, updatedRefs, err := createChangeSetFromPack(db, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return writeReceivePackStatus(w, req, csDigest)
+	if err := writeReceivePackStatus(w, req, csDigest); err != nil {
+		return nil, err
+	}
+	return updatedRefs, nil
 }
 
 func readReceivePackRequest(r *bufio.Reader) (*receivePackRequest, error) {
@@ -80,17 +83,17 @@ func readReceivePackRequest(r *bufio.Reader) (*receivePackRequest, error) {
 	return req, nil
 }
 
-func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, error) {
+func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, []string, error) {
 	baseDigest, err := resolveBaseSnapshot(db)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	packDigestHex := ""
 	if len(req.Pack) > 0 {
 		packDigest, err := storeRawObject(db, "GitPack", req.Pack)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		packDigestHex = hex.EncodeToString(packDigest)
 	}
@@ -105,19 +108,22 @@ func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, error
 	}
 	csDigest, err := storeNodeObject(db, "ChangeSet", payload)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
 
 	if err := store.ForceSetRef(db, tx, "cs.latest", csDigest, "ssh", "git-receive-pack"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return csDigest, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return csDigest, []string{"cs.latest"}, nil
 }
 
 func resolveBaseSnapshot(db *sql.DB) ([]byte, error) {

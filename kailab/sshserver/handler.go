@@ -17,14 +17,15 @@ import (
 type GitHandler struct {
 	registry *repo.Registry
 	logger   *log.Logger
+	mirror   *GitMirror
 }
 
 // NewGitHandler creates a handler wired with the repo registry.
-func NewGitHandler(registry *repo.Registry, logger *log.Logger) *GitHandler {
+func NewGitHandler(registry *repo.Registry, logger *log.Logger, mirror *GitMirror) *GitHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &GitHandler{registry: registry, logger: logger}
+	return &GitHandler{registry: registry, logger: logger, mirror: mirror}
 }
 
 // UploadPack handles git-upload-pack (fetch/clone).
@@ -78,10 +79,16 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 	h.registry.Acquire(handle)
 	defer h.registry.Release(handle)
 
-	if err := handleReceivePack(handle.DB, io.Stdin, io.Stdout); err != nil {
+	updatedRefs, err := handleReceivePack(handle.DB, io.Stdin, io.Stdout)
+	if err != nil {
 		_ = writeGitError(io.Stdout, err.Error())
 		_ = writeFlush(io.Stdout)
 		return err
+	}
+	if h.mirror != nil && len(updatedRefs) > 0 {
+		if err := h.mirror.SyncRefs(context.Background(), handle, updatedRefs); err != nil {
+			h.logger.Printf("ssh mirror sync error: %v", err)
+		}
 	}
 	return nil
 }

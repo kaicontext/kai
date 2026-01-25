@@ -41,7 +41,7 @@ func TestSSHUploadPackClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv, err := StartWithListener(listener, NewGitHandler(reg, nil), nil)
+	srv, err := StartWithListener(listener, NewGitHandler(reg, nil, nil), nil)
 	if err != nil {
 		t.Fatalf("start ssh server: %v", err)
 	}
