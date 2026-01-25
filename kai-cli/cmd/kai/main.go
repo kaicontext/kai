@@ -812,6 +812,48 @@ Examples:
 	RunE: runRebase,
 }
 
+var bisectCmd = &cobra.Command{
+	Use:   "bisect",
+	Short: "Find a regression via binary search over snapshots",
+}
+
+var bisectStartCmd = &cobra.Command{
+	Use:   "start <good-snapshot> <bad-snapshot>",
+	Short: "Start a bisect session",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runBisectStart,
+}
+
+var bisectGoodCmd = &cobra.Command{
+	Use:   "good",
+	Short: "Mark current snapshot as good",
+	RunE:  runBisectGood,
+}
+
+var bisectBadCmd = &cobra.Command{
+	Use:   "bad",
+	Short: "Mark current snapshot as bad",
+	RunE:  runBisectBad,
+}
+
+var bisectSkipCmd = &cobra.Command{
+	Use:   "skip",
+	Short: "Skip current snapshot",
+	RunE:  runBisectSkip,
+}
+
+var bisectNextCmd = &cobra.Command{
+	Use:   "next",
+	Short: "Show the current snapshot to test",
+	RunE:  runBisectNext,
+}
+
+var bisectResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Clear bisect state",
+	RunE:  runBisectReset,
+}
+
 // Reference commands
 var refCmd = &cobra.Command{
 	Use:   "ref",
@@ -1583,6 +1625,12 @@ func init() {
 	tagCmd.AddCommand(tagListCmd)
 	tagCmd.AddCommand(tagCreateCmd)
 	tagCmd.AddCommand(tagDeleteCmd)
+	bisectCmd.AddCommand(bisectStartCmd)
+	bisectCmd.AddCommand(bisectGoodCmd)
+	bisectCmd.AddCommand(bisectBadCmd)
+	bisectCmd.AddCommand(bisectSkipCmd)
+	bisectCmd.AddCommand(bisectNextCmd)
+	bisectCmd.AddCommand(bisectResetCmd)
 
 	// Add modules subcommands
 	modulesCmd.AddCommand(modulesInitCmd)
@@ -1759,6 +1807,7 @@ func init() {
 	tagCmd.GroupID = groupAdvanced
 	cherryPickCmd.GroupID = groupAdvanced
 	rebaseCmd.GroupID = groupAdvanced
+	bisectCmd.GroupID = groupAdvanced
 	modulesCmd.GroupID = groupAdvanced
 	pickCmd.GroupID = groupAdvanced
 	pruneCmd.GroupID = groupAdvanced
@@ -1774,6 +1823,7 @@ func init() {
 	rootCmd.AddCommand(tagCmd)
 	rootCmd.AddCommand(cherryPickCmd)
 	rootCmd.AddCommand(rebaseCmd)
+	rootCmd.AddCommand(bisectCmd)
 	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
@@ -8736,6 +8786,214 @@ func runRebase(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Rebase complete. New snapshot: %s\n", util.BytesToHex(result.ResultSnapshot)[:12])
 	return nil
+}
+
+type bisectRef struct {
+	Name      string `json:"name"`
+	TargetHex string `json:"target"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+type bisectState struct {
+	Refs    []bisectRef `json:"refs"`
+	Low     int         `json:"low"`
+	High    int         `json:"high"`
+	Current int         `json:"current"`
+}
+
+func runBisectStart(cmd *cobra.Command, args []string) error {
+	goodSel := args[0]
+	badSel := args[1]
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	goodID, err := resolveSnapshotID(db, goodSel)
+	if err != nil {
+		return fmt.Errorf("resolving good snapshot: %w", err)
+	}
+	badID, err := resolveSnapshotID(db, badSel)
+	if err != nil {
+		return fmt.Errorf("resolving bad snapshot: %w", err)
+	}
+
+	refs, err := listSnapshotRefs(db)
+	if err != nil {
+		return err
+	}
+	if len(refs) < 2 {
+		return fmt.Errorf("need at least two snapshots to bisect")
+	}
+
+	goodIdx := indexOfRef(refs, util.BytesToHex(goodID))
+	badIdx := indexOfRef(refs, util.BytesToHex(badID))
+	if goodIdx < 0 || badIdx < 0 {
+		return fmt.Errorf("good/bad snapshot not found in ref list (use snap.* refs)")
+	}
+	low := goodIdx
+	high := badIdx
+	if low > high {
+		low, high = high, low
+	}
+	if high-low < 1 {
+		return fmt.Errorf("good and bad snapshots are identical")
+	}
+	current := low + (high-low)/2
+
+	state := bisectState{
+		Refs:    refs,
+		Low:     low,
+		High:    high,
+		Current: current,
+	}
+	if err := saveBisectState(state); err != nil {
+		return err
+	}
+	return printBisectCurrent(state)
+}
+
+func runBisectGood(cmd *cobra.Command, args []string) error {
+	state, err := loadBisectState()
+	if err != nil {
+		return err
+	}
+	if state.Current <= state.Low {
+		return fmt.Errorf("already at or below good boundary")
+	}
+	state.Low = state.Current
+	return advanceBisect(state)
+}
+
+func runBisectBad(cmd *cobra.Command, args []string) error {
+	state, err := loadBisectState()
+	if err != nil {
+		return err
+	}
+	if state.Current >= state.High {
+		return fmt.Errorf("already at or above bad boundary")
+	}
+	state.High = state.Current
+	return advanceBisect(state)
+}
+
+func runBisectSkip(cmd *cobra.Command, args []string) error {
+	state, err := loadBisectState()
+	if err != nil {
+		return err
+	}
+	if state.Current < state.High {
+		state.Low = state.Current + 1
+	} else if state.Current > state.Low {
+		state.High = state.Current - 1
+	}
+	return advanceBisect(state)
+}
+
+func runBisectNext(cmd *cobra.Command, args []string) error {
+	state, err := loadBisectState()
+	if err != nil {
+		return err
+	}
+	return printBisectCurrent(state)
+}
+
+func runBisectReset(cmd *cobra.Command, args []string) error {
+	if err := os.Remove(bisectStatePath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	fmt.Println("Bisect state cleared.")
+	return nil
+}
+
+func advanceBisect(state bisectState) error {
+	if state.High-state.Low <= 1 {
+		bad := state.Refs[state.High]
+		fmt.Printf("First bad snapshot: %s (%s)\n", bad.Name, bad.TargetHex[:12])
+		return saveBisectState(state)
+	}
+	state.Current = state.Low + (state.High-state.Low)/2
+	if err := saveBisectState(state); err != nil {
+		return err
+	}
+	return printBisectCurrent(state)
+}
+
+func printBisectCurrent(state bisectState) error {
+	if state.Current < 0 || state.Current >= len(state.Refs) {
+		return fmt.Errorf("bisect state out of range")
+	}
+	ref := state.Refs[state.Current]
+	fmt.Printf("Test snapshot: %s (%s)\n", ref.Name, ref.TargetHex[:12])
+	return nil
+}
+
+func listSnapshotRefs(db *graph.DB) ([]bisectRef, error) {
+	refMgr := ref.NewRefManager(db)
+	kind := ref.KindSnapshot
+	refs, err := refMgr.List(&kind)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var out []bisectRef
+	for _, r := range refs {
+		if !strings.HasPrefix(r.Name, "snap.") {
+			continue
+		}
+		hexID := util.BytesToHex(r.TargetID)
+		if seen[hexID] {
+			continue
+		}
+		seen[hexID] = true
+		out = append(out, bisectRef{
+			Name:      r.Name,
+			TargetHex: hexID,
+			UpdatedAt: r.UpdatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt < out[j].UpdatedAt
+	})
+	return out, nil
+}
+
+func indexOfRef(refs []bisectRef, targetHex string) int {
+	for i, r := range refs {
+		if r.TargetHex == targetHex {
+			return i
+		}
+	}
+	return -1
+}
+
+func bisectStatePath() string {
+	return filepath.Join(kaiDir, "bisect.json")
+}
+
+func loadBisectState() (bisectState, error) {
+	var state bisectState
+	data, err := os.ReadFile(bisectStatePath())
+	if err != nil {
+		return state, fmt.Errorf("read bisect state: %w", err)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, fmt.Errorf("parse bisect state: %w", err)
+	}
+	return state, nil
+}
+
+func saveBisectState(state bisectState) error {
+	if err := os.MkdirAll(kaiDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(bisectStatePath(), data, 0644)
 }
 
 // resolveID resolves a user-provided ID string to a full ID bytes.
