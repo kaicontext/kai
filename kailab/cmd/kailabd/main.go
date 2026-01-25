@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -51,6 +52,16 @@ func main() {
 		log.Printf("  ssh_repos:    %v", cfg.SSHAllowRepos)
 	}
 	log.Printf("  ssh_audit:    %t", cfg.SSHAudit)
+	if cfg.GitMirrorDir == "" {
+		cfg.GitMirrorDir = filepath.Join(cfg.DataDir, "git-mirror")
+	}
+	if cfg.GitMirrorEnabled {
+		log.Printf("  git_mirror:   %s", cfg.GitMirrorDir)
+		if len(cfg.GitMirrorAllowRepos) > 0 {
+			log.Printf("  git_mirror_repos: %v", cfg.GitMirrorAllowRepos)
+		}
+		log.Printf("  git_mirror_rollback: %t", cfg.GitMirrorRollback)
+	}
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {

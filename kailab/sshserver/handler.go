@@ -214,7 +214,8 @@ func advertiseRefs(db *sql.DB, w io.Writer) error {
 	return writeFlush(w)
 }
 
-func mapRefName(name string) string {
+// MapRefName maps a Kai ref name to its Git ref name.
+func MapRefName(name string) string {
 	switch {
 	case strings.HasPrefix(name, "snap."):
 		return "refs/heads/" + strings.TrimPrefix(name, "snap.")

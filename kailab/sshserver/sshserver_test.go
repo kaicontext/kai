@@ -96,16 +96,16 @@ func TestWriteGitError(t *testing.T) {
 }
 
 func TestMapRefName(t *testing.T) {
-	if got := mapRefName("snap.main"); got != "refs/heads/main" {
+	if got := MapRefName("snap.main"); got != "refs/heads/main" {
 		t.Fatalf("unexpected snap mapping: %s", got)
 	}
-	if got := mapRefName("cs.latest"); got != "refs/kai/cs/latest" {
+	if got := MapRefName("cs.latest"); got != "refs/kai/cs/latest" {
 		t.Fatalf("unexpected cs mapping: %s", got)
 	}
-	if got := mapRefName("tag.v1.0.0"); got != "refs/tags/v1.0.0" {
+	if got := MapRefName("tag.v1.0.0"); got != "refs/tags/v1.0.0" {
 		t.Fatalf("unexpected tag mapping: %s", got)
 	}
-	if got := mapRefName("other.ref"); got != "refs/kai/other.ref" {
+	if got := MapRefName("other.ref"); got != "refs/kai/other.ref" {
 		t.Fatalf("unexpected default mapping: %s", got)
 	}
 }

@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -20,18 +21,36 @@ import (
 	"kailab/pack"
 	"kailab/proto"
 	"kailab/repo"
+	"kailab/sshserver"
 	"kailab/store"
 )
 
 // Handler wraps the registry and config for HTTP handlers.
 type Handler struct {
-	reg *repo.Registry
-	cfg *config.Config
+	reg    *repo.Registry
+	cfg    *config.Config
+	mirror *sshserver.GitMirror
+}
+
+func (h *Handler) mirrorRefs(ctx context.Context, rh *repo.Handle, refs []string) {
+	if h.mirror == nil || rh == nil || len(refs) == 0 {
+		return
+	}
+	if err := h.mirror.SyncRefs(ctx, rh, refs); err != nil {
+		log.Printf("git mirror sync failed for %s/%s: %v", rh.Tenant, rh.Name, err)
+	}
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(reg *repo.Registry, cfg *config.Config) *Handler {
-	return &Handler{reg: reg, cfg: cfg}
+	mirror := sshserver.NewGitMirror(sshserver.MirrorConfig{
+		Enabled:    cfg.GitMirrorEnabled,
+		BaseDir:    cfg.GitMirrorDir,
+		AllowRepos: cfg.GitMirrorAllowRepos,
+		Rollback:   cfg.GitMirrorRollback,
+		Logger:     log.Default(),
+	})
+	return &Handler{reg: reg, cfg: cfg, mirror: mirror}
 }
 
 // NewRouter creates the HTTP router with all routes registered.
@@ -416,6 +435,8 @@ func (h *Handler) UpdateRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.mirrorRefs(r.Context(), rh, []string{name})
+
 	ref, err := store.GetRef(rh.DB, name)
 	resp := proto.RefUpdateResponse{
 		OK:     true,
@@ -506,6 +527,14 @@ func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit", err)
 		return
 	}
+
+	var syncedRefs []string
+	for _, result := range results {
+		if result.OK {
+			syncedRefs = append(syncedRefs, result.Name)
+		}
+	}
+	h.mirrorRefs(r.Context(), rh, syncedRefs)
 
 	writeJSON(w, http.StatusOK, proto.BatchRefUpdateResponse{
 		PushID:  pushID,

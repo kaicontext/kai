@@ -107,7 +107,7 @@ func (e *Enricher) enrichSnapshot(snapshotID []byte) error {
 	}
 
 	// Parse snapshot payload to get file list
-	payload, err := parseObjectPayload(content)
+	payload, err := ParseObjectPayload(content)
 	if err != nil {
 		return err
 	}
@@ -134,12 +134,12 @@ func (e *Enricher) enrichChangeSet(changeSetID []byte) error {
 		return nil
 	}
 
-	payload, err := parseObjectPayload(content)
+	payload, err := ParseObjectPayload(content)
 	if err != nil {
 		return err
 	}
 
-	if ok, err := verifyChangeSetSignature(payload); err != nil {
+	if ok, err := VerifyChangeSetSignature(payload); err != nil {
 		log.Printf("signature verification error for changeset %x: %v", changeSetID[:8], err)
 	} else if ok {
 		log.Printf("changeset %x signature verified", changeSetID[:8])

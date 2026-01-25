@@ -3153,6 +3153,10 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_SSH_ALLOW_REPOS` | - | - | Comma/semicolon-separated repo allowlist (tenant/repo) |
 | `KAILAB_SSH_AUDIT` | - | `false` | Enable SSH git audit logging |
 | `KAILAB_SSH_SIGN_KEYS` | - | - | Comma/semicolon-separated authorized_keys files used to verify SSH changeset signatures |
+| `KAILAB_GIT_MIRROR_ENABLED` | - | `false` | Enable Kai→Git mirror sync (dual-write) |
+| `KAILAB_GIT_MIRROR_DIR` | - | `<data>/git-mirror` | Base directory for mirror repos |
+| `KAILAB_GIT_MIRROR_ALLOW_REPOS` | - | - | Comma/semicolon-separated allowlist of repos to mirror |
+| `KAILAB_GIT_MIRROR_ROLLBACK` | - | `false` | Disable mirroring without changing other settings |
 
 ### SSH Git Access Control
 
@@ -3169,6 +3173,24 @@ KAILAB_SSH_AUDIT=true \
 Notes:
 - If `KAILAB_SSH_ALLOW_USERS` / `KAILAB_SSH_ALLOW_REPOS` are unset, access is allowed by default.
 - Repos are matched as `tenant/repo` (e.g., `acme/webapp`).
+
+### Dual-Write Git Mirror (Phase 1)
+
+Mirror Kai refs into a bare Git repo for selected pilot repositories. This keeps Git refs/tags updated alongside Kai.
+
+Pilot rollout playbook:
+1. Enable mirroring in staging with a tight allowlist.
+2. Use shadow parity checks to validate diff parity and drift detection.
+3. Expand the allowlist gradually in production.
+4. Keep `KAILAB_GIT_MIRROR_ROLLBACK=true` ready for a fast disable.
+
+Example:
+```bash
+KAILAB_GIT_MIRROR_ENABLED=true \
+KAILAB_GIT_MIRROR_ALLOW_REPOS=acme/webapp,acme/api \
+KAILAB_GIT_MIRROR_DIR=./data/git-mirror \
+./kailabd --data ./data
+```
 
 ### Signed ChangeSets (SSH)
 

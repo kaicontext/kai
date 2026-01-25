@@ -34,23 +34,35 @@ type Config struct {
 	SSHAllowRepos []string
 	// SSHAudit enables audit logging for SSH git operations.
 	SSHAudit bool
+	// GitMirrorEnabled toggles Kai->Git mirroring for refs.
+	GitMirrorEnabled bool
+	// GitMirrorDir is the base directory for Git mirror repos.
+	GitMirrorDir string
+	// GitMirrorAllowRepos is an allowlist of tenant/repo entries to mirror.
+	GitMirrorAllowRepos []string
+	// GitMirrorRollback disables mirroring without changing config.
+	GitMirrorRollback bool
 }
 
 // FromEnv creates a Config from environment variables.
 func FromEnv() *Config {
 	cfg := &Config{
-		Listen:        getEnv("KAILAB_LISTEN", ":7447"),
-		DataDir:       getEnv("KAILAB_DATA", "./data"),
-		Tenant:        getEnv("KAILAB_TENANT", "default"),
-		Repo:          getEnv("KAILAB_REPO", "main"),
-		MaxPackSize:   getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
-		Version:       getEnv("KAILAB_VERSION", "0.1.0"),
-		Debug:         getEnvBool("KAILAB_DEBUG", false),
-		MaxOpenRepos:  getEnvInt("KAILAB_MAX_OPEN", 256),
-		IdleTTL:       getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
-		SSHAllowUsers: getEnvList("KAILAB_SSH_ALLOW_USERS"),
-		SSHAllowRepos: getEnvList("KAILAB_SSH_ALLOW_REPOS"),
-		SSHAudit:      getEnvBool("KAILAB_SSH_AUDIT", false),
+		Listen:              getEnv("KAILAB_LISTEN", ":7447"),
+		DataDir:             getEnv("KAILAB_DATA", "./data"),
+		Tenant:              getEnv("KAILAB_TENANT", "default"),
+		Repo:                getEnv("KAILAB_REPO", "main"),
+		MaxPackSize:         getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
+		Version:             getEnv("KAILAB_VERSION", "0.1.0"),
+		Debug:               getEnvBool("KAILAB_DEBUG", false),
+		MaxOpenRepos:        getEnvInt("KAILAB_MAX_OPEN", 256),
+		IdleTTL:             getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
+		SSHAllowUsers:       getEnvList("KAILAB_SSH_ALLOW_USERS"),
+		SSHAllowRepos:       getEnvList("KAILAB_SSH_ALLOW_REPOS"),
+		SSHAudit:            getEnvBool("KAILAB_SSH_AUDIT", false),
+		GitMirrorEnabled:    getEnvBool("KAILAB_GIT_MIRROR_ENABLED", false),
+		GitMirrorDir:        getEnv("KAILAB_GIT_MIRROR_DIR", ""),
+		GitMirrorAllowRepos: getEnvList("KAILAB_GIT_MIRROR_ALLOW_REPOS"),
+		GitMirrorRollback:   getEnvBool("KAILAB_GIT_MIRROR_ROLLBACK", false),
 	}
 	return cfg
 }

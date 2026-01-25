@@ -12,7 +12,8 @@ import (
 	"kai-core/cas"
 )
 
-func verifyChangeSetSignature(payload map[string]interface{}) (bool, error) {
+// VerifyChangeSetSignature checks if a ChangeSet signature is valid.
+func VerifyChangeSetSignature(payload map[string]interface{}) (bool, error) {
 	sigBlob, _ := payload["signature"].(string)
 	sigFormat, _ := payload["sigFormat"].(string)
 	signer, _ := payload["signer"].(string)
@@ -55,7 +56,8 @@ func verifyChangeSetSignature(payload map[string]interface{}) (bool, error) {
 	return false, nil
 }
 
-func parseObjectPayload(content []byte) (map[string]interface{}, error) {
+// ParseObjectPayload parses a node object payload.
+func ParseObjectPayload(content []byte) (map[string]interface{}, error) {
 	payload := content
 	if idx := bytes.IndexByte(content, '\n'); idx >= 0 {
 		payload = content[idx+1:]

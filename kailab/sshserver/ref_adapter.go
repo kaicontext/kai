@@ -39,7 +39,7 @@ func (a *DBRefAdapter) ListRefs(ctx context.Context) ([]GitRef, string, error) {
 	mapped := make([]*store.Ref, 0, len(refs))
 	gitRefs := make([]GitRef, 0, len(refs))
 	for _, ref := range refs {
-		name := mapRefName(ref.Name)
+		name := MapRefName(ref.Name)
 		oid, ok := refToOID[name]
 		if !ok {
 			continue

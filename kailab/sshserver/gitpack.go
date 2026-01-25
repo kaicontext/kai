@@ -210,7 +210,7 @@ func resolveSnapshotDigest(db *sql.DB, target []byte) ([]byte, error) {
 }
 
 func buildRef(db *sql.DB, ref *store.Ref, cache map[string]snapshotObjects) (refBuild, error) {
-	refName := mapRefName(ref.Name)
+	refName := MapRefName(ref.Name)
 	targetHex := hex.EncodeToString(ref.Target)
 
 	snapshotDigest, err := resolveSnapshotDigest(db, ref.Target)
