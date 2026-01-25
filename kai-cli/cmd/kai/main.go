@@ -800,6 +800,18 @@ Examples:
 	RunE: runCherryPick,
 }
 
+var rebaseCmd = &cobra.Command{
+	Use:   "rebase <target-snapshot> <changeset> [changeset...]",
+	Short: "Reapply changesets onto a new base snapshot",
+	Long: `Reapply one or more changesets onto a target snapshot in order.
+
+Examples:
+  kai rebase snap.main cs.a1b2 cs.c3d4
+  kai rebase @snap:last @cs:prev @cs:last`,
+	Args: cobra.MinimumNArgs(2),
+	RunE: runRebase,
+}
+
 // Reference commands
 var refCmd = &cobra.Command{
 	Use:   "ref",
@@ -1746,6 +1758,7 @@ func init() {
 	refCmd.GroupID = groupAdvanced
 	tagCmd.GroupID = groupAdvanced
 	cherryPickCmd.GroupID = groupAdvanced
+	rebaseCmd.GroupID = groupAdvanced
 	modulesCmd.GroupID = groupAdvanced
 	pickCmd.GroupID = groupAdvanced
 	pruneCmd.GroupID = groupAdvanced
@@ -1760,6 +1773,7 @@ func init() {
 	rootCmd.AddCommand(refCmd)
 	rootCmd.AddCommand(tagCmd)
 	rootCmd.AddCommand(cherryPickCmd)
+	rootCmd.AddCommand(rebaseCmd)
 	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
@@ -8684,6 +8698,43 @@ func runCherryPick(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Cherry-pick created changeset %s\n", util.BytesToHex(result.ResultChangeSet)[:12])
 	fmt.Printf("New snapshot: %s\n", util.BytesToHex(result.ResultSnapshot)[:12])
+	return nil
+}
+
+func runRebase(cmd *cobra.Command, args []string) error {
+	targetSelector := args[0]
+	changeSetSelectors := args[1:]
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	targetID, err := resolveSnapshotID(db, targetSelector)
+	if err != nil {
+		return fmt.Errorf("resolving target snapshot: %w", err)
+	}
+
+	changeSetIDs, err := workspace.ResolveChangesetChain(db, changeSetSelectors)
+	if err != nil {
+		return fmt.Errorf("resolving changesets: %w", err)
+	}
+
+	mgr := workspace.NewManager(db)
+	result, err := mgr.Rebase(changeSetIDs, targetID)
+	if err != nil {
+		return err
+	}
+	if len(result.Conflicts) > 0 {
+		fmt.Printf("Conflicts detected after %d changesets:\n", len(result.Applied))
+		for _, c := range result.Conflicts {
+			fmt.Printf("  %s: %s\n", c.Path, c.Description)
+		}
+		return fmt.Errorf("resolve conflicts before continuing")
+	}
+
+	fmt.Printf("Rebase complete. New snapshot: %s\n", util.BytesToHex(result.ResultSnapshot)[:12])
 	return nil
 }
 
