@@ -69,10 +69,21 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 		return err
 	}
 
-	// TODO: implement receive-pack.
-	_ = writeGitError(io.Stdout, "git-receive-pack not implemented")
-	_ = writeFlush(io.Stdout)
-	return fmt.Errorf("receive-pack not implemented for %s/%s", tenant, name)
+	handle, err := h.registry.Get(context.Background(), tenant, name)
+	if err != nil {
+		_ = writeGitError(io.Stdout, "repo lookup failed")
+		_ = writeFlush(io.Stdout)
+		return err
+	}
+	h.registry.Acquire(handle)
+	defer h.registry.Release(handle)
+
+	if err := handleReceivePack(handle.DB, io.Stdin, io.Stdout); err != nil {
+		_ = writeGitError(io.Stdout, err.Error())
+		_ = writeFlush(io.Stdout)
+		return err
+	}
+	return nil
 }
 
 func splitRepo(repoPath string) (tenant string, name string, err error) {
