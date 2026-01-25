@@ -3220,6 +3220,13 @@ KAILAB_DISABLE_GIT_RECEIVE_PACK=true \
 ./kailabd --data ./data
 ```
 
+Cleanup checklist:
+- Turn off any Git write endpoints in load balancers and SSH gateways.
+- Remove Git mirror rollback overrides once the cutover stabilizes.
+- Ensure CI/CD uses Kai refs (snap/cs) rather than Git refs.
+- Document incident response for attempted Git pushes (expected to fail).
+- Archive or remove legacy Git auth credentials.
+
 ### Signed ChangeSets (SSH)
 
 Sign changesets from the CLI using an SSH private key, and have the server verify signatures.
