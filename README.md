@@ -3211,6 +3211,13 @@ KAILAB_REQUIRE_SIGNED_CHANGESETS=true \
 ./kailabd --data ./data
 ```
 
+Conflict resolution playbook:
+- If a Git push fails, instruct teams to re-stage changes via Kai and create a new ChangeSet.
+- If a ref update is rejected (unsigned), reissue the ChangeSet with SSH signing enabled.
+- If there is drift between Kai refs and mirrors, re-run mirror backfill and compare snapshot diffs.
+- If CI references Git refs, update pipelines to use `snap.*` or `cs.*` refs.
+- Escalate repeated conflicts to a short migration freeze and rebase via Kai.
+
 ### Kai-Only Transition (Phase 3)
 
 Disable the Git write path entirely while keeping Git read-only compatibility:
