@@ -1607,6 +1607,37 @@ kai prune --aggressive
 3. Deletes any nodes not marked as reachable
 4. Deletes orphaned object files from `.kai/objects/`
 
+---
+
+### `kai shadow`
+
+Shadow Git by importing ranges, comparing diffs, and checking drift.
+
+**Subcommands:**
+- `shadow import` - Create snapshots + a changeset from a Git range and optionally update a ref.
+- `shadow parity` - Compare Git `--name-only` against Kai snapshot diffs.
+- `shadow drift` - Detect drift between a Git ref and a snapshot ref.
+
+**Examples:**
+```bash
+# Use explicit commit hashes (range format: BASE..HEAD)
+git -C /path/to/repo rev-parse HEAD HEAD~1
+kai shadow import --git-range <base>..<head> --repo /path/to/repo --update-ref snap.main
+
+# Compare changed files between Git and Kai
+kai shadow parity --git-range <base>..<head> --repo /path/to/repo
+
+# Check drift between a Git ref and a snapshot ref
+kai shadow drift --git-ref <head> --snap snap.main --repo /path/to/repo
+```
+
+**Flags:**
+- `--git-range` - Git range `BASE..HEAD` (required for import/parity)
+- `--git-ref` - Git ref to compare (default: `HEAD`)
+- `--snap` - Snapshot ref to compare (default: `snap.main`)
+- `--repo` - Path to Git repository (default: `.`)
+- `--update-ref` - Ref to update to HEAD snapshot (default: `snap.main`)
+
 **Note:** Run this after `kai ws delete` to reclaim storage.
 
 ---
