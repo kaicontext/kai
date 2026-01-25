@@ -3,7 +3,6 @@ package background
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"time"
 
@@ -108,8 +107,8 @@ func (e *Enricher) enrichSnapshot(snapshotID []byte) error {
 	}
 
 	// Parse snapshot payload to get file list
-	var payload map[string]interface{}
-	if err := json.Unmarshal(content, &payload); err != nil {
+	payload, err := parseObjectPayload(content)
+	if err != nil {
 		return err
 	}
 
@@ -135,9 +134,17 @@ func (e *Enricher) enrichChangeSet(changeSetID []byte) error {
 		return nil
 	}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal(content, &payload); err != nil {
+	payload, err := parseObjectPayload(content)
+	if err != nil {
 		return err
+	}
+
+	if ok, err := verifyChangeSetSignature(payload); err != nil {
+		log.Printf("signature verification error for changeset %x: %v", changeSetID[:8], err)
+	} else if ok {
+		log.Printf("changeset %x signature verified", changeSetID[:8])
+	} else if payload["signature"] != nil {
+		log.Printf("changeset %x signature not verified", changeSetID[:8])
 	}
 
 	// Check if intent already exists

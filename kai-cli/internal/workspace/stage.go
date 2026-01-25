@@ -8,6 +8,7 @@ import (
 	"kai/internal/filesource"
 	"kai/internal/graph"
 	"kai/internal/module"
+	"kai/internal/signing"
 	"kai/internal/snapshot"
 	"kai/internal/util"
 )
@@ -30,8 +31,13 @@ type Conflict struct {
 	NewDigest   string
 }
 
+// StageOptions controls staging behavior.
+type StageOptions struct {
+	SignKeyPath string
+}
+
 // Stage stages changes from a file source into a workspace.
-func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *module.Matcher, message string) (*StageResult, error) {
+func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *module.Matcher, message string, opts *StageOptions) (*StageResult, error) {
 	ws, err := m.Get(nameOrID)
 	if err != nil {
 		return nil, err
@@ -142,6 +148,15 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 		"intent":      "",
 		"workspaceId": util.BytesToHex(ws.ID),
 		"createdAt":   util.NowMs(),
+	}
+	if opts != nil && opts.SignKeyPath != "" {
+		sigFields, err := signing.SignChangeSetPayloadSSH(changeSetPayload, opts.SignKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("signing changeset: %w", err)
+		}
+		for k, v := range sigFields {
+			changeSetPayload[k] = v
+		}
 	}
 	changeSetID, err := m.db.InsertNode(tx, graph.KindChangeSet, changeSetPayload)
 	if err != nil {

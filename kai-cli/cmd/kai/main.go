@@ -1346,6 +1346,7 @@ var (
 	changesetGitHead string // git ref for head snapshot
 	changesetGitRepo string // git repo path
 	wsStageMessage   string
+	wsSignKey        string
 
 	// Diff flags
 	diffDir      string
@@ -1449,6 +1450,7 @@ func init() {
 	wsStageCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name (or pass as positional arg)")
 	wsStageCmd.Flags().StringVar(&wsDir, "dir", ".", "Directory to stage from")
 	wsStageCmd.Flags().StringVarP(&wsStageMessage, "message", "m", "", "Message describing the staged changes")
+	wsStageCmd.Flags().StringVar(&wsSignKey, "sign-ssh-key", "", "Path to SSH private key for signing changesets")
 
 	wsLogCmd.Flags().StringVar(&wsName, "ws", "", "Workspace name or ID (required)")
 	wsLogCmd.MarkFlagRequired("ws")
@@ -7911,8 +7913,15 @@ func runWsStage(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening directory: %w", err)
 	}
 
+	signKey := wsSignKey
+	if signKey == "" {
+		signKey = os.Getenv("KAI_SSH_SIGN_KEY")
+	}
+
 	mgr := workspace.NewManager(db)
-	result, err := mgr.Stage(name, source, matcher, wsStageMessage)
+	result, err := mgr.Stage(name, source, matcher, wsStageMessage, &workspace.StageOptions{
+		SignKeyPath: signKey,
+	})
 	if err != nil {
 		return fmt.Errorf("staging changes: %w", err)
 	}
