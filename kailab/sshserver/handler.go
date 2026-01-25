@@ -113,14 +113,18 @@ func handleUploadPack(db *sql.DB, r io.Reader, w io.Writer) error {
 		return err
 	}
 
-	objects, err := buildPackObjects(context.Background(), NewDBRefAdapter(db), req.Wants)
-	if err != nil {
+	builder := NewPackBuilder(NewDBRefAdapter(db), NewMemoryObjectStore())
+	if err := builder.BuildPack(context.Background(), PackRequest{
+		Wants: req.Wants,
+		Haves: req.Haves,
+		Done:  req.Done,
+	}, w); err != nil {
 		_ = writeGitError(w, err.Error())
 		_ = writeFlush(w)
 		return err
 	}
 
-	return writePack(w, objects)
+	return nil
 }
 
 type uploadPackRequest struct {
