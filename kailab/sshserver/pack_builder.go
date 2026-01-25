@@ -28,6 +28,7 @@ func (b *DefaultPackBuilder) BuildPack(ctx context.Context, req PackRequest, w i
 		return fmt.Errorf("ref adapter required")
 	}
 
+	// TODO: support thin packs / deltas when we add pack heuristics.
 	objects, err := buildPackObjects(ctx, b.refAdapter, req.Wants)
 	if err != nil {
 		return err

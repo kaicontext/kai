@@ -233,6 +233,10 @@ func buildCapabilities(headRef string) string {
 	if headRef != "" {
 		caps = append(caps, "symref=HEAD:"+headRef)
 	}
-	caps = append(caps, "agent=kai")
+	caps = append(caps,
+		"agent=kai",
+		"side-band-64k",
+		"report-status",
+	)
 	return strings.Join(caps, " ")
 }
