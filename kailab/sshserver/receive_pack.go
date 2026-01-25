@@ -89,6 +89,15 @@ func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, []str
 		return nil, nil, err
 	}
 
+	gitUpdates := make([]map[string]interface{}, 0, len(req.Updates))
+	for _, update := range req.Updates {
+		gitUpdates = append(gitUpdates, map[string]interface{}{
+			"ref": update.Ref,
+			"old": update.Old,
+			"new": update.New,
+		})
+	}
+
 	packDigestHex := ""
 	if len(req.Pack) > 0 {
 		packDigest, err := storeRawObject(db, "GitPack", req.Pack)
@@ -99,9 +108,13 @@ func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, []str
 	}
 
 	payload := map[string]interface{}{
-		"base":      hex.EncodeToString(baseDigest),
-		"head":      hex.EncodeToString(baseDigest),
-		"createdAt": cas.NowMs(),
+		"base":       hex.EncodeToString(baseDigest),
+		"head":       hex.EncodeToString(baseDigest),
+		"createdAt":  cas.NowMs(),
+		"sourceType": "git",
+		"sourceRef":  "receive-pack",
+		"title":      "git push",
+		"gitUpdates": gitUpdates,
 	}
 	if packDigestHex != "" {
 		payload["gitPack"] = packDigestHex
