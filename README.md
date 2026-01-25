@@ -2309,6 +2309,15 @@ This creates an audit trail showing when and why fallback occurred.
 
 ---
 
+## Toolchain Integration (CI + IDEs)
+
+Practical integration points for CI and IDE workflows:
+
+- **CI pipelines:** use `kai ci plan` to generate a targeted test plan and `kai ci print` for human-readable summaries.
+- **Pre-commit/PR checks:** use `kai diff` and `kai intent render` to surface semantic changes before review.
+- **IDE helpers:** use `kai review open` and `kai review view` to fetch semantic review context from the CLI.
+- **Shell completion:** enable `kai completion` for refs/selectors to speed up CLI usage.
+
 ### `kai ci validate-plan`
 
 Validate that a plan.json file has all required fields with correct types.
