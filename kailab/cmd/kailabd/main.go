@@ -11,15 +11,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gliderlabs/ssh"
 	"kailab/api"
 	"kailab/config"
 	"kailab/repo"
+	"kailab/sshserver"
 )
 
 func main() {
 	// Parse flags
 	listen := flag.String("listen", "", "Address to listen on (default: :7447)")
 	dataDir := flag.String("data", "", "Data directory (default: ./data)")
+	sshListen := flag.String("ssh-listen", "", "SSH listen address for git-upload-pack/receive-pack (stub)")
 	flag.Parse()
 
 	// Load config (flags override env)
@@ -34,6 +37,9 @@ func main() {
 	log.Printf("kailabd starting...")
 	log.Printf("  listen:       %s", cfg.Listen)
 	log.Printf("  data:         %s", cfg.DataDir)
+	if *sshListen != "" {
+		log.Printf("  ssh_listen:   %s (stub)", *sshListen)
+	}
 	log.Printf("  max_open:     %d", cfg.MaxOpenRepos)
 	log.Printf("  idle_ttl:     %s", cfg.IdleTTL)
 	log.Printf("  max_pack:     %d MB", cfg.MaxPackSize/(1024*1024))
@@ -66,6 +72,7 @@ func main() {
 
 	// Handle graceful shutdown
 	done := make(chan struct{})
+	var sshSrv *ssh.Server
 	go func() {
 		sigint := make(chan os.Signal, 1)
 		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
@@ -81,8 +88,22 @@ func main() {
 			log.Printf("shutdown error: %v", err)
 		}
 
+		if sshSrv != nil {
+			if err := sshserver.Stop(shutdownCtx, sshSrv); err != nil {
+				log.Printf("ssh shutdown error: %v", err)
+			}
+		}
+
 		close(done)
 	}()
+
+	// Start SSH server if enabled
+	if *sshListen != "" {
+		sshSrv, err = sshserver.Start(*sshListen, sshserver.NewGitHandler(registry, log.Default()), log.Default())
+		if err != nil {
+			log.Fatalf("ssh server error: %v", err)
+		}
+	}
 
 	// Start server
 	log.Printf("kailabd listening on %s", cfg.Listen)
