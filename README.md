@@ -3205,6 +3205,29 @@ cd kailab
 go run ./cmd/kailab-mirror --data ./data --tenant acme --repo webapp
 ```
 
+### Migration + Coexistence Strategy
+
+Phased rollout from Git-first to Kai-only:
+
+**Phase 0: Shadow**
+- Run `kai shadow import/parity/drift` on pilot repos.
+- Validate diff parity and drift alerts without changing write paths.
+
+**Phase 1: Dual-write**
+- Enable `KAILAB_GIT_MIRROR_ENABLED` with a tight allowlist.
+- Use the mirror backfill tool for existing repos.
+- Monitor mirror drift and signature verification logs.
+
+**Phase 2: Kai-primary**
+- Set `KAILAB_KAI_PRIMARY=true` and `KAILAB_REQUIRE_SIGNED_CHANGESETS=true`.
+- Block Git writes; require signed changesets on ref updates.
+- Use the conflict-resolution playbook when pushes fail.
+
+**Phase 3: Kai-only**
+- Set `KAILAB_DISABLE_GIT_RECEIVE_PACK=true`.
+- Remove `KAILAB_GIT_MIRROR_ROLLBACK` from production configs.
+- Keep Git fetch/clone support as read-only compatibility.
+
 ### Kai-Primary Enforcement (Phase 2)
 
 Disable Git writes and require signed changesets for ref updates:
