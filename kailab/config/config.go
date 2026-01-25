@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,20 +28,29 @@ type Config struct {
 	MaxOpenRepos int
 	// IdleTTL is how long to keep idle repos open before closing.
 	IdleTTL time.Duration
+	// SSHAllowUsers is a list of SSH usernames allowed to access git operations.
+	SSHAllowUsers []string
+	// SSHAllowRepos is a list of repos (tenant/repo) allowed for SSH git operations.
+	SSHAllowRepos []string
+	// SSHAudit enables audit logging for SSH git operations.
+	SSHAudit bool
 }
 
 // FromEnv creates a Config from environment variables.
 func FromEnv() *Config {
 	cfg := &Config{
-		Listen:       getEnv("KAILAB_LISTEN", ":7447"),
-		DataDir:      getEnv("KAILAB_DATA", "./data"),
-		Tenant:       getEnv("KAILAB_TENANT", "default"),
-		Repo:         getEnv("KAILAB_REPO", "main"),
-		MaxPackSize:  getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
-		Version:      getEnv("KAILAB_VERSION", "0.1.0"),
-		Debug:        getEnvBool("KAILAB_DEBUG", false),
-		MaxOpenRepos: getEnvInt("KAILAB_MAX_OPEN", 256),
-		IdleTTL:      getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
+		Listen:        getEnv("KAILAB_LISTEN", ":7447"),
+		DataDir:       getEnv("KAILAB_DATA", "./data"),
+		Tenant:        getEnv("KAILAB_TENANT", "default"),
+		Repo:          getEnv("KAILAB_REPO", "main"),
+		MaxPackSize:   getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
+		Version:       getEnv("KAILAB_VERSION", "0.1.0"),
+		Debug:         getEnvBool("KAILAB_DEBUG", false),
+		MaxOpenRepos:  getEnvInt("KAILAB_MAX_OPEN", 256),
+		IdleTTL:       getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
+		SSHAllowUsers: getEnvList("KAILAB_SSH_ALLOW_USERS"),
+		SSHAllowRepos: getEnvList("KAILAB_SSH_ALLOW_REPOS"),
+		SSHAudit:      getEnvBool("KAILAB_SSH_AUDIT", false),
 	}
 	return cfg
 }
@@ -104,4 +114,14 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 		}
 	}
 	return defaultVal
+}
+
+func getEnvList(key string) []string {
+	val := os.Getenv(key)
+	if val == "" {
+		return nil
+	}
+	return strings.FieldsFunc(val, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
 }

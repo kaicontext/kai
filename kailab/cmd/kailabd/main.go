@@ -44,6 +44,13 @@ func main() {
 	log.Printf("  idle_ttl:     %s", cfg.IdleTTL)
 	log.Printf("  max_pack:     %d MB", cfg.MaxPackSize/(1024*1024))
 	log.Printf("  version:      %s", cfg.Version)
+	if len(cfg.SSHAllowUsers) > 0 {
+		log.Printf("  ssh_users:    %v", cfg.SSHAllowUsers)
+	}
+	if len(cfg.SSHAllowRepos) > 0 {
+		log.Printf("  ssh_repos:    %v", cfg.SSHAllowRepos)
+	}
+	log.Printf("  ssh_audit:    %t", cfg.SSHAudit)
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -73,6 +80,7 @@ func main() {
 	// Handle graceful shutdown
 	done := make(chan struct{})
 	var sshSrv *ssh.Server
+	var err error
 	go func() {
 		sigint := make(chan os.Signal, 1)
 		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
@@ -99,7 +107,16 @@ func main() {
 
 	// Start SSH server if enabled
 	if *sshListen != "" {
-		sshSrv, err = sshserver.Start(*sshListen, sshserver.NewGitHandler(registry, log.Default()), log.Default())
+		handler := sshserver.NewGitHandler(registry, log.Default())
+		var authorizer sshserver.SessionAuthorizer
+		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {
+			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos)
+		}
+		var auditor sshserver.SessionAuditor
+		if cfg.SSHAudit {
+			auditor = sshserver.NewLoggerAuditor(log.Default())
+		}
+		sshSrv, err = sshserver.Start(*sshListen, sshserver.WrapHandler(handler, authorizer, auditor), log.Default())
 		if err != nil {
 			log.Fatalf("ssh server error: %v", err)
 		}
