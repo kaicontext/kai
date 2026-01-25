@@ -22,6 +22,7 @@ type GitHandler struct {
 	requireSigned      bool
 	disableReceivePack bool
 	capabilities       CapabilitiesConfig
+	objectStore        ObjectStore
 }
 
 // GitHandlerOptions configure Git handler behavior.
@@ -33,6 +34,7 @@ type GitHandlerOptions struct {
 	CapabilitiesExtra   []string
 	CapabilitiesDisable []string
 	Agent               string
+	ObjectStore         ObjectStore
 }
 
 // CapabilitiesConfig controls advertised Git capabilities.
@@ -59,6 +61,7 @@ func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerO
 			Extra:   opts.CapabilitiesExtra,
 			Disable: opts.CapabilitiesDisable,
 		},
+		objectStore: opts.ObjectStore,
 	}
 }
 
@@ -87,7 +90,7 @@ func (h *GitHandler) UploadPack(repoPath string, io GitIO) error {
 		return err
 	}
 
-	if err := handleUploadPack(handle.DB, io.Stdin, io.Stdout); err != nil {
+	if err := handleUploadPack(handle.DB, h.objectStore, io.Stdin, io.Stdout); err != nil {
 		h.logger.Printf("upload-pack negotiation error: %v", err)
 		return err
 	}
@@ -150,7 +153,7 @@ func splitRepo(repoPath string) (tenant string, name string, err error) {
 	return tenant, name, nil
 }
 
-func handleUploadPack(db *sql.DB, r io.Reader, w io.Writer) error {
+func handleUploadPack(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) error {
 	reader := bufio.NewReader(r)
 
 	req, err := readUploadPackRequest(reader)
@@ -172,7 +175,7 @@ func handleUploadPack(db *sql.DB, r io.Reader, w io.Writer) error {
 		return err
 	}
 
-	builder := NewPackBuilder(NewDBRefAdapter(db), NewMemoryObjectStore())
+	builder := NewPackBuilder(NewDBRefAdapter(db), store)
 	if err := builder.BuildPack(context.Background(), PackRequest{
 		Wants: req.Wants,
 		Haves: req.Haves,

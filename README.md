@@ -3163,6 +3163,7 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_GIT_CAPS_EXTRA` | - | - | Comma/semicolon-separated Git capabilities to append |
 | `KAILAB_GIT_CAPS_DISABLE` | - | - | Comma/semicolon-separated Git capabilities to remove |
 | `KAILAB_GIT_AGENT` | - | `kai` | Git agent capability string |
+| `KAILAB_GIT_OBJECT_CACHE_SIZE` | - | `10000` | In-memory git object cache size (entries) |
 
 ### SSH Git Access Control
 

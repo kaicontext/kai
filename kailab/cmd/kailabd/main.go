@@ -74,6 +74,7 @@ func main() {
 	if cfg.GitAgent != "" {
 		log.Printf("  git_agent: %s", cfg.GitAgent)
 	}
+	log.Printf("  git_object_cache_size: %d", cfg.GitObjectCacheSize)
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -137,6 +138,10 @@ func main() {
 			Rollback:   cfg.GitMirrorRollback,
 			Logger:     log.Default(),
 		})
+		var objectStore sshserver.ObjectStore
+		if cfg.GitObjectCacheSize > 0 {
+			objectStore = sshserver.NewLRUObjectStore(cfg.GitObjectCacheSize)
+		}
 		handler := sshserver.NewGitHandler(registry, log.Default(), sshserver.GitHandlerOptions{
 			Mirror:              mirror,
 			ReadOnly:            cfg.KaiPrimary,
@@ -145,6 +150,7 @@ func main() {
 			CapabilitiesExtra:   cfg.GitCapabilitiesExtra,
 			CapabilitiesDisable: cfg.GitCapabilitiesDisable,
 			Agent:               cfg.GitAgent,
+			ObjectStore:         objectStore,
 		})
 		var authorizer sshserver.SessionAuthorizer
 		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {

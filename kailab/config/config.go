@@ -54,6 +54,8 @@ type Config struct {
 	GitCapabilitiesDisable []string
 	// GitAgent overrides the git agent capability string.
 	GitAgent string
+	// GitObjectCacheSize caps the in-memory git object cache.
+	GitObjectCacheSize int
 }
 
 // FromEnv creates a Config from environment variables.
@@ -81,6 +83,7 @@ func FromEnv() *Config {
 		GitCapabilitiesExtra:    getEnvList("KAILAB_GIT_CAPS_EXTRA"),
 		GitCapabilitiesDisable:  getEnvList("KAILAB_GIT_CAPS_DISABLE"),
 		GitAgent:                getEnv("KAILAB_GIT_AGENT", "kai"),
+		GitObjectCacheSize:      getEnvInt("KAILAB_GIT_OBJECT_CACHE_SIZE", 10000),
 	}
 	return cfg
 }

@@ -208,7 +208,7 @@ func TestHandleUploadPack_RejectsWants(t *testing.T) {
 	buf := bytes.NewBufferString("0032want 0123456789012345678901234567890123456789\n0000")
 	out := &bytes.Buffer{}
 
-	if err := handleUploadPack(nil, buf, out); err == nil {
+	if err := handleUploadPack(nil, nil, buf, out); err == nil {
 		t.Fatal("expected error for unimplemented pack")
 	}
 	if out.Len() == 0 {
