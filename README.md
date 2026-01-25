@@ -3160,6 +3160,9 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_KAI_PRIMARY` | - | `false` | Make Kai refs authoritative; disable Git write path |
 | `KAILAB_REQUIRE_SIGNED_CHANGESETS` | - | `false` | Require signed changesets for ref updates |
 | `KAILAB_DISABLE_GIT_RECEIVE_PACK` | - | `true` | Disable git-receive-pack (Kai-only mode) |
+| `KAILAB_GIT_CAPS_EXTRA` | - | - | Comma/semicolon-separated Git capabilities to append |
+| `KAILAB_GIT_CAPS_DISABLE` | - | - | Comma/semicolon-separated Git capabilities to remove |
+| `KAILAB_GIT_AGENT` | - | `kai` | Git agent capability string |
 
 ### SSH Git Access Control
 
@@ -3208,6 +3211,17 @@ Disable Git writes and require signed changesets for ref updates:
 ```bash
 KAILAB_KAI_PRIMARY=true \
 KAILAB_REQUIRE_SIGNED_CHANGESETS=true \
+./kailabd --data ./data
+```
+
+### Capabilities + Compatibility Hooks (Phase 6)
+
+Customize advertised Git protocol capabilities for compatibility:
+
+```bash
+KAILAB_GIT_CAPS_EXTRA=thin-pack \
+KAILAB_GIT_CAPS_DISABLE=report-status \
+KAILAB_GIT_AGENT=kai \
 ./kailabd --data ./data
 ```
 

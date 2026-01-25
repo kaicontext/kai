@@ -65,6 +65,15 @@ func main() {
 	log.Printf("  kai_primary: %t", cfg.KaiPrimary)
 	log.Printf("  require_signed_changesets: %t", cfg.RequireSignedChangeSets)
 	log.Printf("  disable_git_receive_pack: %t", cfg.DisableGitReceivePack)
+	if len(cfg.GitCapabilitiesExtra) > 0 {
+		log.Printf("  git_caps_extra: %v", cfg.GitCapabilitiesExtra)
+	}
+	if len(cfg.GitCapabilitiesDisable) > 0 {
+		log.Printf("  git_caps_disable: %v", cfg.GitCapabilitiesDisable)
+	}
+	if cfg.GitAgent != "" {
+		log.Printf("  git_agent: %s", cfg.GitAgent)
+	}
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -129,10 +138,13 @@ func main() {
 			Logger:     log.Default(),
 		})
 		handler := sshserver.NewGitHandler(registry, log.Default(), sshserver.GitHandlerOptions{
-			Mirror:             mirror,
-			ReadOnly:           cfg.KaiPrimary,
-			RequireSigned:      cfg.RequireSignedChangeSets,
-			DisableReceivePack: cfg.DisableGitReceivePack,
+			Mirror:              mirror,
+			ReadOnly:            cfg.KaiPrimary,
+			RequireSigned:       cfg.RequireSignedChangeSets,
+			DisableReceivePack:  cfg.DisableGitReceivePack,
+			CapabilitiesExtra:   cfg.GitCapabilitiesExtra,
+			CapabilitiesDisable: cfg.GitCapabilitiesDisable,
+			Agent:               cfg.GitAgent,
 		})
 		var authorizer sshserver.SessionAuthorizer
 		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {

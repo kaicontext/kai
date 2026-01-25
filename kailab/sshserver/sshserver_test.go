@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,27 @@ func TestBuildCommitObject(t *testing.T) {
 	}
 	if !bytes.Contains(commit.Data, []byte("tree "+emptyTreeOID)) {
 		t.Fatalf("expected empty tree reference in commit")
+	}
+}
+
+func TestBuildCapabilities(t *testing.T) {
+	cfg := CapabilitiesConfig{
+		Agent:   "kai-test",
+		Extra:   []string{"thin-pack"},
+		Disable: []string{"report-status"},
+	}
+	got := buildCapabilities("refs/heads/main", cfg)
+	if !strings.Contains(got, "symref=HEAD:refs/heads/main") {
+		t.Fatalf("missing symref: %s", got)
+	}
+	if !strings.Contains(got, "agent=kai-test") {
+		t.Fatalf("missing agent: %s", got)
+	}
+	if !strings.Contains(got, "thin-pack") {
+		t.Fatalf("missing extra capability: %s", got)
+	}
+	if strings.Contains(got, "report-status") {
+		t.Fatalf("expected report-status to be disabled: %s", got)
 	}
 }
 

@@ -48,6 +48,12 @@ type Config struct {
 	RequireSignedChangeSets bool
 	// DisableGitReceivePack disables git-receive-pack (Kai-only mode).
 	DisableGitReceivePack bool
+	// GitCapabilitiesExtra appends extra advertised capabilities.
+	GitCapabilitiesExtra []string
+	// GitCapabilitiesDisable disables advertised capabilities.
+	GitCapabilitiesDisable []string
+	// GitAgent overrides the git agent capability string.
+	GitAgent string
 }
 
 // FromEnv creates a Config from environment variables.
@@ -72,6 +78,9 @@ func FromEnv() *Config {
 		KaiPrimary:              getEnvBool("KAILAB_KAI_PRIMARY", false),
 		RequireSignedChangeSets: getEnvBool("KAILAB_REQUIRE_SIGNED_CHANGESETS", false),
 		DisableGitReceivePack:   getEnvBool("KAILAB_DISABLE_GIT_RECEIVE_PACK", true),
+		GitCapabilitiesExtra:    getEnvList("KAILAB_GIT_CAPS_EXTRA"),
+		GitCapabilitiesDisable:  getEnvList("KAILAB_GIT_CAPS_DISABLE"),
+		GitAgent:                getEnv("KAILAB_GIT_AGENT", "kai"),
 	}
 	return cfg
 }

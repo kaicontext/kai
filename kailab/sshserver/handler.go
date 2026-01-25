@@ -21,14 +21,25 @@ type GitHandler struct {
 	readOnly           bool
 	requireSigned      bool
 	disableReceivePack bool
+	capabilities       CapabilitiesConfig
 }
 
 // GitHandlerOptions configure Git handler behavior.
 type GitHandlerOptions struct {
-	Mirror             *GitMirror
-	ReadOnly           bool
-	RequireSigned      bool
-	DisableReceivePack bool
+	Mirror              *GitMirror
+	ReadOnly            bool
+	RequireSigned       bool
+	DisableReceivePack  bool
+	CapabilitiesExtra   []string
+	CapabilitiesDisable []string
+	Agent               string
+}
+
+// CapabilitiesConfig controls advertised Git capabilities.
+type CapabilitiesConfig struct {
+	Agent   string
+	Extra   []string
+	Disable []string
 }
 
 // NewGitHandler creates a handler wired with the repo registry.
@@ -43,6 +54,11 @@ func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerO
 		readOnly:           opts.ReadOnly,
 		requireSigned:      opts.RequireSigned,
 		disableReceivePack: opts.DisableReceivePack,
+		capabilities: CapabilitiesConfig{
+			Agent:   opts.Agent,
+			Extra:   opts.CapabilitiesExtra,
+			Disable: opts.CapabilitiesDisable,
+		},
 	}
 }
 
@@ -64,7 +80,7 @@ func (h *GitHandler) UploadPack(repoPath string, io GitIO) error {
 	h.registry.Acquire(handle)
 	defer h.registry.Release(handle)
 
-	if err := advertiseRefs(handle.DB, io.Stdout); err != nil {
+	if err := advertiseRefs(handle.DB, io.Stdout, h.capabilities); err != nil {
 		h.logger.Printf("upload-pack advertise error: %v", err)
 		_ = writeGitError(io.Stdout, "failed to advertise refs")
 		_ = writeFlush(io.Stdout)
@@ -220,7 +236,7 @@ func writeAcknowledgements(w io.Writer, req *uploadPackRequest) error {
 	return writePktLine(w, "ACK "+last+"\n")
 }
 
-func advertiseRefs(db *sql.DB, w io.Writer) error {
+func advertiseRefs(db *sql.DB, w io.Writer, capsConfig CapabilitiesConfig) error {
 	refAdapter := NewDBRefAdapter(db)
 	refs, headRef, err := refAdapter.ListRefs(context.Background())
 	if err != nil {
@@ -230,7 +246,7 @@ func advertiseRefs(db *sql.DB, w io.Writer) error {
 		return writeFlush(w)
 	}
 
-	caps := buildCapabilities(headRef)
+	caps := buildCapabilities(headRef, capsConfig)
 
 	for i, ref := range refs {
 		line := fmt.Sprintf("%s %s", ref.OID, ref.Name)
@@ -274,15 +290,42 @@ func selectHeadRef(refs []*store.Ref) string {
 	return ""
 }
 
-func buildCapabilities(headRef string) string {
+func buildCapabilities(headRef string, cfg CapabilitiesConfig) string {
 	var caps []string
 	if headRef != "" {
 		caps = append(caps, "symref=HEAD:"+headRef)
 	}
+	agent := cfg.Agent
+	if agent == "" {
+		agent = "kai"
+	}
 	caps = append(caps,
-		"agent=kai",
+		"agent="+agent,
 		"side-band-64k",
 		"report-status",
 	)
-	return strings.Join(caps, " ")
+	caps = append(caps, cfg.Extra...)
+	if len(cfg.Disable) > 0 {
+		disabled := make(map[string]bool, len(cfg.Disable))
+		for _, name := range cfg.Disable {
+			disabled[name] = true
+		}
+		filtered := caps[:0]
+		for _, name := range caps {
+			if !disabled[name] {
+				filtered = append(filtered, name)
+			}
+		}
+		caps = filtered
+	}
+	seen := make(map[string]bool, len(caps))
+	out := make([]string, 0, len(caps))
+	for _, name := range caps {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return strings.Join(out, " ")
 }
