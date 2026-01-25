@@ -15,18 +15,20 @@ import (
 
 // GitHandler routes Git protocol calls to repo-backed implementations.
 type GitHandler struct {
-	registry      *repo.Registry
-	logger        *log.Logger
-	mirror        *GitMirror
-	readOnly      bool
-	requireSigned bool
+	registry           *repo.Registry
+	logger             *log.Logger
+	mirror             *GitMirror
+	readOnly           bool
+	requireSigned      bool
+	disableReceivePack bool
 }
 
 // GitHandlerOptions configure Git handler behavior.
 type GitHandlerOptions struct {
-	Mirror        *GitMirror
-	ReadOnly      bool
-	RequireSigned bool
+	Mirror             *GitMirror
+	ReadOnly           bool
+	RequireSigned      bool
+	DisableReceivePack bool
 }
 
 // NewGitHandler creates a handler wired with the repo registry.
@@ -35,11 +37,12 @@ func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerO
 		logger = log.Default()
 	}
 	return &GitHandler{
-		registry:      registry,
-		logger:        logger,
-		mirror:        opts.Mirror,
-		readOnly:      opts.ReadOnly,
-		requireSigned: opts.RequireSigned,
+		registry:           registry,
+		logger:             logger,
+		mirror:             opts.Mirror,
+		readOnly:           opts.ReadOnly,
+		requireSigned:      opts.RequireSigned,
+		disableReceivePack: opts.DisableReceivePack,
 	}
 }
 
@@ -94,8 +97,8 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 	h.registry.Acquire(handle)
 	defer h.registry.Release(handle)
 
-	if h.readOnly || h.requireSigned {
-		err := fmt.Errorf("git receive-pack disabled (Kai-primary)")
+	if h.disableReceivePack || h.readOnly || h.requireSigned {
+		err := fmt.Errorf("git receive-pack disabled (Kai-only)")
 		_ = writeGitError(io.Stdout, err.Error())
 		_ = writeFlush(io.Stdout)
 		return err

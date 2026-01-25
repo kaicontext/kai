@@ -3159,6 +3159,7 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_GIT_MIRROR_ROLLBACK` | - | `false` | Disable mirroring without changing other settings |
 | `KAILAB_KAI_PRIMARY` | - | `false` | Make Kai refs authoritative; disable Git write path |
 | `KAILAB_REQUIRE_SIGNED_CHANGESETS` | - | `false` | Require signed changesets for ref updates |
+| `KAILAB_DISABLE_GIT_RECEIVE_PACK` | - | `true` | Disable git-receive-pack (Kai-only mode) |
 
 ### SSH Git Access Control
 
@@ -3207,6 +3208,15 @@ Disable Git writes and require signed changesets for ref updates:
 ```bash
 KAILAB_KAI_PRIMARY=true \
 KAILAB_REQUIRE_SIGNED_CHANGESETS=true \
+./kailabd --data ./data
+```
+
+### Kai-Only Transition (Phase 3)
+
+Disable the Git write path entirely while keeping Git read-only compatibility:
+
+```bash
+KAILAB_DISABLE_GIT_RECEIVE_PACK=true \
 ./kailabd --data ./data
 ```
 

@@ -46,6 +46,8 @@ type Config struct {
 	KaiPrimary bool
 	// RequireSignedChangeSets enforces signatures for changeset writes.
 	RequireSignedChangeSets bool
+	// DisableGitReceivePack disables git-receive-pack (Kai-only mode).
+	DisableGitReceivePack bool
 }
 
 // FromEnv creates a Config from environment variables.
@@ -69,6 +71,7 @@ func FromEnv() *Config {
 		GitMirrorRollback:       getEnvBool("KAILAB_GIT_MIRROR_ROLLBACK", false),
 		KaiPrimary:              getEnvBool("KAILAB_KAI_PRIMARY", false),
 		RequireSignedChangeSets: getEnvBool("KAILAB_REQUIRE_SIGNED_CHANGESETS", false),
+		DisableGitReceivePack:   getEnvBool("KAILAB_DISABLE_GIT_RECEIVE_PACK", true),
 	}
 	return cfg
 }
