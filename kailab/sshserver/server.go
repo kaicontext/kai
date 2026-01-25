@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 
 	"github.com/gliderlabs/ssh"
 )
@@ -45,12 +46,42 @@ func StartWithListener(listener net.Listener, handler Handler, logger *log.Logge
 	srv := &ssh.Server{
 		Addr: listener.Addr().String(),
 		Handler: func(s ssh.Session) {
+			start := time.Now()
+			raw := s.RawCommand()
+			parsed, err := ParseGitCommand(raw)
+			cmd := GitCommand{}
+			if parsed != nil {
+				cmd = *parsed
+			}
+			if err != nil {
+				if auditor, ok := handler.(SessionAuditor); ok {
+					auditor.Audit(context.Background(), buildAuditEvent(s, cmd, raw, err, start))
+				}
+				fmt.Fprintln(s.Stderr(), err.Error())
+				_ = s.Exit(1)
+				return
+			}
+			if authorizer, ok := handler.(SessionAuthorizer); ok {
+				if err := authorizer.Authorize(context.Background(), s, cmd); err != nil {
+					if auditor, ok := handler.(SessionAuditor); ok {
+						auditor.Audit(context.Background(), buildAuditEvent(s, cmd, raw, err, start))
+					}
+					fmt.Fprintln(s.Stderr(), err.Error())
+					_ = s.Exit(1)
+					return
+				}
+			}
+
 			gitIO := GitIO{
 				Stdin:  s,
 				Stdout: s,
 				Stderr: s.Stderr(),
 			}
-			if err := HandleCommand(s.RawCommand(), handler, gitIO); err != nil {
+			err = HandleCommand(raw, handler, gitIO)
+			if auditor, ok := handler.(SessionAuditor); ok {
+				auditor.Audit(context.Background(), buildAuditEvent(s, cmd, raw, err, start))
+			}
+			if err != nil {
 				fmt.Fprintln(s.Stderr(), err.Error())
 				_ = s.Exit(1)
 				return
