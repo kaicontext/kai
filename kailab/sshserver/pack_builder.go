@@ -29,7 +29,13 @@ func (b *DefaultPackBuilder) BuildPack(ctx context.Context, req PackRequest, w i
 	}
 
 	// TODO: support thin packs / deltas when we add pack heuristics.
-	objects, err := buildPackObjects(ctx, b.refAdapter, req.Wants)
+	haves := make(map[string]bool, len(req.Haves))
+	for _, have := range req.Haves {
+		if have != "" {
+			haves[have] = true
+		}
+	}
+	objects, err := buildPackObjects(ctx, b.refAdapter, req.Wants, haves)
 	if err != nil {
 		return err
 	}

@@ -18,7 +18,7 @@ import (
 
 const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string) ([]GitObject, error) {
+func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string, haves map[string]bool) ([]GitObject, error) {
 	refCommits, _, err := refAdapter.BuildRefCommits(ctx)
 	if err != nil {
 		return nil, err
@@ -28,6 +28,9 @@ func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string
 	seen := make(map[string]bool)
 
 	for _, want := range wants {
+		if haves != nil && haves[want] {
+			continue
+		}
 		info, ok := refCommits[want]
 		if !ok {
 			return nil, fmt.Errorf("unknown want %s", want)
