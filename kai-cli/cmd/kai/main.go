@@ -48,9 +48,9 @@ import (
 )
 
 const (
-	kaiDir         = ".kai"
-	dbFile         = "db.sqlite"
-	objectsDir     = "objects"
+	kaiDir               = ".kai"
+	dbFile               = "db.sqlite"
+	objectsDir           = "objects"
 	schemaDir            = "schema"
 	modulesFile          = "kai.modules.yaml"
 	ciPolicyFile         = ".kai/rules/ci-policy.yaml" // Primary location
@@ -835,6 +835,38 @@ var refDelCmd = &cobra.Command{
 	RunE:  runRefDel,
 }
 
+// Tag commands
+var tagCmd = &cobra.Command{
+	Use:   "tag",
+	Short: "Manage tags (refs/tags/*)",
+	Long: `Create and manage tag refs that point to snapshots.
+
+Examples:
+  kai tag create v1.0 @snap:last
+  kai tag list
+  kai tag delete v1.0`,
+}
+
+var tagListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List tag refs",
+	RunE:  runTagList,
+}
+
+var tagCreateCmd = &cobra.Command{
+	Use:   "create <name> <target>",
+	Short: "Create or update a tag ref",
+	RunE:  runTagCreate,
+	Args:  cobra.ExactArgs(2),
+}
+
+var tagDeleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Delete a tag ref",
+	RunE:  runTagDelete,
+	Args:  cobra.ExactArgs(1),
+}
+
 // Modules commands
 var modulesCmd = &cobra.Command{
 	Use:   "modules",
@@ -983,8 +1015,8 @@ var remoteSetCmd = &cobra.Command{
 Examples:
   kai remote set origin http://localhost:7447
   kai remote set origin http://localhost:7447 --tenant myorg --repo main`,
-	Args:  cobra.ExactArgs(2),
-	RunE:  runRemoteSet,
+	Args: cobra.ExactArgs(2),
+	RunE: runRemoteSet,
 }
 
 var remoteGetCmd = &cobra.Command{
@@ -1274,34 +1306,34 @@ var (
 	pruneKeep        []string
 
 	// Review flags
-	reviewTitle       string
-	reviewDesc        string
-	reviewReviewers   []string
-	reviewCloseState  string
-	reviewExportMD    bool
+	reviewTitle      string
+	reviewDesc       string
+	reviewReviewers  []string
+	reviewCloseState string
+	reviewExportMD   bool
 	reviewExportHTML bool
 	reviewJSON       bool
 	reviewViewMode   string
 	reviewExplain    bool
 	reviewBase       string
 
-	statusDir      string
-	statusAgainst  string
-	statusNameOnly bool
-	statusJSON     bool
-	statusSemantic bool
-	statusExplain  bool
-	logLimit       int
-	repoPath      string
-	dirPath       string
-	editText          string
-	regenerateIntent  bool
-	showAlternatives  bool
-	intentConfidence  float64
-	explainIntent     bool
-	jsonFlag      bool
-	checkoutDir   string
-	checkoutClean bool
+	statusDir        string
+	statusAgainst    string
+	statusNameOnly   bool
+	statusJSON       bool
+	statusSemantic   bool
+	statusExplain    bool
+	logLimit         int
+	repoPath         string
+	dirPath          string
+	editText         string
+	regenerateIntent bool
+	showAlternatives bool
+	intentConfidence float64
+	explainIntent    bool
+	jsonFlag         bool
+	checkoutDir      string
+	checkoutClean    bool
 
 	// Ref/pick flags
 	refKindFilter string
@@ -1309,11 +1341,11 @@ var (
 	pickNoUI      bool
 
 	// Changeset flags
-	changesetMessage  string
-	changesetGitBase  string // git ref for base snapshot
-	changesetGitHead  string // git ref for head snapshot
-	changesetGitRepo  string // git repo path
-	wsStageMessage    string
+	changesetMessage string
+	changesetGitBase string // git ref for base snapshot
+	changesetGitHead string // git ref for head snapshot
+	changesetGitRepo string // git repo path
+	wsStageMessage   string
 
 	// Diff flags
 	diffDir      string
@@ -1335,17 +1367,17 @@ var (
 	explainFlag bool
 
 	// Push/fetch flags
-	pushForce     bool
-	pushAll       bool
-	pushWorkspace string
-	pushDryRun    bool
-	pushExplain   bool
-	remoteLogRef  string
+	pushForce      bool
+	pushAll        bool
+	pushWorkspace  string
+	pushDryRun     bool
+	pushExplain    bool
+	remoteLogRef   string
 	remoteLogLimit int
 
 	// Remote set flags
-	remoteTenant  string
-	remoteRepo    string
+	remoteTenant string
+	remoteRepo   string
 
 	// Clone flags
 	cloneTenant string
@@ -1522,6 +1554,9 @@ func init() {
 	refCmd.AddCommand(refListCmd)
 	refCmd.AddCommand(refSetCmd)
 	refCmd.AddCommand(refDelCmd)
+	tagCmd.AddCommand(tagListCmd)
+	tagCmd.AddCommand(tagCreateCmd)
+	tagCmd.AddCommand(tagDeleteCmd)
 
 	// Add modules subcommands
 	modulesCmd.AddCommand(modulesInitCmd)
@@ -1695,6 +1730,7 @@ func init() {
 	listCmd.GroupID = groupAdvanced
 	logCmd.GroupID = groupAdvanced
 	refCmd.GroupID = groupAdvanced
+	tagCmd.GroupID = groupAdvanced
 	modulesCmd.GroupID = groupAdvanced
 	pickCmd.GroupID = groupAdvanced
 	pruneCmd.GroupID = groupAdvanced
@@ -1707,6 +1743,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(logCmd)
 	rootCmd.AddCommand(refCmd)
+	rootCmd.AddCommand(tagCmd)
 	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
@@ -2451,8 +2488,8 @@ type captureSummary struct {
 type ChangeBucket string
 
 const (
-	BucketStructural  ChangeBucket = "Structural"  // Things added/removed/moved
-	BucketBehavioral  ChangeBucket = "Behavioral"  // Logic/values changed
+	BucketStructural  ChangeBucket = "Structural"   // Things added/removed/moved
+	BucketBehavioral  ChangeBucket = "Behavioral"   // Logic/values changed
 	BucketAPIContract ChangeBucket = "API/Contract" // Interface/contract changed
 )
 
@@ -3053,48 +3090,48 @@ func runTestAffected(cmd *cobra.Command, args []string) error {
 // CIPlan represents a runner-agnostic selection plan
 type CIPlan struct {
 	Version       int                `json:"version"`
-	Mode          string             `json:"mode"`                          // "selective", "expanded", "shadow", "full", "skip"
-	Risk          string             `json:"risk"`                          // "low", "medium", "high"
-	SafetyMode    string             `json:"safetyMode"`                    // "shadow", "guarded", "strict"
-	Confidence    float64            `json:"confidence"`                    // 0.0-1.0 confidence score
+	Mode          string             `json:"mode"`       // "selective", "expanded", "shadow", "full", "skip"
+	Risk          string             `json:"risk"`       // "low", "medium", "high"
+	SafetyMode    string             `json:"safetyMode"` // "shadow", "guarded", "strict"
+	Confidence    float64            `json:"confidence"` // 0.0-1.0 confidence score
 	Targets       CITargets          `json:"targets"`
 	Impact        CIImpact           `json:"impact"`
 	Policy        CIPolicy           `json:"policy"`
 	Safety        CISafety           `json:"safety"`
-	Uncertainty   CIUncertainty      `json:"uncertainty"`                   // Structured uncertainty info
-	ExpansionLog  []string           `json:"expansionLog,omitempty"`        // Why expansions happened
-	DynamicImport *DynamicImportInfo `json:"dynamicImport,omitempty"`       // Dynamic import analysis
-	Coverage      *CoverageInfo      `json:"coverage,omitempty"`            // Coverage-based selection info
-	Contracts     *ContractInfo      `json:"contracts,omitempty"`           // Contract/schema change info
-	Fallback      CIFallback         `json:"fallback"`                      // Fallback/tripwire status
-	Provenance    CIProvenance       `json:"provenance"`                    // Audit trail
-	Prediction    CIPrediction       `json:"prediction,omitempty"`          // For shadow mode comparison
+	Uncertainty   CIUncertainty      `json:"uncertainty"`             // Structured uncertainty info
+	ExpansionLog  []string           `json:"expansionLog,omitempty"`  // Why expansions happened
+	DynamicImport *DynamicImportInfo `json:"dynamicImport,omitempty"` // Dynamic import analysis
+	Coverage      *CoverageInfo      `json:"coverage,omitempty"`      // Coverage-based selection info
+	Contracts     *ContractInfo      `json:"contracts,omitempty"`     // Contract/schema change info
+	Fallback      CIFallback         `json:"fallback"`                // Fallback/tripwire status
+	Provenance    CIProvenance       `json:"provenance"`              // Audit trail
+	Prediction    CIPrediction       `json:"prediction,omitempty"`    // For shadow mode comparison
 }
 
 // DynamicImportInfo captures dynamic import detection details
 type DynamicImportInfo struct {
-	Detected   bool                    `json:"detected"`
-	Files      []DynamicImportFile     `json:"files,omitempty"`
-	Policy     DynamicImportPolicyUsed `json:"policy"`
-	Telemetry  DynamicImportTelemetry  `json:"telemetry"`
+	Detected  bool                    `json:"detected"`
+	Files     []DynamicImportFile     `json:"files,omitempty"`
+	Policy    DynamicImportPolicyUsed `json:"policy"`
+	Telemetry DynamicImportTelemetry  `json:"telemetry"`
 }
 
 // DynamicImportFile represents a detected dynamic import in a file
 type DynamicImportFile struct {
-	Path          string  `json:"path"`
-	Kind          string  `json:"kind"`                    // e.g., "import(variable)", "require(variable)", "__import__()"
-	Line          int     `json:"line"`                    // Line number if available
-	Bounded       bool    `json:"bounded"`                 // True if bounded by webpackInclude or similar
-	BoundedBy     string  `json:"boundedBy,omitempty"`     // What bounded it (e.g., "webpackInclude: /\\.widget\\.js$/")
-	BoundedRisky  bool    `json:"boundedRisky,omitempty"`  // True if bounded but footprint exceeds threshold
-	Allowlisted   bool    `json:"allowlisted"`             // True if in allowlist
-	Confidence    float64 `json:"confidence"`              // 0.0-1.0 confidence this is truly dynamic
-	ExpandedTo    string  `json:"expandedTo,omitempty"`    // What module/package it expanded to
+	Path         string  `json:"path"`
+	Kind         string  `json:"kind"`                   // e.g., "import(variable)", "require(variable)", "__import__()"
+	Line         int     `json:"line"`                   // Line number if available
+	Bounded      bool    `json:"bounded"`                // True if bounded by webpackInclude or similar
+	BoundedBy    string  `json:"boundedBy,omitempty"`    // What bounded it (e.g., "webpackInclude: /\\.widget\\.js$/")
+	BoundedRisky bool    `json:"boundedRisky,omitempty"` // True if bounded but footprint exceeds threshold
+	Allowlisted  bool    `json:"allowlisted"`            // True if in allowlist
+	Confidence   float64 `json:"confidence"`             // 0.0-1.0 confidence this is truly dynamic
+	ExpandedTo   string  `json:"expandedTo,omitempty"`   // What module/package it expanded to
 }
 
 // DynamicImportPolicyUsed shows what policy was applied
 type DynamicImportPolicyUsed struct {
-	Expansion      string   `json:"expansion"`      // nearest_module, package, owners, full_suite
+	Expansion      string   `json:"expansion"`            // nearest_module, package, owners, full_suite
 	ExpandedTo     []string `json:"expandedTo,omitempty"` // What modules/tests were added
 	OwnersFallback bool     `json:"ownersFallback"`
 }
@@ -3152,9 +3189,9 @@ func (c *DynamicImportCache) Set(digest string, imports []DynamicImportFile) {
 
 // CIUncertainty captures structured uncertainty information
 type CIUncertainty struct {
-	Score   int                    `json:"score"`             // 0-100 uncertainty score (higher = more uncertain)
-	Sources []string               `json:"sources"`           // What contributed to uncertainty
-	Details *CIUncertaintyDetails  `json:"details,omitempty"` // Detailed breakdown
+	Score   int                   `json:"score"`             // 0-100 uncertainty score (higher = more uncertain)
+	Sources []string              `json:"sources"`           // What contributed to uncertainty
+	Details *CIUncertaintyDetails `json:"details,omitempty"` // Detailed breakdown
 }
 
 // CIUncertaintyDetails provides granular uncertainty info
@@ -3196,10 +3233,10 @@ type CoverageInfo struct {
 
 // ContractInfo captures contract/schema change detection
 type ContractInfo struct {
-	Changed          bool                `json:"changed"`
-	SchemasChanged   []ContractChange    `json:"schemasChanged,omitempty"`
-	TestsFromSchema  []string            `json:"testsFromSchema,omitempty"`  // Tests selected due to schema changes
-	GeneratedChanged []string            `json:"generatedChanged,omitempty"` // Generated files that changed
+	Changed          bool             `json:"changed"`
+	SchemasChanged   []ContractChange `json:"schemasChanged,omitempty"`
+	TestsFromSchema  []string         `json:"testsFromSchema,omitempty"`  // Tests selected due to schema changes
+	GeneratedChanged []string         `json:"generatedChanged,omitempty"` // Generated files that changed
 }
 
 // ContractChange represents a changed contract/schema
@@ -3226,40 +3263,40 @@ type CoverageMap struct {
 
 // CoverageEntry represents a single file -> test coverage record
 type CoverageEntry struct {
-	TestID      string `json:"testId"`      // Test file/name that covers this file
-	LastSeenAt  string `json:"lastSeenAt"`  // ISO8601 timestamp
-	HitCount    int    `json:"hitCount"`    // How many times this test hit this file
-	LinesCovered []int `json:"linesCovered,omitempty"` // Specific lines if available
+	TestID       string `json:"testId"`                 // Test file/name that covers this file
+	LastSeenAt   string `json:"lastSeenAt"`             // ISO8601 timestamp
+	HitCount     int    `json:"hitCount"`               // How many times this test hit this file
+	LinesCovered []int  `json:"linesCovered,omitempty"` // Specific lines if available
 }
 
 // ========== Contract Registry Types ==========
 
 // ContractRegistry stores registered contracts/schemas
 type ContractRegistry struct {
-	Version   int                `json:"version"`
-	Contracts []ContractBinding  `json:"contracts"`
+	Version   int               `json:"version"`
+	Contracts []ContractBinding `json:"contracts"`
 }
 
 // ContractBinding links a schema to its tests
 type ContractBinding struct {
-	Type       string   `json:"type"`                 // openapi, protobuf, graphql
-	Path       string   `json:"path"`                 // Path to schema file
-	Service    string   `json:"service,omitempty"`    // Service/module name
-	Tests      []string `json:"tests"`                // Glob patterns for contract tests
-	Digest     string   `json:"digest,omitempty"`     // Current fingerprint
-	Generated  []string `json:"generated,omitempty"`  // Generated output paths
+	Type      string   `json:"type"`                // openapi, protobuf, graphql
+	Path      string   `json:"path"`                // Path to schema file
+	Service   string   `json:"service,omitempty"`   // Service/module name
+	Tests     []string `json:"tests"`               // Glob patterns for contract tests
+	Digest    string   `json:"digest,omitempty"`    // Current fingerprint
+	Generated []string `json:"generated,omitempty"` // Generated output paths
 }
 
 // CIProvenance captures audit information for the plan
 type CIProvenance struct {
-	Changeset       string   `json:"changeset,omitempty"`       // Changeset ID used
-	Base            string   `json:"base,omitempty"`            // Base snapshot ID
-	Head            string   `json:"head,omitempty"`            // Head snapshot ID
-	KaiVersion      string   `json:"kaiVersion"`                // Kai CLI version
-	DetectorVersion string   `json:"detectorVersion"`           // Dynamic import detector version
-	GeneratedAt     string   `json:"generatedAt"`               // ISO8601 timestamp
-	Analyzers       []string `json:"analyzers"`                 // Which analyzers ran
-	PolicyHash      string   `json:"policyHash,omitempty"`      // Hash of ci-policy.yaml if used
+	Changeset       string   `json:"changeset,omitempty"`  // Changeset ID used
+	Base            string   `json:"base,omitempty"`       // Base snapshot ID
+	Head            string   `json:"head,omitempty"`       // Head snapshot ID
+	KaiVersion      string   `json:"kaiVersion"`           // Kai CLI version
+	DetectorVersion string   `json:"detectorVersion"`      // Dynamic import detector version
+	GeneratedAt     string   `json:"generatedAt"`          // ISO8601 timestamp
+	Analyzers       []string `json:"analyzers"`            // Which analyzers ran
+	PolicyHash      string   `json:"policyHash,omitempty"` // Hash of ci-policy.yaml if used
 }
 
 // DetectorVersion is the current version of the dynamic import detector
@@ -3294,11 +3331,11 @@ type CIPolicy struct {
 // CISafety contains safety-related flags and risk signals
 type CISafety struct {
 	StructuralRisks  []StructuralRisk `json:"structuralRisks,omitempty"`
-	Confidence       float64          `json:"confidence"`       // 0.0-1.0 confidence in selection
-	RecommendFull    bool             `json:"recommendFull"`    // True if full run recommended
+	Confidence       float64          `json:"confidence"`    // 0.0-1.0 confidence in selection
+	RecommendFull    bool             `json:"recommendFull"` // True if full run recommended
 	RecommendReason  string           `json:"recommendReason,omitempty"`
-	PanicSwitch      bool             `json:"panicSwitch"`      // Force full run (env/label override)
-	AutoExpanded     bool             `json:"autoExpanded"`     // Was selection auto-expanded due to risk?
+	PanicSwitch      bool             `json:"panicSwitch"`  // Force full run (env/label override)
+	AutoExpanded     bool             `json:"autoExpanded"` // Was selection auto-expanded due to risk?
 	ExpansionReasons []string         `json:"expansionReasons,omitempty"`
 }
 
@@ -3308,7 +3345,7 @@ type StructuralRisk struct {
 	Description string `json:"description"` // Human-readable description
 	Severity    string `json:"severity"`    // "low", "medium", "high", "critical"
 	FilePath    string `json:"filePath,omitempty"`
-	Triggered   bool   `json:"triggered"`   // Did this risk trigger expansion?
+	Triggered   bool   `json:"triggered"` // Did this risk trigger expansion?
 }
 
 // CIPrediction contains shadow mode prediction data for comparison
@@ -3488,6 +3525,7 @@ func DefaultCIPolicy() CIPolicyConfig {
 			Generated:          []CIPolicyGeneratedMapping{},               // User-defined schema→outputs
 		},
 	}
+
 }
 
 // loadCIPolicy loads the CI policy from .kai/rules/ci-policy.yaml or returns defaults
@@ -5958,13 +5996,13 @@ func runCIDetectRuntimeRisk(cmd *cobra.Command, args []string) error {
 
 // MissRecord represents a recorded test selection miss
 type MissRecord struct {
-	Timestamp     string   `json:"timestamp"`
-	PlanFile      string   `json:"planFile,omitempty"`
+	Timestamp      string       `json:"timestamp"`
+	PlanFile       string       `json:"planFile,omitempty"`
 	PlanProvenance CIProvenance `json:"planProvenance,omitempty"`
-	FailedTests   []string `json:"failedTests"`
-	SelectedTests []string `json:"selectedTests"`
-	MissedTests   []string `json:"missedTests"` // Failed but not selected
-	FalsePositives []string `json:"falsePositives,omitempty"` // Selected but didn't fail
+	FailedTests    []string     `json:"failedTests"`
+	SelectedTests  []string     `json:"selectedTests"`
+	MissedTests    []string     `json:"missedTests"`              // Failed but not selected
+	FalsePositives []string     `json:"falsePositives,omitempty"` // Selected but didn't fail
 }
 
 func runCIRecordMiss(cmd *cobra.Command, args []string) error {
@@ -6217,10 +6255,10 @@ func runCIExplainDynamicImports(cmd *cobra.Command, args []string) error {
 	// Output
 	if jsonFlag {
 		output := struct {
-			TotalFilesScanned int                  `json:"totalFilesScanned"`
-			TotalDetected     int                  `json:"totalDetected"`
+			TotalFilesScanned int                    `json:"totalFilesScanned"`
+			TotalDetected     int                    `json:"totalDetected"`
 			Policy            CIPolicyDynamicImports `json:"policy"`
-			Imports           []DynamicImportFile  `json:"imports"`
+			Imports           []DynamicImportFile    `json:"imports"`
 		}{
 			TotalFilesScanned: len(filesToScan),
 			TotalDetected:     len(allImports),
@@ -7415,8 +7453,8 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	// Load content if needed for semantic or patch mode
 	needContent := diffSemantic || diffPatch
 
-	baseFileMap := make(map[string]string)   // path -> digest
-	baseContent := make(map[string][]byte)   // path -> content (for semantic/patch diff)
+	baseFileMap := make(map[string]string) // path -> digest
+	baseContent := make(map[string][]byte) // path -> content (for semantic/patch diff)
 	for _, f := range baseFiles {
 		path, _ := f.Payload["path"].(string)
 		digest, _ := f.Payload["digest"].(string)
@@ -8402,6 +8440,90 @@ func runRefDel(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Deleted ref '%s'\n", name)
 	return nil
+}
+
+func runTagList(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	refMgr := ref.NewRefManager(db)
+	refs, err := refMgr.List(nil)
+	if err != nil {
+		return fmt.Errorf("listing refs: %w", err)
+	}
+
+	var tags []*ref.Ref
+	for _, r := range refs {
+		if strings.HasPrefix(r.Name, "tag.") {
+			tags = append(tags, r)
+		}
+	}
+	if len(tags) == 0 {
+		fmt.Println("No tags found.")
+		return nil
+	}
+
+	fmt.Printf("%-30s  %-12s  %s\n", "NAME", "KIND", "TARGET")
+	fmt.Println(strings.Repeat("-", 80))
+	for _, r := range tags {
+		fmt.Printf("%-30s  %-12s  %s\n", strings.TrimPrefix(r.Name, "tag."), r.TargetKind, util.BytesToHex(r.TargetID)[:16]+"...")
+	}
+	return nil
+}
+
+func runTagCreate(cmd *cobra.Command, args []string) error {
+	name := normalizeTagName(args[0])
+	target := args[1]
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	resolver := ref.NewResolver(db)
+	refMgr := ref.NewRefManager(db)
+	kind := ref.KindSnapshot
+
+	result, err := resolver.Resolve(target, &kind)
+	if err != nil {
+		return fmt.Errorf("resolving target: %w", err)
+	}
+
+	if err := refMgr.Set(name, result.ID, result.Kind); err != nil {
+		return fmt.Errorf("setting tag: %w", err)
+	}
+
+	fmt.Printf("Set tag '%s' -> %s (%s)\n", strings.TrimPrefix(name, "tag."), util.BytesToHex(result.ID)[:16]+"...", result.Kind)
+	return nil
+}
+
+func runTagDelete(cmd *cobra.Command, args []string) error {
+	name := normalizeTagName(args[0])
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	refMgr := ref.NewRefManager(db)
+	if err := refMgr.Delete(name); err != nil {
+		return fmt.Errorf("deleting tag: %w", err)
+	}
+
+	fmt.Printf("Deleted tag '%s'\n", strings.TrimPrefix(name, "tag."))
+	return nil
+}
+
+func normalizeTagName(name string) string {
+	if strings.HasPrefix(name, "tag.") {
+		return name
+	}
+	return "tag." + name
 }
 
 func runPick(cmd *cobra.Command, args []string) error {
@@ -9699,6 +9821,8 @@ func runFetch(cmd *cobra.Command, args []string) error {
 			kind = ref.KindChangeSet
 		} else if strings.HasPrefix(r.Name, "ws.") {
 			kind = ref.KindWorkspace
+		} else if strings.HasPrefix(r.Name, "tag.") {
+			kind = ref.KindSnapshot
 		}
 
 		if err := refMgr.Set(localName, r.Target, kind); err != nil {
@@ -9905,6 +10029,8 @@ func runClone(cmd *cobra.Command, args []string) error {
 			kind = ref.KindChangeSet
 		} else if strings.HasPrefix(r.Name, "ws.") {
 			kind = ref.KindWorkspace
+		} else if strings.HasPrefix(r.Name, "tag.") {
+			kind = ref.KindSnapshot
 		}
 
 		if err := refMgr.Set(localName, r.Target, kind); err != nil {
@@ -10672,10 +10798,10 @@ func showUnifiedDiff(before, after string) {
 
 	// ANSI color codes
 	const (
-		colorReset  = "\033[0m"
-		colorRed    = "\033[31m"
-		colorGreen  = "\033[32m"
-		colorCyan   = "\033[36m"
+		colorReset = "\033[0m"
+		colorRed   = "\033[31m"
+		colorGreen = "\033[32m"
+		colorCyan  = "\033[36m"
 	)
 
 	// Track line numbers for hunk headers
@@ -11907,7 +12033,7 @@ func detectCoverageFormat(path string, data []byte) string {
 // parseNYCCoverage parses NYC/Istanbul coverage-final.json
 func parseNYCCoverage(data []byte) (map[string][]CoverageEntry, error) {
 	var nycData map[string]struct {
-		Path         string         `json:"path"`
+		Path         string `json:"path"`
 		StatementMap map[string]struct {
 			Start struct{ Line int } `json:"start"`
 			End   struct{ Line int } `json:"end"`
