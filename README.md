@@ -3114,9 +3114,29 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 |----------|------|---------|-------------|
 | `KAILAB_LISTEN` | `--listen` | `:7447` | HTTP listen address |
 | `KAILAB_DATA` | `--data` | `./data` | Base directory for repo databases |
+| `KAILAB_SSH_LISTEN` | `--ssh-listen` | - | SSH listen address for git-upload-pack/receive-pack |
 | `KAILAB_MAX_OPEN` | - | `256` | Max number of repos to keep open (LRU) |
 | `KAILAB_IDLE_TTL` | - | `10m` | How long to keep idle repos open |
 | `KAILAB_MAX_PACK_SIZE` | - | `256MB` | Maximum pack upload size |
+| `KAILAB_SSH_ALLOW_USERS` | - | - | Comma/semicolon-separated SSH usernames allowed |
+| `KAILAB_SSH_ALLOW_REPOS` | - | - | Comma/semicolon-separated repo allowlist (tenant/repo) |
+| `KAILAB_SSH_AUDIT` | - | `false` | Enable SSH git audit logging |
+
+### SSH Git Access Control
+
+Enable SSH for git operations and optionally enforce allowlists:
+
+```bash
+KAILAB_SSH_LISTEN=:2222 \
+KAILAB_SSH_ALLOW_USERS=alice,bob \
+KAILAB_SSH_ALLOW_REPOS=acme/webapp,acme/api \
+KAILAB_SSH_AUDIT=true \
+./kailabd --data ./data
+```
+
+Notes:
+- If `KAILAB_SSH_ALLOW_USERS` / `KAILAB_SSH_ALLOW_REPOS` are unset, access is allowed by default.
+- Repos are matched as `tenant/repo` (e.g., `acme/webapp`).
 
 ### Filesystem Layout
 
