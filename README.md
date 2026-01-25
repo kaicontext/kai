@@ -3227,6 +3227,9 @@ Cleanup checklist:
 - Document incident response for attempted Git pushes (expected to fail).
 - Archive or remove legacy Git auth credentials.
 
+Deprecations:
+- Treat `KAILAB_GIT_MIRROR_ROLLBACK` as a temporary safety switch; remove it from production configs in Kai-only.
+
 ### Signed ChangeSets (SSH)
 
 Sign changesets from the CLI using an SSH private key, and have the server verify signatures.
