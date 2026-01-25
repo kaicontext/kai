@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"kai-core/cas"
+	"kailab/background"
 	"kailab/config"
 	"kailab/pack"
 	"kailab/proto"
@@ -39,6 +41,36 @@ func (h *Handler) mirrorRefs(ctx context.Context, rh *repo.Handle, refs []string
 	if err := h.mirror.SyncRefs(ctx, rh, refs); err != nil {
 		log.Printf("git mirror sync failed for %s/%s: %v", rh.Tenant, rh.Name, err)
 	}
+}
+
+func (h *Handler) ensureSignedChangeSet(db *sql.DB, target []byte) error {
+	if h.cfg == nil || !h.cfg.RequireSignedChangeSets || len(target) == 0 {
+		return nil
+	}
+
+	content, kind, err := pack.ExtractObjectFromDB(db, target)
+	if err != nil {
+		return fmt.Errorf("load target: %w", err)
+	}
+	if kind != "ChangeSet" {
+		return nil
+	}
+
+	payload, err := background.ParseObjectPayload(content)
+	if err != nil {
+		return fmt.Errorf("parse changeset: %w", err)
+	}
+	if payload["signature"] == nil {
+		return errors.New("changeset signature required")
+	}
+	ok, err := background.VerifyChangeSetSignature(payload)
+	if err != nil {
+		return fmt.Errorf("verify signature: %w", err)
+	}
+	if !ok {
+		return errors.New("changeset signature invalid")
+	}
+	return nil
 }
 
 // NewHandler creates a new API handler.
@@ -399,6 +431,11 @@ func (h *Handler) UpdateRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.ensureSignedChangeSet(rh.DB, req.New); err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), nil)
+		return
+	}
+
 	actor := r.Header.Get("X-Kailab-Actor")
 	if actor == "" {
 		actor = "anonymous"
@@ -488,6 +525,14 @@ func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
 				Name:  upd.Name,
 				OK:    false,
 				Error: "new target required",
+			}
+			continue
+		}
+		if err := h.ensureSignedChangeSet(rh.DB, upd.New); err != nil {
+			results[i] = proto.BatchRefResult{
+				Name:  upd.Name,
+				OK:    false,
+				Error: err.Error(),
 			}
 			continue
 		}

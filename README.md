@@ -3157,6 +3157,8 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_GIT_MIRROR_DIR` | - | `<data>/git-mirror` | Base directory for mirror repos |
 | `KAILAB_GIT_MIRROR_ALLOW_REPOS` | - | - | Comma/semicolon-separated allowlist of repos to mirror |
 | `KAILAB_GIT_MIRROR_ROLLBACK` | - | `false` | Disable mirroring without changing other settings |
+| `KAILAB_KAI_PRIMARY` | - | `false` | Make Kai refs authoritative; disable Git write path |
+| `KAILAB_REQUIRE_SIGNED_CHANGESETS` | - | `false` | Require signed changesets for ref updates |
 
 ### SSH Git Access Control
 
@@ -3196,6 +3198,16 @@ Backfill existing repos into mirrors:
 ```bash
 cd kailab
 go run ./cmd/kailab-mirror --data ./data --tenant acme --repo webapp
+```
+
+### Kai-Primary Enforcement (Phase 2)
+
+Disable Git writes and require signed changesets for ref updates:
+
+```bash
+KAILAB_KAI_PRIMARY=true \
+KAILAB_REQUIRE_SIGNED_CHANGESETS=true \
+./kailabd --data ./data
 ```
 
 ### Signed ChangeSets (SSH)

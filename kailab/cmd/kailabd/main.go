@@ -62,6 +62,8 @@ func main() {
 		}
 		log.Printf("  git_mirror_rollback: %t", cfg.GitMirrorRollback)
 	}
+	log.Printf("  kai_primary: %t", cfg.KaiPrimary)
+	log.Printf("  require_signed_changesets: %t", cfg.RequireSignedChangeSets)
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -125,7 +127,11 @@ func main() {
 			Rollback:   cfg.GitMirrorRollback,
 			Logger:     log.Default(),
 		})
-		handler := sshserver.NewGitHandler(registry, log.Default(), mirror)
+		handler := sshserver.NewGitHandler(registry, log.Default(), sshserver.GitHandlerOptions{
+			Mirror:        mirror,
+			ReadOnly:      cfg.KaiPrimary,
+			RequireSigned: cfg.RequireSignedChangeSets,
+		})
 		var authorizer sshserver.SessionAuthorizer
 		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 {
 			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos)

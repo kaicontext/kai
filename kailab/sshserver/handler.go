@@ -15,17 +15,32 @@ import (
 
 // GitHandler routes Git protocol calls to repo-backed implementations.
 type GitHandler struct {
-	registry *repo.Registry
-	logger   *log.Logger
-	mirror   *GitMirror
+	registry      *repo.Registry
+	logger        *log.Logger
+	mirror        *GitMirror
+	readOnly      bool
+	requireSigned bool
+}
+
+// GitHandlerOptions configure Git handler behavior.
+type GitHandlerOptions struct {
+	Mirror        *GitMirror
+	ReadOnly      bool
+	RequireSigned bool
 }
 
 // NewGitHandler creates a handler wired with the repo registry.
-func NewGitHandler(registry *repo.Registry, logger *log.Logger, mirror *GitMirror) *GitHandler {
+func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerOptions) *GitHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &GitHandler{registry: registry, logger: logger, mirror: mirror}
+	return &GitHandler{
+		registry:      registry,
+		logger:        logger,
+		mirror:        opts.Mirror,
+		readOnly:      opts.ReadOnly,
+		requireSigned: opts.RequireSigned,
+	}
 }
 
 // UploadPack handles git-upload-pack (fetch/clone).
@@ -78,6 +93,13 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 	}
 	h.registry.Acquire(handle)
 	defer h.registry.Release(handle)
+
+	if h.readOnly || h.requireSigned {
+		err := fmt.Errorf("git receive-pack disabled (Kai-primary)")
+		_ = writeGitError(io.Stdout, err.Error())
+		_ = writeFlush(io.Stdout)
+		return err
+	}
 
 	updatedRefs, err := handleReceivePack(handle.DB, io.Stdin, io.Stdout)
 	if err != nil {

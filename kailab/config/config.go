@@ -42,27 +42,33 @@ type Config struct {
 	GitMirrorAllowRepos []string
 	// GitMirrorRollback disables mirroring without changing config.
 	GitMirrorRollback bool
+	// KaiPrimary marks Kai refs as authoritative; Git write path is disabled.
+	KaiPrimary bool
+	// RequireSignedChangeSets enforces signatures for changeset writes.
+	RequireSignedChangeSets bool
 }
 
 // FromEnv creates a Config from environment variables.
 func FromEnv() *Config {
 	cfg := &Config{
-		Listen:              getEnv("KAILAB_LISTEN", ":7447"),
-		DataDir:             getEnv("KAILAB_DATA", "./data"),
-		Tenant:              getEnv("KAILAB_TENANT", "default"),
-		Repo:                getEnv("KAILAB_REPO", "main"),
-		MaxPackSize:         getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
-		Version:             getEnv("KAILAB_VERSION", "0.1.0"),
-		Debug:               getEnvBool("KAILAB_DEBUG", false),
-		MaxOpenRepos:        getEnvInt("KAILAB_MAX_OPEN", 256),
-		IdleTTL:             getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
-		SSHAllowUsers:       getEnvList("KAILAB_SSH_ALLOW_USERS"),
-		SSHAllowRepos:       getEnvList("KAILAB_SSH_ALLOW_REPOS"),
-		SSHAudit:            getEnvBool("KAILAB_SSH_AUDIT", false),
-		GitMirrorEnabled:    getEnvBool("KAILAB_GIT_MIRROR_ENABLED", false),
-		GitMirrorDir:        getEnv("KAILAB_GIT_MIRROR_DIR", ""),
-		GitMirrorAllowRepos: getEnvList("KAILAB_GIT_MIRROR_ALLOW_REPOS"),
-		GitMirrorRollback:   getEnvBool("KAILAB_GIT_MIRROR_ROLLBACK", false),
+		Listen:                  getEnv("KAILAB_LISTEN", ":7447"),
+		DataDir:                 getEnv("KAILAB_DATA", "./data"),
+		Tenant:                  getEnv("KAILAB_TENANT", "default"),
+		Repo:                    getEnv("KAILAB_REPO", "main"),
+		MaxPackSize:             getEnvInt64("KAILAB_MAX_PACK_SIZE", 256*1024*1024), // 256MB default
+		Version:                 getEnv("KAILAB_VERSION", "0.1.0"),
+		Debug:                   getEnvBool("KAILAB_DEBUG", false),
+		MaxOpenRepos:            getEnvInt("KAILAB_MAX_OPEN", 256),
+		IdleTTL:                 getEnvDuration("KAILAB_IDLE_TTL", 10*time.Minute),
+		SSHAllowUsers:           getEnvList("KAILAB_SSH_ALLOW_USERS"),
+		SSHAllowRepos:           getEnvList("KAILAB_SSH_ALLOW_REPOS"),
+		SSHAudit:                getEnvBool("KAILAB_SSH_AUDIT", false),
+		GitMirrorEnabled:        getEnvBool("KAILAB_GIT_MIRROR_ENABLED", false),
+		GitMirrorDir:            getEnv("KAILAB_GIT_MIRROR_DIR", ""),
+		GitMirrorAllowRepos:     getEnvList("KAILAB_GIT_MIRROR_ALLOW_REPOS"),
+		GitMirrorRollback:       getEnvBool("KAILAB_GIT_MIRROR_ROLLBACK", false),
+		KaiPrimary:              getEnvBool("KAILAB_KAI_PRIMARY", false),
+		RequireSignedChangeSets: getEnvBool("KAILAB_REQUIRE_SIGNED_CHANGESETS", false),
 	}
 	return cfg
 }
