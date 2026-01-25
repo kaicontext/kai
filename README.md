@@ -3183,6 +3183,17 @@ Notes:
 - If `KAILAB_SSH_ALLOW_USERS` / `KAILAB_SSH_ALLOW_REPOS` are unset, access is allowed by default.
 - Repos are matched as `tenant/repo` (e.g., `acme/webapp`).
 
+### Git-Compatible Repo View (Adapter Layer)
+
+Kailab exposes a Git-compatible read view by adapting Kai refs and snapshots into Git objects:
+
+- **RefAdapter** maps `snap.*`, `cs.*`, and `tag.*` to Git ref namespaces.
+- **SnapshotAdapter** converts snapshots into Git trees/blobs.
+- **PackBuilder** assembles packfiles for git-upload-pack requests.
+- **ObjectStore** caches Git objects for repeated fetches.
+
+This layer keeps Git operations read-only in Kai-only mode while preserving standard Git clients.
+
 ### Dual-Write Git Mirror (Phase 1)
 
 Mirror Kai refs into a bare Git repo for selected pilot repositories. This keeps Git refs/tags updated alongside Kai.
