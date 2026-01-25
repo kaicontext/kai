@@ -3121,6 +3121,7 @@ Admin routes: POST /admin/v1/repos, GET /admin/v1/repos, DELETE /admin/v1/repos/
 | `KAILAB_SSH_ALLOW_USERS` | - | - | Comma/semicolon-separated SSH usernames allowed |
 | `KAILAB_SSH_ALLOW_REPOS` | - | - | Comma/semicolon-separated repo allowlist (tenant/repo) |
 | `KAILAB_SSH_AUDIT` | - | `false` | Enable SSH git audit logging |
+| `KAILAB_SSH_SIGN_KEYS` | - | - | Comma/semicolon-separated authorized_keys files used to verify SSH changeset signatures |
 
 ### SSH Git Access Control
 
@@ -3137,6 +3138,25 @@ KAILAB_SSH_AUDIT=true \
 Notes:
 - If `KAILAB_SSH_ALLOW_USERS` / `KAILAB_SSH_ALLOW_REPOS` are unset, access is allowed by default.
 - Repos are matched as `tenant/repo` (e.g., `acme/webapp`).
+
+### Signed ChangeSets (SSH)
+
+Sign changesets from the CLI using an SSH private key, and have the server verify signatures.
+
+CLI (sign a changeset during staging):
+
+```bash
+KAI_SSH_SIGN_KEY=~/.ssh/id_ed25519 \
+kai ws stage --ws feature/auth --dir . --message "Add auth flow"
+```
+
+Server (verify signatures):
+
+```bash
+KAILAB_SSH_SIGN_KEYS=~/.ssh/authorized_keys \
+KAILAB_SSH_LISTEN=:2222 \
+./kailabd --data ./data
+```
 
 ### Filesystem Layout
 
