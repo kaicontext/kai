@@ -112,7 +112,7 @@ func TestBuildCommitObject(t *testing.T) {
 	if len(commit.OID) != 40 {
 		t.Fatalf("expected 40-hex oid, got %q", commit.OID)
 	}
-	if commit.Type != gitObjectCommit {
+	if commit.Type != ObjectCommit {
 		t.Fatalf("expected commit type")
 	}
 	if !bytes.Contains(commit.Data, []byte("tree "+emptyTreeOID)) {

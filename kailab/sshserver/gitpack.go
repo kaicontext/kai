@@ -3,6 +3,7 @@ package sshserver
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
@@ -17,29 +18,27 @@ import (
 	"kailab/store"
 )
 
-type gitObjectType int
-
-const (
-	gitObjectCommit gitObjectType = 1
-	gitObjectTree   gitObjectType = 2
-	gitObjectBlob   gitObjectType = 3
-)
-
-type gitObject struct {
-	Type gitObjectType
-	Data []byte
-	OID  string
-}
-
 const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
-func buildPackObjects(db *sql.DB, wants []string) ([]gitObject, error) {
-	refCommits, _, err := buildRefCommits(db)
+type dbRefAdapter struct {
+	db *sql.DB
+}
+
+func newDBRefAdapter(db *sql.DB) RefAdapter {
+	return &dbRefAdapter{db: db}
+}
+
+func (a *dbRefAdapter) BuildRefCommits(ctx context.Context) (map[string]RefCommitInfo, map[string]string, error) {
+	return buildRefCommits(a.db)
+}
+
+func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string) ([]GitObject, error) {
+	refCommits, _, err := refAdapter.BuildRefCommits(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	objects := make([]gitObject, 0)
+	objects := make([]GitObject, 0)
 	seen := make(map[string]bool)
 
 	for _, want := range wants {
@@ -47,11 +46,11 @@ func buildPackObjects(db *sql.DB, wants []string) ([]gitObject, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown want %s", want)
 		}
-		if !seen[info.commit.OID] {
-			seen[info.commit.OID] = true
-			objects = append(objects, info.commit)
+		if !seen[info.Commit.OID] {
+			seen[info.Commit.OID] = true
+			objects = append(objects, info.Commit)
 		}
-		for _, obj := range info.objects {
+		for _, obj := range info.Objects {
 			if !seen[obj.OID] {
 				seen[obj.OID] = true
 				objects = append(objects, obj)
@@ -66,15 +65,15 @@ func buildPackObjects(db *sql.DB, wants []string) ([]gitObject, error) {
 	return objects, nil
 }
 
-func buildEmptyTreeObject() gitObject {
-	return gitObject{
-		Type: gitObjectTree,
+func buildEmptyTreeObject() GitObject {
+	return GitObject{
+		Type: ObjectTree,
 		Data: []byte{},
 		OID:  emptyTreeOID,
 	}
 }
 
-func buildCommitObject(refName, targetHex, treeOID string) gitObject {
+func buildCommitObject(refName, targetHex, treeOID string) GitObject {
 	body := strings.Builder{}
 	body.WriteString("tree " + treeOID + "\n")
 	body.WriteString("author Kai <kai@local> 0 +0000\n")
@@ -85,10 +84,10 @@ func buildCommitObject(refName, targetHex, treeOID string) gitObject {
 	}
 	data := []byte(body.String())
 	oid := computeGitOID("commit", data)
-	return gitObject{Type: gitObjectCommit, Data: data, OID: oid}
+	return GitObject{Type: ObjectCommit, Data: data, OID: oid}
 }
 
-func writePack(w io.Writer, objects []gitObject) error {
+func writePack(w io.Writer, objects []GitObject) error {
 	var buf bytes.Buffer
 
 	// Pack header
@@ -111,8 +110,8 @@ func writePack(w io.Writer, objects []gitObject) error {
 	return err
 }
 
-func writePackObject(w *bytes.Buffer, obj gitObject) error {
-	if obj.Type != gitObjectCommit && obj.Type != gitObjectTree && obj.Type != gitObjectBlob {
+func writePackObject(w *bytes.Buffer, obj GitObject) error {
+	if obj.Type != ObjectCommit && obj.Type != ObjectTree && obj.Type != ObjectBlob {
 		return fmt.Errorf("unsupported git object type %d", obj.Type)
 	}
 
@@ -155,24 +154,19 @@ func computeGitOID(kind string, data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-type refCommitInfo struct {
-	commit  gitObject
-	objects []gitObject
-}
-
 type refBuild struct {
 	refName string
-	commit  gitObject
-	objects []gitObject
+	commit  GitObject
+	objects []GitObject
 }
 
-func buildRefCommits(db *sql.DB) (map[string]refCommitInfo, map[string]string, error) {
+func buildRefCommits(db *sql.DB) (map[string]RefCommitInfo, map[string]string, error) {
 	refs, err := store.ListRefs(db, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("list refs: %w", err)
 	}
 
-	result := make(map[string]refCommitInfo)
+	result := make(map[string]RefCommitInfo)
 	refToOID := make(map[string]string)
 	cache := make(map[string]snapshotObjects)
 
@@ -181,9 +175,9 @@ func buildRefCommits(db *sql.DB) (map[string]refCommitInfo, map[string]string, e
 		if err != nil {
 			return nil, nil, err
 		}
-		result[built.commit.OID] = refCommitInfo{
-			commit:  built.commit,
-			objects: built.objects,
+		result[built.commit.OID] = RefCommitInfo{
+			Commit:  built.commit,
+			Objects: built.objects,
 		}
 		refToOID[built.refName] = built.commit.OID
 	}
@@ -193,7 +187,7 @@ func buildRefCommits(db *sql.DB) (map[string]refCommitInfo, map[string]string, e
 
 type snapshotObjects struct {
 	treeOID string
-	objects []gitObject
+	objects []GitObject
 }
 
 func resolveSnapshotDigest(db *sql.DB, target []byte) ([]byte, error) {
@@ -254,7 +248,7 @@ func buildRef(db *sql.DB, ref *store.Ref, cache map[string]snapshotObjects) (ref
 	} else {
 		objects = snapshotObjects{
 			treeOID: emptyTreeOID,
-			objects: []gitObject{buildEmptyTreeObject()},
+			objects: []GitObject{buildEmptyTreeObject()},
 		}
 	}
 
@@ -277,7 +271,7 @@ func buildSnapshotObjects(db *sql.DB, snapshotDigest []byte) (snapshotObjects, e
 		return snapshotObjects{}, err
 	}
 
-	objects := append([]gitObject{}, blobs...)
+	objects := append([]GitObject{}, blobs...)
 	objects = append(objects, tree.objects...)
 
 	return snapshotObjects{
@@ -370,15 +364,15 @@ func parsePayload(content []byte) ([]byte, error) {
 
 type treeBuildResult struct {
 	oid     string
-	objects []gitObject
+	objects []GitObject
 }
 
-func buildTreeFromFiles(db *sql.DB, files []snapshotFile) (treeBuildResult, []gitObject, error) {
+func buildTreeFromFiles(db *sql.DB, files []snapshotFile) (treeBuildResult, []GitObject, error) {
 	root := &treeNode{
 		dirs:  map[string]*treeNode{},
 		blobs: map[string]string{},
 	}
-	var blobs []gitObject
+	var blobs []GitObject
 
 	for _, file := range files {
 		if file.Path == "" || file.ContentDigest == "" {
@@ -393,7 +387,7 @@ func buildTreeFromFiles(db *sql.DB, files []snapshotFile) (treeBuildResult, []gi
 			continue
 		}
 		blobOID := computeGitOID("blob", content)
-		blobs = append(blobs, gitObject{Type: gitObjectBlob, Data: content, OID: blobOID})
+		blobs = append(blobs, GitObject{Type: ObjectBlob, Data: content, OID: blobOID})
 
 		insertPath(root, filepath.ToSlash(file.Path), blobOID)
 	}
@@ -433,7 +427,7 @@ func insertPath(root *treeNode, path string, blobOID string) {
 
 func buildTreeObjects(node *treeNode) (treeBuildResult, error) {
 	var entries []treeEntry
-	var objects []gitObject
+	var objects []GitObject
 
 	for name, child := range node.dirs {
 		result, err := buildTreeObjects(child)
@@ -471,7 +465,7 @@ func buildTreeObjects(node *treeNode) (treeBuildResult, error) {
 	}
 
 	oid := computeGitOID("tree", data.Bytes())
-	tree := gitObject{Type: gitObjectTree, Data: data.Bytes(), OID: oid}
+	tree := GitObject{Type: ObjectTree, Data: data.Bytes(), OID: oid}
 	objects = append(objects, tree)
 	return treeBuildResult{oid: oid, objects: objects}, nil
 }
