@@ -9145,6 +9145,23 @@ func runPush(cmd *cobra.Command, args []string) error {
 				if r != nil {
 					refsToSync = append(refsToSync, r)
 				}
+			} else if strings.HasPrefix(target, "tag:") {
+				// Tag target
+				tagRef := strings.TrimPrefix(target, "tag:")
+				r, err := refMgr.Get("tag." + tagRef)
+				if err != nil {
+					return fmt.Errorf("getting tag ref 'tag.%s': %w", tagRef, err)
+				}
+				if r == nil {
+					// Try without prefix
+					r, err = refMgr.Get(tagRef)
+					if err != nil {
+						return fmt.Errorf("getting tag ref '%s': %w", tagRef, err)
+					}
+				}
+				if r != nil {
+					refsToSync = append(refsToSync, r)
+				}
 			} else if strings.HasPrefix(target, "review:") {
 				// Review target
 				reviewRef := strings.TrimPrefix(target, "review:")
@@ -9171,7 +9188,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("listing refs: %w", err)
 		}
 		for _, r := range allRefs {
-			if strings.HasPrefix(r.Name, "snap.") || strings.HasPrefix(r.Name, "cs.") {
+			if strings.HasPrefix(r.Name, "snap.") || strings.HasPrefix(r.Name, "cs.") || strings.HasPrefix(r.Name, "tag.") {
 				refsToSync = append(refsToSync, r)
 			}
 		}
