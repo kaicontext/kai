@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -854,6 +856,38 @@ var bisectResetCmd = &cobra.Command{
 	RunE:  runBisectReset,
 }
 
+var shadowGitRange string
+var shadowGitRepo string
+var shadowGitRef string
+var shadowSnapRef string
+var shadowUpdateRef string
+
+var shadowCmd = &cobra.Command{
+	Use:   "shadow",
+	Short: "Shadow Git in Kai (import/parity/drift)",
+}
+
+var shadowImportCmd = &cobra.Command{
+	Use:   "import --git-range <base..head>",
+	Short: "Import a Git range into Kai (snapshots + changeset)",
+	Args:  cobra.NoArgs,
+	RunE:  runShadowImport,
+}
+
+var shadowParityCmd = &cobra.Command{
+	Use:   "parity --git-range <base..head>",
+	Short: "Compare Git diff vs Kai snapshot diff",
+	Args:  cobra.NoArgs,
+	RunE:  runShadowParity,
+}
+
+var shadowDriftCmd = &cobra.Command{
+	Use:   "drift --git-ref <ref> --snap <snap-ref>",
+	Short: "Detect drift between Git ref and Kai snapshot",
+	Args:  cobra.NoArgs,
+	RunE:  runShadowDrift,
+}
+
 // Reference commands
 var refCmd = &cobra.Command{
 	Use:   "ref",
@@ -1631,6 +1665,22 @@ func init() {
 	bisectCmd.AddCommand(bisectSkipCmd)
 	bisectCmd.AddCommand(bisectNextCmd)
 	bisectCmd.AddCommand(bisectResetCmd)
+	shadowCmd.AddCommand(shadowImportCmd)
+	shadowCmd.AddCommand(shadowParityCmd)
+	shadowCmd.AddCommand(shadowDriftCmd)
+
+	shadowImportCmd.Flags().StringVar(&shadowGitRange, "git-range", "", "Git range BASE..HEAD")
+	shadowImportCmd.Flags().StringVar(&shadowGitRepo, "repo", ".", "Path to Git repository")
+	shadowImportCmd.Flags().StringVar(&shadowUpdateRef, "update-ref", "snap.main", "Ref to update to HEAD snapshot")
+	shadowImportCmd.MarkFlagRequired("git-range")
+
+	shadowParityCmd.Flags().StringVar(&shadowGitRange, "git-range", "", "Git range BASE..HEAD")
+	shadowParityCmd.Flags().StringVar(&shadowGitRepo, "repo", ".", "Path to Git repository")
+	shadowParityCmd.MarkFlagRequired("git-range")
+
+	shadowDriftCmd.Flags().StringVar(&shadowGitRef, "git-ref", "HEAD", "Git ref to compare")
+	shadowDriftCmd.Flags().StringVar(&shadowGitRepo, "repo", ".", "Path to Git repository")
+	shadowDriftCmd.Flags().StringVar(&shadowSnapRef, "snap", "snap.main", "Snapshot ref to compare against")
 
 	// Add modules subcommands
 	modulesCmd.AddCommand(modulesInitCmd)
@@ -1808,6 +1858,7 @@ func init() {
 	cherryPickCmd.GroupID = groupAdvanced
 	rebaseCmd.GroupID = groupAdvanced
 	bisectCmd.GroupID = groupAdvanced
+	shadowCmd.GroupID = groupAdvanced
 	modulesCmd.GroupID = groupAdvanced
 	pickCmd.GroupID = groupAdvanced
 	pruneCmd.GroupID = groupAdvanced
@@ -1824,6 +1875,7 @@ func init() {
 	rootCmd.AddCommand(cherryPickCmd)
 	rootCmd.AddCommand(rebaseCmd)
 	rootCmd.AddCommand(bisectCmd)
+	rootCmd.AddCommand(shadowCmd)
 	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
@@ -8994,6 +9046,209 @@ func saveBisectState(state bisectState) error {
 		return err
 	}
 	return os.WriteFile(bisectStatePath(), data, 0644)
+}
+
+func runShadowImport(cmd *cobra.Command, args []string) error {
+	baseRef, headRef, err := parseGitRange(shadowGitRange)
+	if err != nil {
+		return err
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	fmt.Printf("Importing git range %s..%s\n", baseRef, headRef)
+	baseSnap, err := createSnapshotFromGitRef(db, shadowGitRepo, baseRef)
+	if err != nil {
+		return fmt.Errorf("base snapshot: %w", err)
+	}
+	headSnap, err := createSnapshotFromGitRef(db, shadowGitRepo, headRef)
+	if err != nil {
+		return fmt.Errorf("head snapshot: %w", err)
+	}
+
+	changeSetID, err := createChangeSetFromSnapshots(db, baseSnap, headSnap, fmt.Sprintf("git:%s..%s", baseRef, headRef))
+	if err != nil {
+		return fmt.Errorf("changeset: %w", err)
+	}
+
+	if shadowUpdateRef != "" {
+		refMgr := ref.NewRefManager(db)
+		if err := refMgr.Set(shadowUpdateRef, headSnap, ref.KindSnapshot); err != nil {
+			return fmt.Errorf("updating ref %s: %w", shadowUpdateRef, err)
+		}
+	}
+
+	fmt.Printf("Imported changeset %s\n", util.BytesToHex(changeSetID)[:12])
+	return nil
+}
+
+func runShadowParity(cmd *cobra.Command, args []string) error {
+	baseRef, headRef, err := parseGitRange(shadowGitRange)
+	if err != nil {
+		return err
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	baseSnap, err := createSnapshotFromGitRef(db, shadowGitRepo, baseRef)
+	if err != nil {
+		return fmt.Errorf("base snapshot: %w", err)
+	}
+	headSnap, err := createSnapshotFromGitRef(db, shadowGitRepo, headRef)
+	if err != nil {
+		return fmt.Errorf("head snapshot: %w", err)
+	}
+
+	kaiFiles, err := diffSnapshotFiles(db, baseSnap, headSnap)
+	if err != nil {
+		return err
+	}
+	gitFiles, err := gitDiffNames(shadowGitRepo, baseRef, headRef)
+	if err != nil {
+		return err
+	}
+
+	onlyGit, onlyKai := diffSets(gitFiles, kaiFiles)
+	fmt.Printf("Git changed files: %d\n", len(gitFiles))
+	fmt.Printf("Kai changed files: %d\n", len(kaiFiles))
+	if len(onlyGit) > 0 {
+		fmt.Printf("Only in Git: %d\n", len(onlyGit))
+	}
+	if len(onlyKai) > 0 {
+		fmt.Printf("Only in Kai: %d\n", len(onlyKai))
+	}
+	return nil
+}
+
+func runShadowDrift(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	gitSnap, err := createSnapshotFromGitRef(db, shadowGitRepo, shadowGitRef)
+	if err != nil {
+		return fmt.Errorf("git snapshot: %w", err)
+	}
+	snapID, err := resolveSnapshotID(db, shadowSnapRef)
+	if err != nil {
+		return fmt.Errorf("snapshot ref: %w", err)
+	}
+
+	if bytes.Equal(gitSnap, snapID) {
+		fmt.Println("No drift detected.")
+		return nil
+	}
+	fmt.Printf("Drift detected: git=%s ref=%s\n", util.BytesToHex(gitSnap)[:12], util.BytesToHex(snapID)[:12])
+	return nil
+}
+
+func parseGitRange(input string) (string, string, error) {
+	parts := strings.Split(input, "..")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid git range (use BASE..HEAD)")
+	}
+	return parts[0], parts[1], nil
+}
+
+func createChangeSetFromSnapshots(db *graph.DB, baseSnap, headSnap []byte, source string) ([]byte, error) {
+	tx, err := db.BeginTx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	payload := map[string]interface{}{
+		"base":        util.BytesToHex(baseSnap),
+		"head":        util.BytesToHex(headSnap),
+		"title":       "",
+		"description": fmt.Sprintf("shadow import %s", source),
+		"intent":      "",
+		"createdAt":   util.NowMs(),
+	}
+	changeSetID, err := db.InsertNode(tx, graph.KindChangeSet, payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	autoRefMgr := ref.NewAutoRefManager(db)
+	if err := autoRefMgr.OnChangeSetCreated(changeSetID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
+	}
+	return changeSetID, nil
+}
+
+func diffSnapshotFiles(db *graph.DB, baseSnap, headSnap []byte) (map[string]bool, error) {
+	mgr := workspace.NewManager(db)
+	baseFiles, err := mgr.GetSnapshotFileMap(baseSnap)
+	if err != nil {
+		return nil, err
+	}
+	headFiles, err := mgr.GetSnapshotFileMap(headSnap)
+	if err != nil {
+		return nil, err
+	}
+
+	changed := make(map[string]bool)
+	for path, headDigest := range headFiles {
+		baseDigest, exists := baseFiles[path]
+		if !exists || baseDigest != headDigest {
+			changed[path] = true
+		}
+	}
+	for path := range baseFiles {
+		if _, exists := headFiles[path]; !exists {
+			changed[path] = true
+		}
+	}
+	return changed, nil
+}
+
+func gitDiffNames(repoPath, baseRef, headRef string) (map[string]bool, error) {
+	cmd := exec.Command("git", "-C", repoPath, "diff", "--name-only", fmt.Sprintf("%s..%s", baseRef, headRef))
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff: %w", err)
+	}
+	changed := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		changed[line] = true
+	}
+	return changed, nil
+}
+
+func diffSets(a, b map[string]bool) ([]string, []string) {
+	var onlyA []string
+	for k := range a {
+		if !b[k] {
+			onlyA = append(onlyA, k)
+		}
+	}
+	var onlyB []string
+	for k := range b {
+		if !a[k] {
+			onlyB = append(onlyB, k)
+		}
+	}
+	sort.Strings(onlyA)
+	sort.Strings(onlyB)
+	return onlyA, onlyB
 }
 
 // resolveID resolves a user-provided ID string to a full ID bytes.
