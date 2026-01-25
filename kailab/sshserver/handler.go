@@ -222,6 +222,8 @@ func mapRefName(name string) string {
 		return "refs/heads/" + strings.TrimPrefix(name, "ws.")
 	case strings.HasPrefix(name, "cs."):
 		return "refs/kai/cs/" + strings.TrimPrefix(name, "cs.")
+	case strings.HasPrefix(name, "tag."):
+		return "refs/tags/" + strings.TrimPrefix(name, "tag.")
 	default:
 		return "refs/kai/" + name
 	}
