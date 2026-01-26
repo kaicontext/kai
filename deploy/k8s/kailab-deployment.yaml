@@ -200,6 +200,22 @@ spec:
       name: http
 
 ---
+# SSH LoadBalancer for external git access
+apiVersion: v1
+kind: Service
+metadata:
+  name: kailab-ssh
+  namespace: kailab
+spec:
+  type: LoadBalancer
+  selector:
+    app: kailab
+  ports:
+    - port: 22
+      targetPort: 2222
+      name: ssh
+
+---
 # Ingress for external access (nginx ingress)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
