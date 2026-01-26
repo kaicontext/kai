@@ -55,11 +55,17 @@ spec:
           ports:
             - containerPort: 7447
               name: grpc
+            - containerPort: 2222
+              name: ssh
           env:
             - name: KAILAB_DATA
               value: /data
             - name: KAILAB_LISTEN
               value: ":7447"
+            - name: KAILAB_SSH_LISTEN
+              value: ":2222"
+            - name: KAILAB_CONTROL_PLANE_URL
+              value: "http://kailab-control:8080"
           volumeMounts:
             - name: data
               mountPath: /data
@@ -99,6 +105,9 @@ spec:
     - port: 7447
       targetPort: 7447
       name: grpc
+    - port: 2222
+      targetPort: 2222
+      name: ssh
 
 ---
 # Kailab Control Plane Deployment
