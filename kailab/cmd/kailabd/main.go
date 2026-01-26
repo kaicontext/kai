@@ -78,6 +78,9 @@ func main() {
 		log.Printf("  git_agent: %s", cfg.GitAgent)
 	}
 	log.Printf("  git_object_cache_size: %d", cfg.GitObjectCacheSize)
+	if cfg.ControlPlaneURL != "" {
+		log.Printf("  control_plane_url: %s", cfg.ControlPlaneURL)
+	}
 
 	// Create data directory if needed
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
@@ -156,7 +159,9 @@ func main() {
 			ObjectStore:         objectStore,
 		})
 		var authorizer sshserver.SessionAuthorizer
-		if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 || len(cfg.SSHAllowKeys) > 0 {
+		if cfg.ControlPlaneURL != "" {
+			authorizer = sshserver.NewControlPlaneAuthorizer(cfg.ControlPlaneURL)
+		} else if len(cfg.SSHAllowUsers) > 0 || len(cfg.SSHAllowRepos) > 0 || len(cfg.SSHAllowKeys) > 0 {
 			authorizer = sshserver.NewAllowlistAuthorizer(cfg.SSHAllowUsers, cfg.SSHAllowRepos, cfg.SSHAllowKeys)
 		}
 		var auditor sshserver.SessionAuditor

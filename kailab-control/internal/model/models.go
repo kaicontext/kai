@@ -152,3 +152,14 @@ func HasScope(scopes []string, required string) bool {
 	}
 	return false
 }
+
+// SSHKey represents a user's SSH public key.
+type SSHKey struct {
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	Name        string    `json:"name"`
+	Fingerprint string    `json:"fingerprint"`
+	PublicKey   string    `json:"public_key"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
+}

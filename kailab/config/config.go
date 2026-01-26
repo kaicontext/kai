@@ -58,6 +58,8 @@ type Config struct {
 	GitAgent string
 	// GitObjectCacheSize caps the in-memory git object cache.
 	GitObjectCacheSize int
+	// ControlPlaneURL is the URL of the control plane for SSH key verification.
+	ControlPlaneURL string
 }
 
 // FromEnv creates a Config from environment variables.
@@ -87,6 +89,7 @@ func FromEnv() *Config {
 		GitCapabilitiesDisable:  getEnvList("KAILAB_GIT_CAPS_DISABLE"),
 		GitAgent:                getEnv("KAILAB_GIT_AGENT", "kai"),
 		GitObjectCacheSize:      getEnvInt("KAILAB_GIT_OBJECT_CACHE_SIZE", 10000),
+		ControlPlaneURL:         getEnv("KAILAB_CONTROL_PLANE_URL", ""),
 	}
 	return cfg
 }

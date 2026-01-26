@@ -138,6 +138,14 @@ func NewRouter(h *Handler) http.Handler {
 	mux.Handle("POST /api/v1/tokens", h.WithAuth(http.HandlerFunc(h.CreateToken)))
 	mux.Handle("DELETE /api/v1/tokens/{id}", h.WithAuth(http.HandlerFunc(h.DeleteToken)))
 
+	// SSH Keys (authenticated)
+	mux.Handle("GET /api/v1/me/ssh-keys", h.WithAuth(http.HandlerFunc(h.ListSSHKeys)))
+	mux.Handle("POST /api/v1/me/ssh-keys", h.WithAuth(http.HandlerFunc(h.CreateSSHKey)))
+	mux.Handle("DELETE /api/v1/me/ssh-keys/{id}", h.WithAuth(http.HandlerFunc(h.DeleteSSHKey)))
+
+	// Internal SSH verification (service-to-service)
+	mux.HandleFunc("POST /internal/ssh/verify", h.VerifySSHKey)
+
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)
 }

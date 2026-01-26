@@ -26,6 +26,12 @@ var sqliteSchema string
 //go:embed schema/0001_init_pg.sql
 var postgresSchema string
 
+//go:embed schema/0002_ssh_keys.sql
+var sqliteSSHKeysSchema string
+
+//go:embed schema/0002_ssh_keys_pg.sql
+var postgresSSHKeysSchema string
+
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -103,6 +109,10 @@ func (db *DB) initSQLite() error {
 	if _, err := db.DB.Exec(sqliteSchema); err != nil {
 		return fmt.Errorf("running SQLite migrations: %w", err)
 	}
+	// Run SSH keys schema
+	if _, err := db.DB.Exec(sqliteSSHKeysSchema); err != nil {
+		return fmt.Errorf("running SQLite SSH keys migrations: %w", err)
+	}
 	return nil
 }
 
@@ -111,6 +121,10 @@ func (db *DB) initPostgres() error {
 	// Run PostgreSQL schema
 	if _, err := db.DB.Exec(postgresSchema); err != nil {
 		return fmt.Errorf("running PostgreSQL migrations: %w", err)
+	}
+	// Run SSH keys schema
+	if _, err := db.DB.Exec(postgresSSHKeysSchema); err != nil {
+		return fmt.Errorf("running PostgreSQL SSH keys migrations: %w", err)
 	}
 	return nil
 }
@@ -766,4 +780,103 @@ func (db *DB) ListOrgAudit(orgID string, limit int) ([]*model.AuditEntry, error)
 		entries = append(entries, &e)
 	}
 	return entries, rows.Err()
+}
+
+// ----- SSH Keys -----
+
+// CreateSSHKey creates a new SSH key for a user.
+func (db *DB) CreateSSHKey(userID, name, fingerprint, publicKey string) (*model.SSHKey, error) {
+	id := newUUID()
+	_, err := db.exec(
+		"INSERT INTO ssh_keys (id, user_id, name, fingerprint, public_key) VALUES (?, ?, ?, ?, ?)",
+		id, userID, name, fingerprint, publicKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetSSHKeyByID(id)
+}
+
+// GetSSHKeyByID retrieves an SSH key by ID.
+func (db *DB) GetSSHKeyByID(id string) (*model.SSHKey, error) {
+	var k model.SSHKey
+	var createdAt int64
+	var lastUsedNull sql.NullInt64
+	err := db.queryRow(
+		"SELECT id, user_id, name, fingerprint, public_key, created_at, last_used_at FROM ssh_keys WHERE id = ?",
+		id,
+	).Scan(&k.ID, &k.UserID, &k.Name, &k.Fingerprint, &k.PublicKey, &createdAt, &lastUsedNull)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	k.CreatedAt = time.Unix(createdAt, 0)
+	if lastUsedNull.Valid {
+		k.LastUsedAt = time.Unix(lastUsedNull.Int64, 0)
+	}
+	return &k, nil
+}
+
+// GetSSHKeyByFingerprint retrieves an SSH key by fingerprint.
+func (db *DB) GetSSHKeyByFingerprint(fingerprint string) (*model.SSHKey, error) {
+	var k model.SSHKey
+	var createdAt int64
+	var lastUsedNull sql.NullInt64
+	err := db.queryRow(
+		"SELECT id, user_id, name, fingerprint, public_key, created_at, last_used_at FROM ssh_keys WHERE fingerprint = ?",
+		fingerprint,
+	).Scan(&k.ID, &k.UserID, &k.Name, &k.Fingerprint, &k.PublicKey, &createdAt, &lastUsedNull)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	k.CreatedAt = time.Unix(createdAt, 0)
+	if lastUsedNull.Valid {
+		k.LastUsedAt = time.Unix(lastUsedNull.Int64, 0)
+	}
+	return &k, nil
+}
+
+// ListUserSSHKeys lists all SSH keys for a user.
+func (db *DB) ListUserSSHKeys(userID string) ([]*model.SSHKey, error) {
+	rows, err := db.query(
+		"SELECT id, user_id, name, fingerprint, public_key, created_at, last_used_at FROM ssh_keys WHERE user_id = ? ORDER BY created_at DESC",
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*model.SSHKey
+	for rows.Next() {
+		var k model.SSHKey
+		var createdAt int64
+		var lastUsedNull sql.NullInt64
+		if err := rows.Scan(&k.ID, &k.UserID, &k.Name, &k.Fingerprint, &k.PublicKey, &createdAt, &lastUsedNull); err != nil {
+			return nil, err
+		}
+		k.CreatedAt = time.Unix(createdAt, 0)
+		if lastUsedNull.Valid {
+			k.LastUsedAt = time.Unix(lastUsedNull.Int64, 0)
+		}
+		keys = append(keys, &k)
+	}
+	return keys, rows.Err()
+}
+
+// DeleteSSHKey deletes an SSH key.
+func (db *DB) DeleteSSHKey(id string) error {
+	_, err := db.exec("DELETE FROM ssh_keys WHERE id = ?", id)
+	return err
+}
+
+// UpdateSSHKeyLastUsed updates the last used time for an SSH key.
+func (db *DB) UpdateSSHKeyLastUsed(id string) error {
+	_, err := db.exec("UPDATE ssh_keys SET last_used_at = ? WHERE id = ?", time.Now().Unix(), id)
+	return err
 }
