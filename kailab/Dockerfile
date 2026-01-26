@@ -34,13 +34,14 @@ COPY --from=builder /build/kailab/kailabd .
 # Create data directory
 RUN mkdir -p /data
 
-# Expose port
-EXPOSE 7447
+# Expose ports (HTTP + SSH)
+EXPOSE 7447 2222
 
 # Set environment variables
 ENV KAILAB_DATA=/data
 ENV KAILAB_LISTEN=:7447
+ENV KAILAB_SSH_LISTEN=:2222
 
 # Run the server
 ENTRYPOINT ["./kailabd"]
-CMD ["--listen=:7447", "--data=/data"]
+CMD ["--listen=:7447", "--data=/data", "--ssh-listen=:2222"]

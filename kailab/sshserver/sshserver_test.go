@@ -96,6 +96,34 @@ func TestWriteGitError(t *testing.T) {
 	}
 }
 
+func TestReadUploadPackRequestCapsShallow(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writePktLine(&buf, "want deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\x00symref=HEAD:refs/heads/main side-band-64k\n"); err != nil {
+		t.Fatalf("write pkt: %v", err)
+	}
+	if err := writePktLine(&buf, "shallow feedfacefeedfacefeedfacefeedfacefeedface\n"); err != nil {
+		t.Fatalf("write pkt: %v", err)
+	}
+	if err := writeFlush(&buf); err != nil {
+		t.Fatalf("write flush: %v", err)
+	}
+	reader := bufio.NewReader(&buf)
+
+	req, err := readUploadPackRequest(reader)
+	if err != nil {
+		t.Fatalf("read upload-pack: %v", err)
+	}
+	if len(req.Wants) != 1 {
+		t.Fatalf("expected 1 want, got %d", len(req.Wants))
+	}
+	if len(req.Caps) != 2 {
+		t.Fatalf("expected 2 caps, got %d", len(req.Caps))
+	}
+	if len(req.Shallow) != 1 {
+		t.Fatalf("expected 1 shallow, got %d", len(req.Shallow))
+	}
+}
+
 func TestMapRefName(t *testing.T) {
 	if got := MapRefName("snap.main"); got != "refs/heads/main" {
 		t.Fatalf("unexpected snap mapping: %s", got)
@@ -108,6 +136,31 @@ func TestMapRefName(t *testing.T) {
 	}
 	if got := MapRefName("other.ref"); got != "refs/kai/other.ref" {
 		t.Fatalf("unexpected default mapping: %s", got)
+	}
+}
+
+func TestMapGitRefName(t *testing.T) {
+	tests := []struct {
+		input   string
+		expect  string
+		allowed bool
+	}{
+		{"refs/heads/main", "snap.main", true},
+		{"refs/tags/v1.2.3", "tag.v1.2.3", true},
+		{"refs/kai/cs/latest", "cs.latest", true},
+		{"refs/kai/other.ref", "other.ref", true},
+		{"refs/notes/commits", "", false},
+		{"refs/heads/", "", false},
+	}
+
+	for _, tt := range tests {
+		got, ok := MapGitRefName(tt.input)
+		if ok != tt.allowed {
+			t.Fatalf("expected allowed=%v for %s, got %v", tt.allowed, tt.input, ok)
+		}
+		if tt.allowed && got != tt.expect {
+			t.Fatalf("expected %s, got %s for %s", tt.expect, got, tt.input)
+		}
 	}
 }
 
@@ -137,11 +190,62 @@ func TestBuildCapabilities(t *testing.T) {
 	if !strings.Contains(got, "agent=kai-test") {
 		t.Fatalf("missing agent: %s", got)
 	}
+	if !strings.Contains(got, "side-band-64k") {
+		t.Fatalf("missing side-band-64k: %s", got)
+	}
+	if !strings.Contains(got, "shallow") {
+		t.Fatalf("missing shallow: %s", got)
+	}
 	if !strings.Contains(got, "thin-pack") {
 		t.Fatalf("missing extra capability: %s", got)
 	}
 	if strings.Contains(got, "report-status") {
 		t.Fatalf("expected report-status to be disabled: %s", got)
+	}
+}
+
+func TestWriteShallowLines(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeShallowLines(&buf, []string{"deadbeef"}, true); err != nil {
+		t.Fatalf("write shallow: %v", err)
+	}
+	if got := buf.String(); got != "0015shallow deadbeef\n0000" {
+		t.Fatalf("unexpected shallow pkt: %q", got)
+	}
+}
+
+func TestValidateShallowRequest(t *testing.T) {
+	req := &uploadPackRequest{Deepen: []string{"2"}}
+	if err := validateShallowRequest(req); err == nil {
+		t.Fatalf("expected error for deepen=2")
+	}
+	req = &uploadPackRequest{Deepen: []string{"1"}}
+	if err := validateShallowRequest(req); err != nil {
+		t.Fatalf("unexpected error for deepen=1: %v", err)
+	}
+}
+
+func TestWriteAcknowledgements(t *testing.T) {
+	req := &uploadPackRequest{
+		Haves: []string{"aaaa", "bbbb"},
+	}
+	known := map[string]bool{
+		"bbbb": true,
+	}
+	var buf bytes.Buffer
+	if err := writeAcknowledgements(&buf, req, known); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+	if got := buf.String(); got != "000dACK bbbb\n" {
+		t.Fatalf("unexpected ack pkt: %q", got)
+	}
+
+	buf.Reset()
+	if err := writeAcknowledgements(&buf, req, map[string]bool{}); err != nil {
+		t.Fatalf("write nak: %v", err)
+	}
+	if got := buf.String(); got != "0008NAK\n" {
+		t.Fatalf("unexpected nak pkt: %q", got)
 	}
 }
 
@@ -163,6 +267,18 @@ func TestReadPktLine(t *testing.T) {
 	}
 	if !flush {
 		t.Fatalf("expected flush pkt-line")
+	}
+}
+
+func TestReadPktLineDelimiter(t *testing.T) {
+	buf := bytes.NewBufferString("0001")
+	r := bufio.NewReader(buf)
+	_, flush, err := readPktLine(r)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !flush {
+		t.Fatalf("expected delimiter to be treated as flush")
 	}
 }
 
@@ -213,18 +329,5 @@ func TestHandleUploadPack_RejectsWants(t *testing.T) {
 	}
 	if out.Len() == 0 {
 		t.Fatal("expected error response output")
-	}
-}
-
-func TestWriteAcknowledgements(t *testing.T) {
-	out := &bytes.Buffer{}
-	req := &uploadPackRequest{
-		Haves: []string{"a1", "b2"},
-	}
-	if err := writeAcknowledgements(out, req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out.String() != "000bACK b2\n" {
-		t.Fatalf("unexpected ack: %q", out.String())
 	}
 }

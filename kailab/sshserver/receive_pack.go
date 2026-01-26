@@ -22,6 +22,7 @@ type receivePackUpdate struct {
 type receivePackRequest struct {
 	Updates []receivePackUpdate
 	Pack    []byte
+	Caps    []string
 }
 
 func handleReceivePack(db *sql.DB, r io.Reader, w io.Writer) ([]string, error) {
@@ -62,6 +63,9 @@ func readReceivePackRequest(r *bufio.Reader) (*receivePackRequest, error) {
 			continue
 		}
 		if idx := strings.IndexByte(line, 0); idx >= 0 {
+			if len(req.Caps) == 0 {
+				req.Caps = parseCaps(line[idx+1:])
+			}
 			line = line[:idx]
 		}
 		fields := strings.Fields(line)
@@ -124,19 +128,46 @@ func createChangeSetFromPack(db *sql.DB, req *receivePackRequest) ([]byte, []str
 		return nil, nil, err
 	}
 
+	updatedRefs := make([]string, 0, len(req.Updates)+1)
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
 
+	for _, update := range req.Updates {
+		kaiRef, ok := MapGitRefName(update.Ref)
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported ref: %s", update.Ref)
+		}
+
+		switch {
+		case isZeroOID(update.New):
+			if err := store.DeleteRef(db, tx, kaiRef, nil, "ssh", "git-receive-pack"); err != nil {
+				return nil, nil, err
+			}
+			updatedRefs = append(updatedRefs, kaiRef)
+		case isZeroOID(update.Old):
+			if err := store.SetRefFF(db, tx, kaiRef, nil, csDigest, "ssh", "git-receive-pack"); err != nil {
+				return nil, nil, err
+			}
+			updatedRefs = append(updatedRefs, kaiRef)
+		default:
+			if err := store.ForceSetRef(db, tx, kaiRef, csDigest, "ssh", "git-receive-pack"); err != nil {
+				return nil, nil, err
+			}
+			updatedRefs = append(updatedRefs, kaiRef)
+		}
+	}
+
 	if err := store.ForceSetRef(db, tx, "cs.latest", csDigest, "ssh", "git-receive-pack"); err != nil {
 		return nil, nil, err
 	}
+	updatedRefs = append(updatedRefs, "cs.latest")
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	return csDigest, []string{"cs.latest"}, nil
+	return csDigest, updatedRefs, nil
 }
 
 func resolveBaseSnapshot(db *sql.DB) ([]byte, error) {
@@ -223,4 +254,16 @@ func computeBlake3(data []byte) []byte {
 	h := cas.NewBlake3Hasher()
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+func isZeroOID(oid string) bool {
+	if len(oid) != 40 {
+		return false
+	}
+	for i := 0; i < len(oid); i++ {
+		if oid[i] != '0' {
+			return false
+		}
+	}
+	return true
 }

@@ -27,6 +27,24 @@ func writePktLine(w io.Writer, payload string) error {
 	return err
 }
 
+func writePktLineBytes(w io.Writer, payload []byte) error {
+	if w == nil {
+		return fmt.Errorf("nil writer")
+	}
+
+	size := len(payload) + 4
+	if size > 0xffff {
+		return fmt.Errorf("pkt-line too long: %d", size)
+	}
+
+	header := fmt.Sprintf("%04x", size)
+	if _, err := io.WriteString(w, header); err != nil {
+		return err
+	}
+	_, err := w.Write(payload)
+	return err
+}
+
 // writeFlush writes a pkt-line flush (0000).
 func writeFlush(w io.Writer) error {
 	if w == nil {
@@ -45,6 +63,10 @@ func readPktLine(r *bufio.Reader) (string, bool, error) {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return "", false, err
+	}
+
+	if string(header) == "0001" {
+		return "", true, nil
 	}
 
 	n, err := strconv.ParseInt(string(header), 16, 0)
@@ -75,4 +97,29 @@ func writeEmptyPack(w io.Writer) error {
 	}
 	_, err := w.Write(h[:])
 	return err
+}
+
+type sideBandWriter struct {
+	w         io.Writer
+	maxData   int
+	channelID byte
+}
+
+func (s *sideBandWriter) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		chunk := len(p)
+		if chunk > s.maxData {
+			chunk = s.maxData
+		}
+		payload := make([]byte, chunk+1)
+		payload[0] = s.channelID
+		copy(payload[1:], p[:chunk])
+		if err := writePktLineBytes(s.w, payload); err != nil {
+			return written, err
+		}
+		written += chunk
+		p = p[chunk:]
+	}
+	return written, nil
 }

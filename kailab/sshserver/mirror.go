@@ -71,6 +71,15 @@ func (m *GitMirror) SyncRefs(ctx context.Context, h *repo.Handle, refNames []str
 
 		ref, err := store.GetRef(h.DB, refName)
 		if err != nil {
+			if err == store.ErrRefNotFound {
+				gitRef := MapRefName(refName)
+				if delErr := m.deleteRef(repoPath, gitRef); delErr != nil {
+					m.cfg.Logger.Printf("git mirror: delete ref %s failed in %s/%s: %v", gitRef, h.Tenant, h.Name, delErr)
+				} else {
+					m.cfg.Logger.Printf("git mirror delete: repo=%s/%s ref=%s git_ref=%s", h.Tenant, h.Name, refName, gitRef)
+				}
+				continue
+			}
 			m.cfg.Logger.Printf("git mirror: ref %s not found in %s/%s: %v", refName, h.Tenant, h.Name, err)
 			continue
 		}
@@ -177,6 +186,15 @@ func (m *GitMirror) updateRef(repoPath, refName, oid string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git update-ref %s: %w (%s)", refName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (m *GitMirror) deleteRef(repoPath, refName string) error {
+	cmd := exec.Command("git", "-C", repoPath, "update-ref", "-d", refName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git update-ref -d %s: %w (%s)", refName, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

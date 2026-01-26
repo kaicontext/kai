@@ -28,6 +28,10 @@ func (b *DefaultPackBuilder) BuildPack(ctx context.Context, req PackRequest, w i
 		return fmt.Errorf("ref adapter required")
 	}
 
+	_ = req.ThinPack
+	_ = req.OFSDelta
+	_ = req.RefDelta
+
 	// TODO: support thin packs / deltas when we add pack heuristics.
 	haves := make(map[string]bool, len(req.Haves))
 	for _, have := range req.Haves {

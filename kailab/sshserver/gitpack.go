@@ -184,15 +184,21 @@ func resolveSnapshotDigest(db *sql.DB, target []byte) ([]byte, error) {
 		return nil, nil
 	}
 
-	content, kind, err := pack.ExtractObjectFromDB(db, target)
-	if err != nil {
-		return nil, err
-	}
-	if kind == "Snapshot" {
-		return target, nil
-	}
+	// Follow changeset chain up to 10 levels to find a snapshot
+	current := target
+	for i := 0; i < 10; i++ {
+		content, kind, err := pack.ExtractObjectFromDB(db, current)
+		if err != nil {
+			return nil, err
+		}
+		if kind == "Snapshot" {
+			return current, nil
+		}
 
-	if kind == "ChangeSet" {
+		if kind != "ChangeSet" {
+			return nil, nil
+		}
+
 		payload, err := parsePayload(content)
 		if err != nil {
 			return nil, err
@@ -206,19 +212,46 @@ func resolveSnapshotDigest(db *sql.DB, target []byte) ([]byte, error) {
 		if cs.Head == "" {
 			return nil, nil
 		}
-		return hex.DecodeString(cs.Head)
+		current, err = hex.DecodeString(cs.Head)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return nil, nil
+	return nil, nil // Max depth reached
 }
 
 func buildRef(db *sql.DB, ref *store.Ref, cache map[string]snapshotObjects) (refBuild, error) {
 	refName := MapRefName(ref.Name)
 	targetHex := hex.EncodeToString(ref.Target)
 
+	// Try to resolve git objects from ChangeSet's gitPack first
+	gitObjs, gitCommitOID, err := resolveGitPackObjects(db, ref.Target, refName)
+	if err == nil && len(gitObjs) > 0 && gitCommitOID != "" {
+		// Use actual git objects from the pack
+		var commit GitObject
+		var objects []GitObject
+		for _, obj := range gitObjs {
+			if obj.OID == gitCommitOID {
+				commit = obj
+			} else {
+				objects = append(objects, obj)
+			}
+		}
+		if commit.OID != "" {
+			return refBuild{
+				refName: refName,
+				commit:  commit,
+				objects: objects,
+			}, nil
+		}
+	}
+
+	// Fall back to synthetic commits from snapshots
 	snapshotDigest, err := resolveSnapshotDigest(db, ref.Target)
 	if err != nil {
-		return refBuild{}, err
+		// If both git pack and snapshot resolution fail, use empty tree
+		snapshotDigest = nil
 	}
 
 	snapshotAdapter := NewDBSnapshotAdapter(db)
@@ -248,4 +281,121 @@ func buildRef(db *sql.DB, ref *store.Ref, cache map[string]snapshotObjects) (ref
 		commit:  commit,
 		objects: objects.objects,
 	}, nil
+}
+
+// changesetPackInfo holds pack data collected from a changeset
+type changesetPackInfo struct {
+	packDigest []byte
+	gitUpdates []map[string]interface{}
+}
+
+// resolveGitPackObjects attempts to retrieve git objects from a ChangeSet's gitPack.
+// Returns the objects and the commit OID for the given ref.
+// It follows the changeset chain to collect objects from all packs for proper delta resolution.
+func resolveGitPackObjects(db *sql.DB, target []byte, refName string) ([]GitObject, string, error) {
+	if len(target) == 0 {
+		return nil, "", fmt.Errorf("empty target")
+	}
+
+	// First pass: collect all changeset pack info (newest to oldest)
+	var changesets []changesetPackInfo
+	var commitOID string
+	current := target
+
+	for i := 0; i < 20; i++ { // Max depth
+		content, kind, err := pack.ExtractObjectFromDB(db, current)
+		if err != nil {
+			break
+		}
+
+		if kind != "ChangeSet" {
+			break
+		}
+
+		payload, err := parsePayload(content)
+		if err != nil {
+			break
+		}
+
+		var cs struct {
+			GitPack    string                   `json:"gitPack"`
+			GitUpdates []map[string]interface{} `json:"gitUpdates"`
+			Head       string                   `json:"head"`
+		}
+		if err := json.Unmarshal(payload, &cs); err != nil {
+			break
+		}
+
+		// Find commit OID from first changeset (the one we're cloning)
+		if commitOID == "" {
+			for _, update := range cs.GitUpdates {
+				updateRef, _ := update["ref"].(string)
+				newOID, _ := update["new"].(string)
+				if updateRef == refName && newOID != "" && newOID != strings.Repeat("0", 40) {
+					commitOID = newOID
+					break
+				}
+			}
+		}
+
+		// Collect pack info
+		if cs.GitPack != "" {
+			packDigest, err := hex.DecodeString(cs.GitPack)
+			if err == nil {
+				changesets = append(changesets, changesetPackInfo{
+					packDigest: packDigest,
+					gitUpdates: cs.GitUpdates,
+				})
+			}
+		}
+
+		// Follow chain to previous changeset
+		if cs.Head == "" {
+			break
+		}
+		current, err = hex.DecodeString(cs.Head)
+		if err != nil {
+			break
+		}
+	}
+
+	if commitOID == "" {
+		return nil, "", fmt.Errorf("no commit OID for ref %s", refName)
+	}
+
+	if len(changesets) == 0 {
+		return nil, "", fmt.Errorf("no packs found")
+	}
+
+	// Second pass: parse packs in reverse order (oldest to newest)
+	// This ensures base objects are available for delta resolution
+	allObjects := make(map[string]GitObject)
+
+	for i := len(changesets) - 1; i >= 0; i-- {
+		csInfo := changesets[i]
+		packContent, _, err := pack.ExtractObjectFromDB(db, csInfo.packDigest)
+		if err != nil {
+			continue
+		}
+
+		// Skip "GitPack\n" prefix
+		if len(packContent) > 8 && string(packContent[:8]) == "GitPack\n" {
+			packContent = packContent[8:]
+		}
+
+		objects, err := parseGitPackWithBases(packContent, allObjects)
+		if err == nil {
+			for oid, obj := range objects {
+				allObjects[oid] = obj
+			}
+		}
+	}
+
+	if len(allObjects) == 0 {
+		return nil, "", fmt.Errorf("no objects found")
+	}
+
+	// Collect all objects reachable from the commit
+	result := collectCommitObjects(allObjects, commitOID)
+	return result, commitOID, nil
 }

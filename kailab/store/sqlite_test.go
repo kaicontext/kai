@@ -96,6 +96,29 @@ func TestRefOperations(t *testing.T) {
 	if len(history) != 1 {
 		t.Errorf("expected 1 history entry, got %d", len(history))
 	}
+
+	// Test DeleteRef
+	tx3, err := db.BeginTx()
+	if err != nil {
+		t.Fatalf("failed to begin tx: %v", err)
+	}
+	if err := db.DeleteRef(tx3, "snap.main", nil, "testuser", "push-789"); err != nil {
+		t.Fatalf("failed to delete ref: %v", err)
+	}
+	if err := tx3.Commit(); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	if _, err := db.GetRef("snap.main"); err != ErrRefNotFound {
+		t.Fatalf("expected ErrRefNotFound after delete, got %v", err)
+	}
+	history, err = db.GetRefHistory("", 0, 100)
+	if err != nil {
+		t.Fatalf("failed to get history after delete: %v", err)
+	}
+	if len(history) != 2 {
+		t.Errorf("expected 2 history entries, got %d", len(history))
+	}
 }
 
 func TestObjectOperations(t *testing.T) {

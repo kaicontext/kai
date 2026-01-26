@@ -451,6 +451,69 @@ func (db *DB) ForceSetRef(tx *sql.Tx, name string, new []byte, actor, pushID str
 	return nil
 }
 
+// DeleteRef deletes a ref and appends a deletion entry to ref_history.
+// If old is non-nil, it must match the current target.
+func (db *DB) DeleteRef(tx *sql.Tx, name string, old []byte, actor, pushID string) error {
+	ts := cas.NowMs()
+
+	var currentTarget []byte
+	err := tx.QueryRow(`SELECT target FROM refs WHERE name = ?`, name).Scan(&currentTarget)
+	if err == sql.ErrNoRows {
+		return ErrRefNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("checking current ref: %w", err)
+	}
+	if old != nil && !bytesEqual(old, currentTarget) {
+		return ErrRefMismatch
+	}
+
+	var parentID []byte
+	err = tx.QueryRow(
+		`SELECT id FROM ref_history WHERE ref = ? ORDER BY seq DESC LIMIT 1`,
+		name,
+	).Scan(&parentID)
+	if err == sql.ErrNoRows {
+		parentID = nil
+	} else if err != nil {
+		return fmt.Errorf("getting parent history: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM refs WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("deleting ref: %w", err)
+	}
+
+	historyEntry := map[string]interface{}{
+		"time":   ts,
+		"actor":  actor,
+		"ref":    name,
+		"old":    hex.EncodeToString(currentTarget),
+		"new":    "",
+		"pushId": pushID,
+		"delete": true,
+	}
+	if parentID != nil {
+		historyEntry["parent"] = hex.EncodeToString(parentID)
+	}
+
+	entryJSON, err := json.Marshal(historyEntry)
+	if err != nil {
+		return fmt.Errorf("marshaling history entry: %w", err)
+	}
+	entryID := cas.Blake3Hash(entryJSON)
+	emptyTarget := []byte{}
+
+	_, err = tx.Exec(
+		`INSERT INTO ref_history (id, parent, time, actor, ref, old, new, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entryID, parentID, ts, actor, name, currentTarget, emptyTarget, string(entryJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting ref history: %w", err)
+	}
+
+	return nil
+}
+
 // ----- Ref History -----
 
 // RefHistoryEntry represents a single ref update event.
@@ -1002,6 +1065,69 @@ func ForceSetRef(db *sql.DB, tx *sql.Tx, name string, new []byte, actor, pushID 
 	_, err = tx.Exec(
 		`INSERT INTO ref_history (id, parent, time, actor, ref, old, new, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		entryID, parentID, ts, actor, name, currentTarget, new, string(entryJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting ref history: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteRef deletes a ref and appends a deletion entry to ref_history.
+// If old is non-nil, it must match the current target.
+func DeleteRef(db *sql.DB, tx *sql.Tx, name string, old []byte, actor, pushID string) error {
+	ts := cas.NowMs()
+
+	var currentTarget []byte
+	err := tx.QueryRow(`SELECT target FROM refs WHERE name = ?`, name).Scan(&currentTarget)
+	if err == sql.ErrNoRows {
+		return ErrRefNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("checking current ref: %w", err)
+	}
+	if old != nil && !bytesEqual(old, currentTarget) {
+		return ErrRefMismatch
+	}
+
+	var parentID []byte
+	err = tx.QueryRow(
+		`SELECT id FROM ref_history WHERE ref = ? ORDER BY seq DESC LIMIT 1`,
+		name,
+	).Scan(&parentID)
+	if err == sql.ErrNoRows {
+		parentID = nil
+	} else if err != nil {
+		return fmt.Errorf("getting parent history: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM refs WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("deleting ref: %w", err)
+	}
+
+	historyEntry := map[string]interface{}{
+		"time":   ts,
+		"actor":  actor,
+		"ref":    name,
+		"old":    hex.EncodeToString(currentTarget),
+		"new":    "",
+		"pushId": pushID,
+		"delete": true,
+	}
+	if parentID != nil {
+		historyEntry["parent"] = hex.EncodeToString(parentID)
+	}
+
+	entryJSON, err := json.Marshal(historyEntry)
+	if err != nil {
+		return fmt.Errorf("marshaling history entry: %w", err)
+	}
+	entryID := cas.Blake3Hash(entryJSON)
+	emptyTarget := []byte{}
+
+	_, err = tx.Exec(
+		`INSERT INTO ref_history (id, parent, time, actor, ref, old, new, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entryID, parentID, ts, actor, name, currentTarget, emptyTarget, string(entryJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("inserting ref history: %w", err)

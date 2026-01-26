@@ -10,6 +10,7 @@ import (
 
 	"kailab/pack"
 	"kailab/repo"
+	"kailab/store"
 )
 
 func TestReadReceivePackRequest(t *testing.T) {
@@ -65,6 +66,13 @@ func TestCreateChangeSetFromPackStoresUpdates(t *testing.T) {
 	csDigest, _, err := createChangeSetFromPack(handle.DB, req)
 	if err != nil {
 		t.Fatalf("create changeset: %v", err)
+	}
+	ref, err := store.GetRef(handle.DB, "snap.main")
+	if err != nil {
+		t.Fatalf("get ref: %v", err)
+	}
+	if !bytes.Equal(ref.Target, csDigest) {
+		t.Fatalf("expected ref target to be changeset")
 	}
 
 	content, kind, err := pack.ExtractObjectFromDB(handle.DB, csDigest)

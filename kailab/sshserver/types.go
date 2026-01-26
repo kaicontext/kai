@@ -24,9 +24,12 @@ type GitRef struct {
 
 // PackRequest is the upload-pack negotiation request.
 type PackRequest struct {
-	Wants []string
-	Haves []string
-	Done  bool
+	Wants    []string
+	Haves    []string
+	Done     bool
+	ThinPack bool
+	OFSDelta bool
+	RefDelta bool
 }
 
 // RefCommitInfo bundles a commit object with its dependent objects.

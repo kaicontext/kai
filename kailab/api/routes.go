@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"kai-core/cas"
 	"kailab/background"
 	"kailab/config"
+	"kailab/metrics"
 	"kailab/pack"
 	"kailab/proto"
 	"kailab/repo"
@@ -89,56 +91,78 @@ func NewHandler(reg *repo.Registry, cfg *config.Config) *Handler {
 func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	h := NewHandler(reg, cfg)
 	mux := http.NewServeMux()
+	withMetrics := withRouteMetrics()
 
 	// Middleware for repo routes
 	withRepo := WithRepo(reg)
 
 	// Health (no repo needed)
-	mux.HandleFunc("GET /health", h.Health)
-	mux.HandleFunc("GET /healthz", h.Health)
-	mux.HandleFunc("GET /readyz", h.Ready)
+	mux.Handle("GET /health", withMetrics("GET /health", http.HandlerFunc(h.Health)))
+	mux.Handle("GET /healthz", withMetrics("GET /healthz", http.HandlerFunc(h.Health)))
+	mux.Handle("GET /readyz", withMetrics("GET /readyz", http.HandlerFunc(h.Ready)))
+	mux.Handle("GET /metrics", withMetrics("GET /metrics", expvar.Handler()))
 
 	// Admin routes (no repo context needed)
-	mux.HandleFunc("POST /admin/v1/repos", h.CreateRepo)
-	mux.HandleFunc("GET /admin/v1/repos", h.ListRepos)
-	mux.HandleFunc("DELETE /admin/v1/repos/{tenant}/{repo}", h.DeleteRepo)
+	mux.Handle("POST /admin/v1/repos", withMetrics("POST /admin/v1/repos", http.HandlerFunc(h.CreateRepo)))
+	mux.Handle("GET /admin/v1/repos", withMetrics("GET /admin/v1/repos", http.HandlerFunc(h.ListRepos)))
+	mux.Handle("DELETE /admin/v1/repos/{tenant}/{repo}", withMetrics("DELETE /admin/v1/repos/{tenant}/{repo}", http.HandlerFunc(h.DeleteRepo)))
 
 	// Repo-scoped routes: /{tenant}/{repo}/v1/...
 	// Push negotiation
-	mux.Handle("POST /{tenant}/{repo}/v1/push/negotiate", withRepo(http.HandlerFunc(h.Negotiate)))
+	mux.Handle("POST /{tenant}/{repo}/v1/push/negotiate", withMetrics("POST /{tenant}/{repo}/v1/push/negotiate", withRepo(http.HandlerFunc(h.Negotiate))))
 
 	// Objects
-	mux.Handle("POST /{tenant}/{repo}/v1/objects/pack", withRepo(http.HandlerFunc(h.IngestPack)))
-	mux.Handle("GET /{tenant}/{repo}/v1/objects/{digest}", withRepo(http.HandlerFunc(h.GetObject)))
+	mux.Handle("POST /{tenant}/{repo}/v1/objects/pack", withMetrics("POST /{tenant}/{repo}/v1/objects/pack", withRepo(http.HandlerFunc(h.IngestPack))))
+	mux.Handle("GET /{tenant}/{repo}/v1/objects/{digest}", withMetrics("GET /{tenant}/{repo}/v1/objects/{digest}", withRepo(http.HandlerFunc(h.GetObject))))
 
 	// Refs
-	mux.Handle("GET /{tenant}/{repo}/v1/refs", withRepo(http.HandlerFunc(h.ListRefs)))
-	mux.Handle("POST /{tenant}/{repo}/v1/refs/batch", withRepo(http.HandlerFunc(h.BatchUpdateRefs)))
-	mux.Handle("PUT /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.UpdateRef)))
-	mux.Handle("GET /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.GetRef)))
+	mux.Handle("GET /{tenant}/{repo}/v1/refs", withMetrics("GET /{tenant}/{repo}/v1/refs", withRepo(http.HandlerFunc(h.ListRefs))))
+	mux.Handle("POST /{tenant}/{repo}/v1/refs/batch", withMetrics("POST /{tenant}/{repo}/v1/refs/batch", withRepo(http.HandlerFunc(h.BatchUpdateRefs))))
+	mux.Handle("PUT /{tenant}/{repo}/v1/refs/{name...}", withMetrics("PUT /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.UpdateRef))))
+	mux.Handle("GET /{tenant}/{repo}/v1/refs/{name...}", withMetrics("GET /{tenant}/{repo}/v1/refs/{name...}", withRepo(http.HandlerFunc(h.GetRef))))
 
 	// Log
-	mux.Handle("GET /{tenant}/{repo}/v1/log/head", withRepo(http.HandlerFunc(h.LogHead)))
-	mux.Handle("GET /{tenant}/{repo}/v1/log/entries", withRepo(http.HandlerFunc(h.LogEntries)))
+	mux.Handle("GET /{tenant}/{repo}/v1/log/head", withMetrics("GET /{tenant}/{repo}/v1/log/head", withRepo(http.HandlerFunc(h.LogHead))))
+	mux.Handle("GET /{tenant}/{repo}/v1/log/entries", withMetrics("GET /{tenant}/{repo}/v1/log/entries", withRepo(http.HandlerFunc(h.LogEntries))))
 
 	// Files - use {ref...} pattern since ref names contain dots (e.g., snap.latest)
-	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles)))
-	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent)))
+	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withMetrics("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles))))
+	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withMetrics("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent))))
 
 	// Diff
-	mux.Handle("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withRepo(http.HandlerFunc(h.GetFileDiff)))
+	mux.Handle("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withMetrics("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withRepo(http.HandlerFunc(h.GetFileDiff))))
 
 	// Reviews
-	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews)))
-	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState)))
+	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withMetrics("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews))))
+	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState))))
 
 	// CI / Affected Tests
-	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests)))
+	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests))))
 
 	// Edges
-	mux.Handle("POST /{tenant}/{repo}/v1/edges", withRepo(http.HandlerFunc(h.IngestEdges)))
+	mux.Handle("POST /{tenant}/{repo}/v1/edges", withMetrics("POST /{tenant}/{repo}/v1/edges", withRepo(http.HandlerFunc(h.IngestEdges))))
 
 	return mux
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func withRouteMetrics() func(route string, handler http.Handler) http.Handler {
+	return func(route string, handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			handler.ServeHTTP(rec, r)
+			metrics.IncHTTP(r.Method, route, rec.status)
+		})
+	}
 }
 
 // ----- Health -----
