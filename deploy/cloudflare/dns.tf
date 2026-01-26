@@ -30,6 +30,12 @@ variable "ingress_ip" {
   default     = "34.30.21.207"
 }
 
+variable "ssh_ip" {
+  description = "SSH LoadBalancer IP address"
+  type        = string
+  default     = "34.9.252.213"
+}
+
 # Root domain
 resource "cloudflare_record" "root" {
   zone_id = var.zone_id
@@ -51,6 +57,20 @@ resource "cloudflare_record" "wildcard" {
   proxied = true
 }
 
+# Git SSH endpoint (not proxied - SSH can't go through Cloudflare)
+resource "cloudflare_record" "git" {
+  zone_id = var.zone_id
+  name    = "git"
+  content = var.ssh_ip
+  type    = "A"
+  ttl     = 300
+  proxied = false
+}
+
 output "kailab_url" {
   value = "https://${var.domain}"
+}
+
+output "git_ssh_url" {
+  value = "git@git.${var.domain}"
 }

@@ -2318,6 +2318,9 @@ Practical integration points for CI and IDE workflows:
 - **IDE helpers:** use `kai review open` and `kai review view` to fetch semantic review context from the CLI.
 - **Shell completion:** enable `kai completion` for refs/selectors to speed up CLI usage.
 
+Toolchain validation checklist:
+- See `kailab/docs/toolchain_validation.md` for CI/IDE/Git GUI validation status and steps.
+
 ### `kai ci validate-plan`
 
 Validate that a plan.json file has all required fields with correct types.
@@ -3203,6 +3206,22 @@ Kailab exposes a Git-compatible read view by adapting Kai refs and snapshots int
 
 This layer keeps Git operations read-only in Kai-only mode while preserving standard Git clients.
 
+### Git Protocol Compatibility Matrix
+
+Supported (tested):
+- `git clone` / `git fetch` over SSH (upload-pack v0)
+- `git push` over SSH (receive-pack v0) with ref create/update/delete
+- `refs/heads/*`, `refs/tags/*`, `refs/kai/*` mappings
+- `side-band-64k` response framing for upload-pack
+- Shallow clone negotiation (depth=1; server emits `shallow` lines; pack is still synthetic)
+- Protocol v2 (minimal): `ls-refs` + `fetch` with packfile section
+
+Unsupported / not yet validated:
+- Thin-pack / delta negotiation is accepted but server currently emits full packs
+- `multi_ack` / `multi_ack_detailed`
+- Partial clone / promisor remotes
+- Pack bitmaps / commit-graph optimization
+
 ### Dual-Write Git Mirror (Phase 1)
 
 Mirror Kai refs into a bare Git repo for selected pilot repositories. This keeps Git refs/tags updated alongside Kai.
@@ -3296,6 +3315,22 @@ Cleanup checklist:
 
 Deprecations:
 - Treat `KAILAB_GIT_MIRROR_ROLLBACK` as a temporary safety switch; remove it from production configs in Kai-only.
+
+### Operational Hardening
+
+Observability endpoints:
+- `GET /health`, `GET /healthz`, `GET /readyz`
+- `GET /metrics` (expvar JSON)
+
+Suggested alerts:
+- `kailab_http_errors_total` spikes for write endpoints.
+- `kailab_ssh_git_errors_total` non-zero over 5m.
+- Slow requests on `/v1/objects/pack` and `/v1/push/negotiate`.
+
+Runbook quick checks:
+1. `curl -s http://<host>:<port>/healthz`
+2. `curl -s http://<host>:<port>/metrics | jq '.kailab_http_errors_total'`
+3. Tail server logs for `upload-pack` / `receive-pack` errors.
 
 ### Signed ChangeSets (SSH)
 

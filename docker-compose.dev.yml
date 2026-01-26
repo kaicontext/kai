@@ -9,11 +9,13 @@ services:
       dockerfile: kailab/Dockerfile
     ports:
       - "7447:7447"
+      - "2222:2222"
     volumes:
       - kailab-data:/data
     environment:
       - KAILAB_DATA=/data
       - KAILAB_LISTEN=:7447
+      - KAILAB_DISABLE_GIT_RECEIVE_PACK=false
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:7447/health"]
       interval: 10s

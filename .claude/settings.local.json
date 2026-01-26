@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod init:*)",
+      "Bash(make build:*)",
+      "Bash(go test:*)",
+      "Bash(sqlite3:*)",
+      "Bash(go build:*)",
+      "Bash(grep:*)",
+      "Bash(xargs basename:*)",
+      "mcp__1medium__task_create",
+      "mcp__1medium__task_update"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
