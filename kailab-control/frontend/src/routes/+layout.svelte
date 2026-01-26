@@ -30,6 +30,11 @@
 		goto('/tokens');
 	}
 
+	function goToSSHKeys() {
+		showUserMenu = false;
+		goto('/ssh-keys');
+	}
+
 	function handleClickOutside(event) {
 		if (showUserMenu && !event.target.closest('.user-menu-container')) {
 			showUserMenu = false;
@@ -70,6 +75,12 @@
 								class="w-full text-left px-4 py-2 text-sm text-kai-text hover:bg-kai-bg transition-colors"
 							>
 								API Tokens
+							</button>
+							<button
+								onclick={goToSSHKeys}
+								class="w-full text-left px-4 py-2 text-sm text-kai-text hover:bg-kai-bg transition-colors"
+							>
+								SSH Keys
 							</button>
 							<button
 								onclick={handleLogout}
