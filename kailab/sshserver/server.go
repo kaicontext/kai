@@ -45,6 +45,10 @@ func StartWithListener(listener net.Listener, handler Handler, logger *log.Logge
 
 	srv := &ssh.Server{
 		Addr: listener.Addr().String(),
+		// Accept all public keys - actual authorization happens in the handler
+		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
+			return true
+		},
 		Handler: func(s ssh.Session) {
 			start := time.Now()
 			raw := s.RawCommand()
