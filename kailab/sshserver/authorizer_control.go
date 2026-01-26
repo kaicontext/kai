@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -47,13 +46,11 @@ type sshVerifyResponse struct {
 // Authorize verifies the SSH key against the control plane.
 func (a *ControlPlaneAuthorizer) Authorize(ctx context.Context, session ssh.Session, cmd GitCommand) error {
 	key := session.PublicKey()
-	log.Printf("[ssh-auth] Authorizing repo=%s user=%s key=%v", cmd.Repo, session.User(), key != nil)
 	if key == nil {
 		return fmt.Errorf("access denied: SSH key required")
 	}
 
 	fingerprint := cryptossh.FingerprintSHA256(key)
-	log.Printf("[ssh-auth] Fingerprint=%s", fingerprint)
 
 	reqBody := sshVerifyRequest{
 		Fingerprint: fingerprint,
