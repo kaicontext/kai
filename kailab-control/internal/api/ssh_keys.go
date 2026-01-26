@@ -242,7 +242,9 @@ func (h *Handler) VerifySSHKey(w http.ResponseWriter, r *http.Request) {
 	// If repo is specified, check permissions
 	permission := "write" // Default permission for authenticated user
 	if req.Repo != "" {
-		parts := strings.SplitN(req.Repo, "/", 2)
+		// Strip .git suffix if present
+		repoPath := strings.TrimSuffix(req.Repo, ".git")
+		parts := strings.SplitN(repoPath, "/", 2)
 		if len(parts) != 2 {
 			writeJSON(w, http.StatusOK, SSHVerifyResponse{
 				Allowed: false,
