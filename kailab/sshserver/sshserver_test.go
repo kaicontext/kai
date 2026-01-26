@@ -98,7 +98,8 @@ func TestWriteGitError(t *testing.T) {
 
 func TestReadUploadPackRequestCapsShallow(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writePktLine(&buf, "want deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\x00symref=HEAD:refs/heads/main side-band-64k\n"); err != nil {
+	// Git protocol uses space-separated capabilities after the OID
+	if err := writePktLine(&buf, "want deadbeefdeadbeefdeadbeefdeadbeefdeadbeef symref=HEAD:refs/heads/main side-band-64k\n"); err != nil {
 		t.Fatalf("write pkt: %v", err)
 	}
 	if err := writePktLine(&buf, "shallow feedfacefeedfacefeedfacefeedfacefeedface\n"); err != nil {
@@ -117,7 +118,7 @@ func TestReadUploadPackRequestCapsShallow(t *testing.T) {
 		t.Fatalf("expected 1 want, got %d", len(req.Wants))
 	}
 	if len(req.Caps) != 2 {
-		t.Fatalf("expected 2 caps, got %d", len(req.Caps))
+		t.Fatalf("expected 2 caps, got %d: %v", len(req.Caps), req.Caps)
 	}
 	if len(req.Shallow) != 1 {
 		t.Fatalf("expected 1 shallow, got %d", len(req.Shallow))
@@ -296,7 +297,10 @@ func TestWriteEmptyPack(t *testing.T) {
 }
 
 func TestReadUploadPackRequest(t *testing.T) {
-	buf := bytes.NewBufferString("003fwant 0123456789012345678901234567890123456789\x00agent=git/2.0" +
+	// Git protocol uses space-separated capabilities after the OID
+	// pkt-line length includes the 4-byte length prefix
+	// "want " (5) + sha (40) + " agent=git/2.0\n" (15) = 60 + 4 = 64 = 0x40
+	buf := bytes.NewBufferString("0040want 0123456789012345678901234567890123456789 agent=git/2.0\n" +
 		"000fhave abcdef" +
 		"0008done" +
 		"0000")

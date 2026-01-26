@@ -31,13 +31,17 @@ func TestDBRefAdapterListRefs(t *testing.T) {
 	if headRef != "refs/heads/main" {
 		t.Fatalf("unexpected head ref: %s", headRef)
 	}
-	if len(refs) != 1 {
-		t.Fatalf("expected 1 ref, got %d", len(refs))
+	// Expect 2 refs: HEAD (first) and refs/heads/main
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs, got %d", len(refs))
 	}
-	if refs[0].Name != "refs/heads/main" {
-		t.Fatalf("unexpected ref name: %s", refs[0].Name)
+	if refs[0].Name != "HEAD" {
+		t.Fatalf("expected HEAD as first ref, got %s", refs[0].Name)
 	}
-	if len(refs[0].OID) != 40 {
-		t.Fatalf("expected 40-hex oid, got %q", refs[0].OID)
+	if refs[1].Name != "refs/heads/main" {
+		t.Fatalf("unexpected ref name: %s", refs[1].Name)
+	}
+	if len(refs[1].OID) != 40 {
+		t.Fatalf("expected 40-hex oid, got %q", refs[1].OID)
 	}
 }
