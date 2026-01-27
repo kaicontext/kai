@@ -19,12 +19,21 @@ import (
 const emptyTreeOID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string, haves map[string]bool) ([]GitObject, error) {
+	objects, _, err := buildPackObjectsWithDepth(ctx, refAdapter, wants, haves, 0)
+	return objects, err
+}
+
+// buildPackObjectsWithDepth builds pack objects with optional depth limiting for shallow clones.
+// depth of 0 means unlimited, depth of 1 means only the tip commit (shallow clone).
+// Returns objects, shallow boundary commits, and any error.
+func buildPackObjectsWithDepth(ctx context.Context, refAdapter RefAdapter, wants []string, haves map[string]bool, depth int) ([]GitObject, []string, error) {
 	refCommits, _, err := refAdapter.BuildRefCommits(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	objects := make([]GitObject, 0)
+	shallowCommits := make([]string, 0)
 	seen := make(map[string]bool)
 
 	for _, want := range wants {
@@ -33,16 +42,40 @@ func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string
 		}
 		info, ok := refCommits[want]
 		if !ok {
-			return nil, fmt.Errorf("unknown want %s", want)
+			return nil, nil, fmt.Errorf("unknown want %s", want)
 		}
-		if !seen[info.Commit.OID] {
-			seen[info.Commit.OID] = true
-			objects = append(objects, info.Commit)
-		}
-		for _, obj := range info.Objects {
-			if !seen[obj.OID] {
-				seen[obj.OID] = true
-				objects = append(objects, obj)
+
+		if depth > 0 {
+			// For shallow clones, we need to re-collect with depth limiting
+			// First, build a map of all available objects
+			allObjects := make(map[string]GitObject)
+			allObjects[info.Commit.OID] = info.Commit
+			for _, obj := range info.Objects {
+				allObjects[obj.OID] = obj
+			}
+
+			// Collect with depth limiting
+			collected, shallow := collectCommitObjectsWithDepth(allObjects, info.Commit.OID, depth)
+			for _, obj := range collected {
+				if !seen[obj.OID] {
+					seen[obj.OID] = true
+					objects = append(objects, obj)
+				}
+			}
+			for _, oid := range shallow {
+				shallowCommits = append(shallowCommits, oid)
+			}
+		} else {
+			// No depth limit - include all objects
+			if !seen[info.Commit.OID] {
+				seen[info.Commit.OID] = true
+				objects = append(objects, info.Commit)
+			}
+			for _, obj := range info.Objects {
+				if !seen[obj.OID] {
+					seen[obj.OID] = true
+					objects = append(objects, obj)
+				}
 			}
 		}
 	}
@@ -51,7 +84,7 @@ func buildPackObjects(ctx context.Context, refAdapter RefAdapter, wants []string
 		objects = append(objects, buildEmptyTreeObject())
 	}
 
-	return objects, nil
+	return objects, shallowCommits, nil
 }
 
 func buildEmptyTreeObject() GitObject {
@@ -116,6 +149,78 @@ func writePackObject(w *bytes.Buffer, obj GitObject) error {
 		return err
 	}
 	return zw.Close()
+}
+
+// ObjectRefDelta is the Git pack object type for REF_DELTA (type 7)
+const ObjectRefDelta = 7
+
+// writePackRefDelta writes a REF_DELTA object to the pack.
+// baseOID is the 40-character hex OID of the base object.
+// delta is the delta data that transforms base into the target object.
+func writePackRefDelta(w *bytes.Buffer, baseOID string, delta []byte) error {
+	// Decode base OID from hex
+	baseBytes, err := hex.DecodeString(baseOID)
+	if err != nil || len(baseBytes) != 20 {
+		return fmt.Errorf("invalid base OID: %s", baseOID)
+	}
+
+	// Write header: type 7 (REF_DELTA) + delta size
+	header := encodeObjectHeader(ObjectRefDelta, len(delta))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+
+	// Write base object OID (20 bytes, raw)
+	if _, err := w.Write(baseBytes); err != nil {
+		return err
+	}
+
+	// Write zlib-compressed delta data
+	zw := zlib.NewWriter(w)
+	if _, err := zw.Write(delta); err != nil {
+		_ = zw.Close()
+		return err
+	}
+	return zw.Close()
+}
+
+// DeltaCandidate represents an object that could be deltified.
+type DeltaCandidate struct {
+	Object  GitObject
+	BaseOID string // OID of base object to delta against (empty if none)
+	Delta   []byte // Generated delta (nil if sending full object)
+}
+
+// writePackWithDeltas writes a pack that may contain delta objects.
+func writePackWithDeltas(w io.Writer, candidates []DeltaCandidate) error {
+	var buf bytes.Buffer
+
+	// Pack header
+	buf.Write([]byte{'P', 'A', 'C', 'K'})
+	buf.Write([]byte{0, 0, 0, 2}) // version 2
+	count := uint32(len(candidates))
+	buf.Write([]byte{byte(count >> 24), byte(count >> 16), byte(count >> 8), byte(count)})
+
+	for _, cand := range candidates {
+		if cand.Delta != nil && cand.BaseOID != "" {
+			// Write as REF_DELTA
+			if err := writePackRefDelta(&buf, cand.BaseOID, cand.Delta); err != nil {
+				return err
+			}
+		} else {
+			// Write as full object
+			if err := writePackObject(&buf, cand.Object); err != nil {
+				return err
+			}
+		}
+	}
+
+	sum := sha1.Sum(buf.Bytes())
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	_, err := w.Write(sum[:])
+	return err
 }
 
 func encodeObjectHeader(objType int, size int) []byte {

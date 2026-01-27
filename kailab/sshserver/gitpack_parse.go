@@ -360,11 +360,21 @@ func extractParentOIDs(commitData []byte) []string {
 
 // collectCommitObjects collects commit, tree, and all blob objects reachable from a commit.
 func collectCommitObjects(objects map[string]GitObject, commitOID string) []GitObject {
-	result := make([]GitObject, 0)
-	visited := make(map[string]bool)
+	result, _ := collectCommitObjectsWithDepth(objects, commitOID, 0)
+	return result
+}
 
-	var collect func(oid string)
-	collect = func(oid string) {
+// collectCommitObjectsWithDepth collects objects with optional depth limiting.
+// maxDepth of 0 means unlimited. maxDepth of 1 means only the tip commit (shallow clone).
+// Returns the collected objects and a list of shallow boundary commits (commits with parents not included).
+func collectCommitObjectsWithDepth(objects map[string]GitObject, commitOID string, maxDepth int) ([]GitObject, []string) {
+	result := make([]GitObject, 0)
+	shallowCommits := make([]string, 0)
+	visited := make(map[string]bool)
+	commitDepths := make(map[string]int)
+
+	var collectTree func(oid string)
+	collectTree = func(oid string) {
 		if visited[oid] {
 			return
 		}
@@ -376,27 +386,55 @@ func collectCommitObjects(objects map[string]GitObject, commitOID string) []GitO
 		}
 		result = append(result, obj)
 
-		switch obj.Type {
-		case ObjectCommit:
-			treeOID := extractTreeOID(obj.Data)
-			if treeOID != "" {
-				collect(treeOID)
-			}
-			// Also traverse parent commits
-			for _, parentOID := range extractParentOIDs(obj.Data) {
-				collect(parentOID)
-			}
-		case ObjectTree:
-			// Parse tree entries and collect referenced objects
+		if obj.Type == ObjectTree {
 			entries := parseTreeEntries(obj.Data)
 			for _, entry := range entries {
-				collect(entry.oid)
+				collectTree(entry.oid)
 			}
 		}
 	}
 
-	collect(commitOID)
-	return result
+	var collectCommit func(oid string, depth int)
+	collectCommit = func(oid string, depth int) {
+		if visited[oid] {
+			return
+		}
+		visited[oid] = true
+		commitDepths[oid] = depth
+
+		obj, ok := objects[oid]
+		if !ok {
+			return
+		}
+		result = append(result, obj)
+
+		if obj.Type != ObjectCommit {
+			return
+		}
+
+		// Always collect the tree for this commit
+		treeOID := extractTreeOID(obj.Data)
+		if treeOID != "" {
+			collectTree(treeOID)
+		}
+
+		// Check if we should traverse parent commits
+		parentOIDs := extractParentOIDs(obj.Data)
+		if len(parentOIDs) > 0 {
+			if maxDepth > 0 && depth >= maxDepth {
+				// Depth limit reached - this commit is a shallow boundary
+				shallowCommits = append(shallowCommits, oid)
+			} else {
+				// Continue traversing parents
+				for _, parentOID := range parentOIDs {
+					collectCommit(parentOID, depth+1)
+				}
+			}
+		}
+	}
+
+	collectCommit(commitOID, 1)
+	return result, shallowCommits
 }
 
 type gitTreeEntry struct {

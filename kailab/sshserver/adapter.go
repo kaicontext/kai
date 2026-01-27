@@ -25,5 +25,5 @@ type ObjectStore interface {
 
 // PackBuilder assembles packfiles for git clients.
 type PackBuilder interface {
-	BuildPack(ctx context.Context, req PackRequest, w io.Writer) error
+	BuildPack(ctx context.Context, req PackRequest, w io.Writer) (*PackResult, error)
 }

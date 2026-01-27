@@ -335,3 +335,73 @@ func TestHandleUploadPack_RejectsWants(t *testing.T) {
 		t.Fatal("expected error response output")
 	}
 }
+
+func TestParseGitProtocolVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		environ []string
+		expect  int
+	}{
+		{
+			name:    "no protocol",
+			environ: []string{},
+			expect:  0,
+		},
+		{
+			name:    "version 2",
+			environ: []string{"GIT_PROTOCOL=version=2"},
+			expect:  2,
+		},
+		{
+			name:    "version 2 with other vars",
+			environ: []string{"HOME=/home/user", "GIT_PROTOCOL=version=2", "SHELL=/bin/bash"},
+			expect:  2,
+		},
+		{
+			name:    "version 2 colon-separated",
+			environ: []string{"GIT_PROTOCOL=version=2:shallow"},
+			expect:  2,
+		},
+		{
+			name:    "other version",
+			environ: []string{"GIT_PROTOCOL=version=1"},
+			expect:  0,
+		},
+		{
+			name:    "partial match not version 2",
+			environ: []string{"GIT_PROTOCOL=foo:bar"},
+			expect:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseGitProtocolVersion(tt.environ)
+			if got != tt.expect {
+				t.Errorf("parseGitProtocolVersion(%v) = %d, want %d", tt.environ, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestAdvertiseV2Capabilities(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := CapabilitiesConfig{Agent: "kai-test"}
+	if err := advertiseV2Capabilities(&buf, cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "version 2") {
+		t.Errorf("missing version 2 in output: %s", output)
+	}
+	if !strings.Contains(output, "agent=kai-test") {
+		t.Errorf("missing agent in output: %s", output)
+	}
+	if !strings.Contains(output, "ls-refs") {
+		t.Errorf("missing ls-refs capability: %s", output)
+	}
+	if !strings.Contains(output, "fetch=shallow") {
+		t.Errorf("missing fetch capability: %s", output)
+	}
+}

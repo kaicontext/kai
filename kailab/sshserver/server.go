@@ -14,9 +14,10 @@ import (
 
 // GitIO carries the stream handles for Git protocol communication.
 type GitIO struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Stdin           io.Reader
+	Stdout          io.Writer
+	Stderr          io.Writer
+	ProtocolVersion int // 0 = not specified, 1 = v1, 2 = v2
 }
 
 // Handler routes git-upload-pack / git-receive-pack to implementations.
@@ -77,9 +78,10 @@ func StartWithListener(listener net.Listener, handler Handler, logger *log.Logge
 			}
 
 			gitIO := GitIO{
-				Stdin:  s,
-				Stdout: s,
-				Stderr: s.Stderr(),
+				Stdin:           s,
+				Stdout:          s,
+				Stderr:          s.Stderr(),
+				ProtocolVersion: parseGitProtocolVersion(s.Environ()),
 			}
 			err = HandleCommand(raw, handler, gitIO)
 			if auditor, ok := handler.(SessionAuditor); ok {
@@ -111,4 +113,39 @@ func Stop(ctx context.Context, srv *ssh.Server) error {
 		return nil
 	}
 	return srv.Shutdown(ctx)
+}
+
+// parseGitProtocolVersion extracts the protocol version from SSH environment variables.
+// Git clients send GIT_PROTOCOL=version=2 to request protocol v2.
+func parseGitProtocolVersion(environ []string) int {
+	for _, env := range environ {
+		if len(env) > 13 && env[:13] == "GIT_PROTOCOL=" {
+			value := env[13:]
+			if value == "version=2" {
+				return 2
+			}
+			// Check for version=2 anywhere in the value (may have multiple key=value pairs)
+			for _, part := range splitProtocolValue(value) {
+				if part == "version=2" {
+					return 2
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// splitProtocolValue splits a colon-separated protocol value string.
+func splitProtocolValue(s string) []string {
+	var result []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ':' {
+			if i > start {
+				result = append(result, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return result
 }

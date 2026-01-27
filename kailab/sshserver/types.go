@@ -30,6 +30,12 @@ type PackRequest struct {
 	ThinPack bool
 	OFSDelta bool
 	RefDelta bool
+	Depth    int // 0 = unlimited, 1 = shallow (just tip commit), etc.
+}
+
+// PackResult contains the pack data and metadata about shallow boundaries.
+type PackResult struct {
+	ShallowCommits []string // Commits that are shallow boundaries (parents not included)
 }
 
 // RefCommitInfo bundles a commit object with its dependent objects.

@@ -94,6 +94,22 @@ func (h *GitHandler) UploadPack(repoPath string, io GitIO) error {
 	h.registry.Acquire(handle)
 	defer h.registry.Release(handle)
 
+	// Protocol v2: Send capability advertisement and handle commands
+	if io.ProtocolVersion == 2 {
+		if err := advertiseV2Capabilities(io.Stdout, h.capabilities); err != nil {
+			h.logger.Printf("upload-pack v2 capability error: %v", err)
+			metrics.IncSSHErrors()
+			return err
+		}
+		if err := handleUploadPackV2Loop(handle.DB, h.objectStore, io.Stdin, io.Stdout); err != nil {
+			h.logger.Printf("upload-pack v2 error: %v", err)
+			metrics.IncSSHErrors()
+			return err
+		}
+		return nil
+	}
+
+	// Protocol v1: Advertise refs then handle negotiation
 	if err := advertiseRefs(handle.DB, io.Stdout, h.capabilities); err != nil {
 		h.logger.Printf("upload-pack advertise error: %v", err)
 		_ = writeGitError(io.Stdout, "failed to advertise refs")
@@ -222,14 +238,53 @@ func handleUploadPack(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) e
 		known[oid] = true
 	}
 
+	// Parse depth from deepen request
+	depth := 0
 	if len(req.Deepen) > 0 {
 		if err := validateShallowRequest(req); err != nil {
 			_ = writeGitError(w, err.Error())
 			_ = writeFlush(w)
 			return err
 		}
-		if err := writeShallowLines(w, req.Wants, true); err != nil {
+		depth = parseDepth(req.Deepen[0])
+	}
+
+	// Build pack request
+	packReq := PackRequest{
+		Wants:    req.Wants,
+		Haves:    req.Haves,
+		Done:     req.Done,
+		ThinPack: hasCapability(req.Caps, "thin-pack"),
+		OFSDelta: hasCapability(req.Caps, "ofs-delta"),
+		RefDelta: hasCapability(req.Caps, "ref-delta"),
+		Depth:    depth,
+	}
+
+	// For shallow clones, compute shallow commits first to write them before pack
+	// We do this by pre-computing with depth, then writing shallow lines
+	if depth > 0 {
+		haves := make(map[string]bool, len(req.Haves))
+		for _, have := range req.Haves {
+			if have != "" {
+				haves[have] = true
+			}
+		}
+		_, shallowCommits, err := buildPackObjectsWithDepth(context.Background(), refAdapter, req.Wants, haves, depth)
+		if err != nil {
+			_ = writeGitError(w, err.Error())
+			_ = writeFlush(w)
 			return err
+		}
+		if len(shallowCommits) > 0 {
+			if err := writeShallowLines(w, shallowCommits, true); err != nil {
+				return err
+			}
+		} else {
+			// No shallow commits found (synthetic commits without parents)
+			// Still send shallow for wants if deepen was requested
+			if err := writeShallowLines(w, req.Wants, true); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -243,14 +298,7 @@ func handleUploadPack(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) e
 	}
 
 	builder := NewPackBuilder(refAdapter, store)
-	if err := builder.BuildPack(context.Background(), PackRequest{
-		Wants:    req.Wants,
-		Haves:    req.Haves,
-		Done:     req.Done,
-		ThinPack: hasCapability(req.Caps, "thin-pack"),
-		OFSDelta: hasCapability(req.Caps, "ofs-delta"),
-		RefDelta: hasCapability(req.Caps, "ref-delta"),
-	}, packWriter); err != nil {
+	if _, err := builder.BuildPack(context.Background(), packReq, packWriter); err != nil {
 		_ = writeGitError(w, err.Error())
 		_ = writeFlush(w)
 		return err
@@ -258,6 +306,15 @@ func handleUploadPack(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) e
 
 	// Flush to signal end of pack data
 	return writeFlush(w)
+}
+
+// parseDepth converts a deepen value to an integer depth.
+func parseDepth(deepen string) int {
+	// Currently only "1" is supported by validateShallowRequest
+	if deepen == "1" {
+		return 1
+	}
+	return 0
 }
 
 type uploadPackRequest struct {
@@ -386,14 +443,60 @@ func handleUploadPackV2Fetch(db *sql.DB, store ObjectStore, args []string, w io.
 		return writeEmptyPack(w)
 	}
 
+	// Parse depth from deepen request
+	depth := 0
 	if len(req.Deepen) > 0 {
 		if err := validateShallowRequest(req); err != nil {
 			_ = writeGitError(w, err.Error())
 			_ = writeFlush(w)
 			return err
 		}
-		if err := writeShallowLines(w, req.Wants, true); err != nil {
+		depth = parseDepth(req.Deepen[0])
+	}
+
+	refAdapter := NewDBRefAdapter(db)
+
+	// For shallow clones, compute and write shallow commits before packfile
+	if depth > 0 {
+		haves := make(map[string]bool, len(req.Haves))
+		for _, have := range req.Haves {
+			if have != "" {
+				haves[have] = true
+			}
+		}
+		_, shallowCommits, err := buildPackObjectsWithDepth(context.Background(), refAdapter, req.Wants, haves, depth)
+		if err != nil {
+			_ = writeGitError(w, err.Error())
+			_ = writeFlush(w)
 			return err
+		}
+		// Write shallow-info section for v2
+		if len(shallowCommits) > 0 {
+			if err := writePktLine(w, "shallow-info\n"); err != nil {
+				return err
+			}
+			for _, oid := range shallowCommits {
+				if err := writePktLine(w, "shallow "+oid+"\n"); err != nil {
+					return err
+				}
+			}
+			if err := writeDelim(w); err != nil {
+				return err
+			}
+		} else if len(req.Wants) > 0 {
+			// No shallow commits found, but deepen was requested
+			// Send shallow for all wants (synthetic commits)
+			if err := writePktLine(w, "shallow-info\n"); err != nil {
+				return err
+			}
+			for _, want := range req.Wants {
+				if err := writePktLine(w, "shallow "+want+"\n"); err != nil {
+					return err
+				}
+			}
+			if err := writeDelim(w); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -401,13 +504,16 @@ func handleUploadPackV2Fetch(db *sql.DB, store ObjectStore, args []string, w io.
 		return err
 	}
 
-	refAdapter := NewDBRefAdapter(db)
+	// Protocol v2 uses side-band-64k for pack data
+	packWriter := &sideBandWriter{w: w, maxData: 65515, channelID: 1}
+
 	builder := NewPackBuilder(refAdapter, store)
-	if err := builder.BuildPack(context.Background(), PackRequest{
+	if _, err := builder.BuildPack(context.Background(), PackRequest{
 		Wants: req.Wants,
 		Haves: req.Haves,
 		Done:  req.Done,
-	}, w); err != nil {
+		Depth: depth,
+	}, packWriter); err != nil {
 		return err
 	}
 	return writeFlush(w)
@@ -519,6 +625,198 @@ func advertiseReceivePackRefs(db *sql.DB, w io.Writer, capsConfig CapabilitiesCo
 		}
 	}
 
+	return writeFlush(w)
+}
+
+// advertiseV2Capabilities sends the protocol v2 capability advertisement.
+// This is sent instead of ref advertisement when client requests v2.
+func advertiseV2Capabilities(w io.Writer, capsConfig CapabilitiesConfig) error {
+	// Protocol v2 capability advertisement format:
+	// version 2\n
+	// <capability>\n
+	// ...
+	// 0000 (flush)
+
+	if err := writePktLine(w, "version 2\n"); err != nil {
+		return err
+	}
+
+	// Agent capability
+	agent := capsConfig.Agent
+	if agent == "" {
+		agent = "kai"
+	}
+	if err := writePktLine(w, "agent="+agent+"\n"); err != nil {
+		return err
+	}
+
+	// ls-refs capability (required for listing refs)
+	if err := writePktLine(w, "ls-refs\n"); err != nil {
+		return err
+	}
+
+	// fetch capability with supported features
+	// Note: shallow and filter are important for CI systems
+	if err := writePktLine(w, "fetch=shallow\n"); err != nil {
+		return err
+	}
+
+	// server-option capability (allows client to send options)
+	if err := writePktLine(w, "server-option\n"); err != nil {
+		return err
+	}
+
+	// object-format capability (we use sha1)
+	if err := writePktLine(w, "object-format=sha1\n"); err != nil {
+		return err
+	}
+
+	return writeFlush(w)
+}
+
+// handleUploadPackV2Loop handles protocol v2 commands in a loop.
+// v2 allows multiple commands per session (ls-refs, fetch, etc.)
+func handleUploadPackV2Loop(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) error {
+	reader := bufio.NewReader(r)
+
+	for {
+		// Read command line
+		cmdLine, pktType, err := readPktLineV2(reader)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if pktType == PktFlush || pktType == PktDelim {
+			// Client sent flush without command - done
+			return nil
+		}
+
+		cmdLine = strings.TrimSpace(cmdLine)
+		if !strings.HasPrefix(cmdLine, "command=") {
+			return fmt.Errorf("invalid v2 command: %s", cmdLine)
+		}
+		command := strings.TrimPrefix(cmdLine, "command=")
+
+		// Git protocol v2 command format:
+		// command=<cmd>
+		// [capability-list]  <- usually empty for client
+		// 0001 (delimiter)
+		// [argument-list]
+		// 0000 (flush)
+		//
+		// So we first read until delimiter (capabilities), then until flush (arguments)
+
+		args := []string{}
+
+		// Read until delimiter or flush (skip capabilities section)
+		for {
+			_, pktType, err := readPktLineV2(reader)
+			if err != nil {
+				return err
+			}
+			if pktType == PktDelim {
+				// Delimiter found - now read actual arguments until flush
+				break
+			}
+			if pktType == PktFlush {
+				// Flush without delimiter - no arguments, command is complete
+				goto handleCommand
+			}
+			// This would be a capability line (unusual for client), skip it
+		}
+
+		// Read arguments until flush
+		for {
+			line, pktType, err := readPktLineV2(reader)
+			if err != nil {
+				return err
+			}
+			if pktType == PktFlush {
+				break
+			}
+			if pktType == PktDelim {
+				// Unexpected delimiter in arguments section
+				continue
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			args = append(args, line)
+		}
+
+	handleCommand:
+		// Handle command
+		switch command {
+		case "ls-refs":
+			if err := writeV2LsRefsWithArgs(db, args, w); err != nil {
+				return err
+			}
+		case "fetch":
+			if err := handleUploadPackV2Fetch(db, store, args, w); err != nil {
+				return err
+			}
+			// fetch is typically the last command
+			return nil
+		default:
+			return fmt.Errorf("unsupported v2 command: %s", command)
+		}
+	}
+}
+
+// writeV2LsRefsWithArgs handles ls-refs command with arguments.
+func writeV2LsRefsWithArgs(db *sql.DB, args []string, w io.Writer) error {
+	refAdapter := NewDBRefAdapter(db)
+	refs, headRef, err := refAdapter.ListRefs(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// Parse arguments
+	symrefs := false
+	peel := false
+	var prefixes []string
+	for _, arg := range args {
+		switch {
+		case arg == "symrefs":
+			symrefs = true
+		case arg == "peel":
+			peel = true
+		case strings.HasPrefix(arg, "ref-prefix "):
+			prefixes = append(prefixes, strings.TrimPrefix(arg, "ref-prefix "))
+		}
+	}
+
+	for _, ref := range refs {
+		// Filter by prefix if specified
+		if len(prefixes) > 0 {
+			match := false
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(ref.Name, prefix) {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		line := ref.OID + " " + ref.Name
+		if symrefs && ref.Name == "HEAD" && headRef != "" {
+			line += " symref-target:" + headRef
+		}
+		if peel {
+			// For now, we don't distinguish annotated tags
+			// Could add peeled value here if needed
+		}
+		line += "\n"
+		if err := writePktLine(w, line); err != nil {
+			return err
+		}
+	}
 	return writeFlush(w)
 }
 
