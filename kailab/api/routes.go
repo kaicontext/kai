@@ -1575,7 +1575,7 @@ func (h *Handler) GetChangeset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get files from the changeset by looking at MODIFIES edges or scanning nodes
-	// For now, return basic info - can enhance later with full semantic diff
+	var files []map[string]interface{}
 	rows, err := rh.DB.Query(`
 		SELECT n.payload FROM nodes n
 		JOIN edges e ON n.id = e.dst
@@ -1583,7 +1583,6 @@ func (h *Handler) GetChangeset(w http.ResponseWriter, r *http.Request) {
 	`, fullDigest)
 	if err == nil {
 		defer rows.Close()
-		var files []map[string]interface{}
 		for rows.Next() {
 			var payloadJSON []byte
 			if err := rows.Scan(&payloadJSON); err == nil {
@@ -1596,10 +1595,109 @@ func (h *Handler) GetChangeset(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		response["files"] = files
 	}
 
+	// If no files from edges, compute diff between base and head snapshots
+	if len(files) == 0 && csPayload.Base != "" && csPayload.Head != "" {
+		files = h.computeSnapshotDiff(rh.DB, csPayload.Base, csPayload.Head)
+	}
+
+	response["files"] = files
 	writeJSON(w, http.StatusOK, response)
+}
+
+// computeSnapshotDiff compares two snapshots and returns file changes
+func (h *Handler) computeSnapshotDiff(db *sql.DB, baseHex, headHex string) []map[string]interface{} {
+	baseDigest, err := hex.DecodeString(baseHex)
+	if err != nil {
+		return nil
+	}
+	headDigest, err := hex.DecodeString(headHex)
+	if err != nil {
+		return nil
+	}
+
+	// Get files from both snapshots
+	baseFiles := h.getSnapshotFiles(db, baseDigest)
+	headFiles := h.getSnapshotFiles(db, headDigest)
+
+	var files []map[string]interface{}
+
+	// Find added and modified files
+	for path, headFile := range headFiles {
+		if baseFile, exists := baseFiles[path]; exists {
+			// File exists in both - check if modified
+			if headFile.contentDigest != baseFile.contentDigest {
+				files = append(files, map[string]interface{}{
+					"path":   path,
+					"action": "modified",
+				})
+			}
+		} else {
+			// File only in head - added
+			files = append(files, map[string]interface{}{
+				"path":   path,
+				"action": "added",
+			})
+		}
+	}
+
+	// Find removed files
+	for path := range baseFiles {
+		if _, exists := headFiles[path]; !exists {
+			files = append(files, map[string]interface{}{
+				"path":   path,
+				"action": "removed",
+			})
+		}
+	}
+
+	return files
+}
+
+type snapshotFile struct {
+	path          string
+	contentDigest string
+}
+
+// getSnapshotFiles returns a map of path -> file info for a snapshot
+func (h *Handler) getSnapshotFiles(db *sql.DB, snapshotDigest []byte) map[string]snapshotFile {
+	result := make(map[string]snapshotFile)
+
+	snapData, kind, err := pack.ExtractObjectFromDB(db, snapshotDigest)
+	if err != nil || kind != "Snapshot" {
+		return result
+	}
+
+	// Parse snapshot payload
+	snapJSON := snapData
+	if idx := indexOf(snapData, '\n'); idx >= 0 {
+		snapJSON = snapData[idx+1:]
+	}
+
+	var snapPayload struct {
+		Files []struct {
+			Path          string `json:"path"`
+			Digest        string `json:"digest"`
+			ContentDigest string `json:"contentDigest"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(snapJSON, &snapPayload); err != nil {
+		return result
+	}
+
+	for _, f := range snapPayload.Files {
+		contentDigest := f.ContentDigest
+		if contentDigest == "" {
+			contentDigest = f.Digest
+		}
+		result[f.Path] = snapshotFile{
+			path:          f.Path,
+			contentDigest: contentDigest,
+		}
+	}
+
+	return result
 }
 
 // GetAffectedTests returns tests that might be affected by the changes in a changeset.
