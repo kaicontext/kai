@@ -8,6 +8,7 @@
 	let entries = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let changesetCache = $state({});
 
 	$effect(() => {
 		// Re-run when page params change
@@ -36,6 +37,8 @@
 				entries = [];
 			} else {
 				entries = data.entries || [];
+				// Load changeset details for entries that reference changesets
+				await loadChangesetDetails();
 			}
 		} catch (e) {
 			error = 'Failed to load history';
@@ -43,6 +46,37 @@
 		}
 
 		loading = false;
+	}
+
+	async function loadChangesetDetails() {
+		const { slug, repo } = $page.params;
+
+		// Find unique changeset IDs from cs.* ref updates
+		const changesetIds = new Set();
+		for (const entry of entries) {
+			if (entry.ref && entry.ref.startsWith('cs.') && entry.new) {
+				const newHex = hexEncode(entry.new);
+				if (newHex && !changesetCache[newHex]) {
+					changesetIds.add(newHex);
+				}
+			}
+		}
+
+		// Fetch changeset details in parallel
+		const promises = Array.from(changesetIds).map(async (id) => {
+			try {
+				const data = await api('GET', `/${slug}/${repo}/v1/changesets/${id}`);
+				if (!data.error) {
+					changesetCache[id] = data;
+				}
+			} catch (e) {
+				// Ignore errors for individual changesets
+			}
+		});
+
+		await Promise.all(promises);
+		// Trigger reactivity
+		changesetCache = { ...changesetCache };
 	}
 
 	function formatDate(timestamp) {
@@ -105,8 +139,8 @@
 		}
 	}
 
-	function getRefIcon(refName) {
-		if (!refName) return '';
+	function getRefType(refName) {
+		if (!refName) return 'ref';
 		if (refName.startsWith('snap.')) return 'snapshot';
 		if (refName.startsWith('cs.')) return 'changeset';
 		if (refName.startsWith('review.')) return 'review';
@@ -117,11 +151,81 @@
 	function formatRefName(refName) {
 		if (!refName) return '';
 		// Make ref names more readable
-		if (refName.startsWith('snap.')) return refName.replace('snap.', 'snapshot/');
-		if (refName.startsWith('cs.')) return refName.replace('cs.', 'changeset/');
-		if (refName.startsWith('review.')) return refName.replace('review.', 'review/');
-		if (refName.startsWith('ws.')) return refName.replace('ws.', 'workspace/');
+		if (refName.startsWith('snap.')) return refName.replace('snap.', '');
+		if (refName.startsWith('cs.')) return refName.replace('cs.', '');
+		if (refName.startsWith('review.')) return refName.replace('review.', '');
+		if (refName.startsWith('ws.')) return refName.replace('ws.', '');
 		return refName;
+	}
+
+	function getRefBadgeColor(refName) {
+		const type = getRefType(refName);
+		switch (type) {
+			case 'snapshot':
+				return 'bg-purple-500/20 text-purple-400';
+			case 'changeset':
+				return 'bg-green-500/20 text-green-400';
+			case 'review':
+				return 'bg-yellow-500/20 text-yellow-400';
+			case 'workspace':
+				return 'bg-blue-500/20 text-blue-400';
+			default:
+				return 'bg-gray-500/20 text-gray-400';
+		}
+	}
+
+	function getCommitMessage(entry) {
+		// Check if we have changeset details with intent
+		if (entry.ref && entry.ref.startsWith('cs.') && entry.new) {
+			const newHex = hexEncode(entry.new);
+			const cs = changesetCache[newHex];
+			if (cs && cs.intent) {
+				return cs.intent;
+			}
+		}
+		// Check meta field
+		if (entry.meta && entry.meta.message) {
+			return entry.meta.message;
+		}
+		return null;
+	}
+
+	function getChangesetForEntry(entry) {
+		if (entry.ref && entry.ref.startsWith('cs.') && entry.new) {
+			const newHex = hexEncode(entry.new);
+			return changesetCache[newHex];
+		}
+		// For snapshot updates, try to find matching changeset
+		if (entry.ref && entry.ref.startsWith('snap.') && entry.new) {
+			// Look through cache for changeset with matching head
+			const newHex = hexEncode(entry.new);
+			for (const [id, cs] of Object.entries(changesetCache)) {
+				if (cs.head === newHex) {
+					return cs;
+				}
+			}
+		}
+		return null;
+	}
+
+	function viewDiff(entry) {
+		const cs = getChangesetForEntry(entry);
+		if (cs && cs.base && cs.head) {
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}?diff=${cs.base}..${cs.head}`);
+		} else if (entry.old && entry.new) {
+			// Fallback: use old/new from log entry for snapshot refs
+			const oldHex = hexEncode(entry.old);
+			const newHex = hexEncode(entry.new);
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}?diff=${oldHex}..${newHex}`);
+		}
+	}
+
+	function canViewDiff(entry) {
+		const cs = getChangesetForEntry(entry);
+		if (cs && cs.base && cs.head) return true;
+		// For snapshot updates, we can diff old vs new
+		if (entry.ref && entry.ref.startsWith('snap.') && entry.old && entry.new) return true;
+		return false;
 	}
 </script>
 
@@ -167,18 +271,27 @@
 	{:else}
 		<div class="card p-0">
 			{#each entries as entry, i}
+				{@const message = getCommitMessage(entry)}
+				{@const changeset = getChangesetForEntry(entry)}
 				<div
 					class="list-item {i < entries.length - 1 ? 'border-b border-kai-border' : ''}"
 				>
 					<div class="flex-1 min-w-0">
 						<div class="flex items-center gap-3">
-							<span class="px-2 py-0.5 rounded text-xs font-medium {getKindColor(entry.kind)}">
-								{entry.kind === 'REF_UPDATE' ? 'Update' : entry.kind}
+							<span class="px-2 py-0.5 rounded text-xs font-medium {getRefBadgeColor(entry.ref)}">
+								{getRefType(entry.ref)}
 							</span>
 							<span class="font-mono text-sm text-kai-text-muted">
 								{formatRefName(entry.ref)}
 							</span>
 						</div>
+
+						{#if message}
+							<div class="mt-2 text-sm font-medium">
+								{message}
+							</div>
+						{/if}
+
 						<div class="text-kai-text-muted text-xs mt-2 flex items-center gap-4">
 							<span class="font-mono" title={hexEncode(entry.id)}>
 								{shortId(entry.id)}
@@ -188,11 +301,12 @@
 								{formatRelativeTime(entry.time)}
 							</span>
 						</div>
+
 						{#if entry.old || entry.new}
 							<div class="text-xs mt-2 font-mono flex items-center gap-2">
 								{#if entry.old}
 									<span class="text-red-400/70" title={hexEncode(entry.old)}>
-										-{shortId(entry.old)}
+										{shortId(entry.old)}
 									</span>
 								{/if}
 								{#if entry.old && entry.new}
@@ -200,10 +314,21 @@
 								{/if}
 								{#if entry.new}
 									<span class="text-green-400/70" title={hexEncode(entry.new)}>
-										+{shortId(entry.new)}
+										{shortId(entry.new)}
 									</span>
 								{/if}
 							</div>
+						{/if}
+					</div>
+
+					<div class="flex items-center gap-2">
+						{#if canViewDiff(entry)}
+							<button
+								class="btn btn-secondary btn-sm"
+								onclick={() => viewDiff(entry)}
+							>
+								View Diff
+							</button>
 						{/if}
 					</div>
 				</div>
