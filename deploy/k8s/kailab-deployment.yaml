@@ -40,6 +40,8 @@ metadata:
     component: data-plane
 spec:
   replicas: 1  # SQLite = single replica
+  strategy:
+    type: Recreate  # Required for ReadWriteOnce PVC - can't have two pods mounting it
   selector:
     matchLabels:
       app: kailab
@@ -120,7 +122,7 @@ metadata:
     app: kailab-control
     component: control-plane
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: kailab-control
