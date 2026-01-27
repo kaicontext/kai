@@ -31,7 +31,9 @@ import (
 
 	"kai-core/diff"
 	"kai-core/merge"
+	"kai/internal/ai"
 	"kai/internal/classify"
+	semanticdiff "kai/internal/diff"
 	"kai/internal/dirio"
 	"kai/internal/explain"
 	"kai/internal/filesource"
@@ -1387,6 +1389,25 @@ Examples:
 	RunE: runReviewExport,
 }
 
+var reviewSummaryCmd = &cobra.Command{
+	Use:   "summary [changeset]",
+	Short: "Show semantic summary of a changeset",
+	Long: `Display a progressive disclosure summary of what changed in a changeset.
+
+Level 1: WHAT CHANGED - grouped by category (API, internal, tests, etc.)
+Level 2: WHAT IT AFFECTS - files and symbols modified
+Level 3: WHAT COULD BE FIXED - AI suggestions (use --ai flag)
+Level 4: INSPECT - drill down into specific changes
+
+Examples:
+  kai review summary                    # Summary of @cs:last
+  kai review summary @cs:abc123         # Summary of specific changeset
+  kai review summary @cs:last -i        # Interactive drill-down mode
+  kai review summary --ai               # Include AI review suggestions`,
+	Args: cobra.RangeArgs(0, 1),
+	RunE: runReviewSummary,
+}
+
 var (
 	// Workspace flags
 	wsName           string
@@ -1406,16 +1427,19 @@ var (
 	pruneKeep        []string
 
 	// Review flags
-	reviewTitle      string
-	reviewDesc       string
-	reviewReviewers  []string
-	reviewCloseState string
-	reviewExportMD   bool
-	reviewExportHTML bool
-	reviewJSON       bool
-	reviewViewMode   string
-	reviewExplain    bool
-	reviewBase       string
+	reviewTitle       string
+	reviewDesc        string
+	reviewReviewers   []string
+	reviewCloseState  string
+	reviewExportMD    bool
+	reviewExportHTML  bool
+	reviewJSON        bool
+	reviewViewMode    string
+	reviewExplain     bool
+	reviewBase        string
+	reviewSummary     bool // Show progressive disclosure summary
+	reviewInteractive bool // Interactive drill-down mode
+	reviewAI          bool // Run AI review
 
 	statusDir        string
 	statusAgainst    string
@@ -1627,6 +1651,8 @@ func init() {
 
 	reviewViewCmd.Flags().BoolVar(&reviewJSON, "json", false, "Output as JSON")
 	reviewViewCmd.Flags().StringVar(&reviewViewMode, "view", "semantic", "View mode: semantic, text, or mixed")
+	reviewViewCmd.Flags().BoolVarP(&reviewSummary, "summary", "s", true, "Show progressive disclosure summary (default)")
+	reviewViewCmd.Flags().BoolVarP(&reviewInteractive, "interactive", "i", false, "Interactive mode: drill down into changes")
 
 	reviewCloseCmd.Flags().StringVar(&reviewCloseState, "state", "", "Close state: merged or abandoned (required)")
 	reviewCloseCmd.MarkFlagRequired("state")
@@ -1898,6 +1924,9 @@ func init() {
 	reviewCmd.AddCommand(reviewCloseCmd)
 	reviewCmd.AddCommand(reviewReadyCmd)
 	reviewCmd.AddCommand(reviewExportCmd)
+	reviewCmd.AddCommand(reviewSummaryCmd)
+	reviewSummaryCmd.Flags().BoolVarP(&reviewInteractive, "interactive", "i", false, "Interactive drill-down mode")
+	reviewSummaryCmd.Flags().BoolVar(&reviewAI, "ai", false, "Run AI review (requires ANTHROPIC_API_KEY)")
 	rootCmd.AddCommand(reviewCmd)
 }
 
@@ -11240,7 +11269,64 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Text output - header
+	// Build semantic diff from changeset
+	var semanticDiff *semanticdiff.SemanticDiff
+	if csNode != nil {
+		semanticDiff, _ = semanticdiff.FromChangeSet(db, csNode)
+	}
+
+	// Progressive disclosure summary mode (default)
+	if reviewSummary && semanticDiff != nil {
+		summary := review.BuildReviewSummary(semanticDiff)
+		if rev.Title != "" {
+			summary.Title = rev.Title
+		}
+		summary.Description = rev.Description
+
+		// Show the summary
+		fmt.Println(summary.FormatSummary())
+
+		// Show review metadata
+		fmt.Println("─────────────────────────────────────────")
+		fmt.Printf("Review:    %s\n", review.IDToHex(rev.ID)[:12])
+		fmt.Printf("State:     %s\n", rev.State)
+		fmt.Printf("Author:    %s\n", rev.Author)
+		if len(rev.Reviewers) > 0 {
+			fmt.Printf("Reviewers: %s\n", strings.Join(rev.Reviewers, ", "))
+		}
+		fmt.Println()
+
+		// Interactive mode: drill down into changes
+		if reviewInteractive && len(summary.Changes) > 0 {
+			fmt.Println("Enter a number to inspect a change group, or 'q' to quit:")
+			reader := bufio.NewReader(os.Stdin)
+			for {
+				fmt.Print("> ")
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(input)
+
+				if input == "q" || input == "quit" || input == "" {
+					break
+				}
+
+				idx, err := strconv.Atoi(input)
+				if err != nil || idx < 1 || idx > len(summary.Changes) {
+					fmt.Printf("Enter a number between 1 and %d\n", len(summary.Changes))
+					continue
+				}
+
+				// Show detailed view for this change group
+				fmt.Println()
+				fmt.Println(summary.FormatChange(idx - 1))
+				fmt.Println()
+				fmt.Println("Enter another number, or 'q' to quit:")
+			}
+		}
+
+		return nil
+	}
+
+	// Fallback: original text output if no semantic diff
 	fmt.Printf("Review: %s\n", review.IDToHex(rev.ID)[:12])
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("Title:       %s\n", rev.Title)
@@ -11736,6 +11822,124 @@ func runReviewExport(cmd *cobra.Command, args []string) error {
 		fmt.Printf("<p><strong>Author:</strong> %s</p>\n", rev.Author)
 		fmt.Printf("<p><strong>Target:</strong> <code>%s</code> (%s)</p>\n", util.BytesToHex(rev.TargetID)[:12], rev.TargetKind)
 		fmt.Println("</body></html>")
+	}
+
+	return nil
+}
+
+func runReviewSummary(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Resolve changeset selector
+	var csID []byte
+	selector := "@cs:last"
+	if len(args) > 0 {
+		selector = args[0]
+	}
+
+	// Parse the selector
+	resolver := ref.NewResolver(db)
+	resolved, err := resolver.Resolve(selector, nil)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", selector, err)
+	}
+	if resolved == nil {
+		return fmt.Errorf("changeset not found: %s", selector)
+	}
+	csID = resolved.ID
+
+	// Get the changeset node
+	csNode, err := db.GetNode(csID)
+	if err != nil {
+		return fmt.Errorf("getting changeset: %w", err)
+	}
+	if csNode == nil || csNode.Kind != graph.KindChangeSet {
+		return fmt.Errorf("not a changeset: %s", selector)
+	}
+
+	// Build semantic diff
+	semanticDiff, err := semanticdiff.FromChangeSet(db, csNode)
+	if err != nil {
+		return fmt.Errorf("building semantic diff: %w", err)
+	}
+	if semanticDiff == nil {
+		return fmt.Errorf("no changes in changeset")
+	}
+
+	// Build the summary
+	summary := review.BuildReviewSummary(semanticDiff)
+
+	// Use intent as title if available
+	if intentStr, ok := csNode.Payload["intent"].(string); ok && intentStr != "" {
+		summary.Title = intentStr
+	}
+
+	// Run AI review if requested
+	if reviewAI {
+		if !ai.IsConfigured() {
+			fmt.Println("⚠ AI review requires ANTHROPIC_API_KEY environment variable")
+		} else {
+			fmt.Println("Running AI review...")
+			reviewer, err := ai.NewReviewer()
+			if err != nil {
+				fmt.Printf("⚠ AI review setup failed: %v\n", err)
+			} else {
+				result, err := reviewer.Review(semanticDiff)
+				if err != nil {
+					fmt.Printf("⚠ AI review failed: %v\n", err)
+				} else {
+					summary.Suggestions = result.Suggestions
+					if result.RiskLevel != "" {
+						fmt.Printf("Risk Level: %s\n\n", result.RiskLevel)
+					}
+				}
+			}
+		}
+	}
+
+	// Display the summary
+	fmt.Println(summary.FormatSummary())
+
+	// Show changeset metadata
+	fmt.Println("─────────────────────────────────────────")
+	fmt.Printf("Changeset: %s\n", util.BytesToHex(csID)[:12])
+	if baseHex, ok := csNode.Payload["base"].(string); ok {
+		fmt.Printf("Base:      %s\n", baseHex[:12])
+	}
+	if headHex, ok := csNode.Payload["head"].(string); ok {
+		fmt.Printf("Head:      %s\n", headHex[:12])
+	}
+	fmt.Println()
+
+	// Interactive mode
+	if reviewInteractive && len(summary.Changes) > 0 {
+		fmt.Println("Enter a number to inspect a change group, or 'q' to quit:")
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			fmt.Print("> ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+
+			if input == "q" || input == "quit" || input == "" {
+				break
+			}
+
+			idx, err := strconv.Atoi(input)
+			if err != nil || idx < 1 || idx > len(summary.Changes) {
+				fmt.Printf("Enter a number between 1 and %d\n", len(summary.Changes))
+				continue
+			}
+
+			// Show detailed view for this change group
+			fmt.Println()
+			fmt.Println(summary.FormatChange(idx - 1))
+			fmt.Println()
+			fmt.Println("Enter another number, or 'q' to quit:")
+		}
 	}
 
 	return nil

@@ -1249,6 +1249,12 @@ kai push origin snap.latest</pre>
 						Setup
 					</button>
 					<a
+						href="/orgs/{$page.params.slug}/{$page.params.repo}/reviews"
+						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors border-transparent text-kai-text-muted hover:text-kai-text"
+					>
+						Reviews
+					</a>
+					<a
 						href="/orgs/{$page.params.slug}/{$page.params.repo}/webhooks"
 						class="px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors border-transparent text-kai-text-muted hover:text-kai-text"
 					>

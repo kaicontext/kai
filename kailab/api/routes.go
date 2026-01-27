@@ -136,7 +136,8 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withMetrics("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews))))
 	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState))))
 
-	// CI / Affected Tests
+	// Changesets
+	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}", withRepo(http.HandlerFunc(h.GetChangeset))))
 	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests))))
 
 	// Edges
@@ -1499,6 +1500,106 @@ func computeBlake3(data []byte) []byte {
 	h := cas.NewBlake3Hasher()
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+// GetChangeset returns details about a changeset including files and symbols changed.
+func (h *Handler) GetChangeset(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	changesetID := r.PathValue("id")
+	if changesetID == "" {
+		writeError(w, http.StatusBadRequest, "missing changeset ID", nil)
+		return
+	}
+
+	// Resolve changeset ID (could be short ID or full hex)
+	var fullDigest []byte
+	if len(changesetID) < 64 {
+		// Short ID - find matching ref
+		rows, err := rh.DB.Query(`SELECT target FROM refs WHERE name LIKE ? LIMIT 1`, "cs.%"+changesetID+"%")
+		if err == nil {
+			defer rows.Close()
+			if rows.Next() {
+				rows.Scan(&fullDigest)
+			}
+		}
+		if fullDigest == nil {
+			rows2, err := rh.DB.Query(`SELECT digest FROM objects WHERE kind = 'ChangeSet' AND hex(digest) LIKE ? LIMIT 1`, changesetID+"%")
+			if err == nil {
+				defer rows2.Close()
+				if rows2.Next() {
+					rows2.Scan(&fullDigest)
+				}
+			}
+		}
+	} else {
+		fullDigest, _ = hex.DecodeString(changesetID)
+	}
+
+	if fullDigest == nil {
+		writeError(w, http.StatusNotFound, "changeset not found", nil)
+		return
+	}
+
+	// Get the changeset object
+	csData, _, err := pack.ExtractObjectFromDB(rh.DB, fullDigest)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "changeset not found", err)
+		return
+	}
+
+	// Parse changeset payload (format: "ChangeSet\n{json}")
+	csJSON := csData
+	if idx := indexOf(csData, '\n'); idx >= 0 {
+		csJSON = csData[idx+1:]
+	}
+
+	var csPayload struct {
+		Base   string `json:"base"`
+		Head   string `json:"head"`
+		Intent string `json:"intent"`
+	}
+	json.Unmarshal(csJSON, &csPayload)
+
+	// Build response with file and symbol info
+	response := map[string]interface{}{
+		"id":     hex.EncodeToString(fullDigest),
+		"base":   csPayload.Base,
+		"head":   csPayload.Head,
+		"intent": csPayload.Intent,
+		"files":  []interface{}{},
+	}
+
+	// Get files from the changeset by looking at MODIFIES edges or scanning nodes
+	// For now, return basic info - can enhance later with full semantic diff
+	rows, err := rh.DB.Query(`
+		SELECT n.payload FROM nodes n
+		JOIN edges e ON n.id = e.dst
+		WHERE e.src = ? AND e.kind = 'MODIFIES' AND n.kind = 'File'
+	`, fullDigest)
+	if err == nil {
+		defer rows.Close()
+		var files []map[string]interface{}
+		for rows.Next() {
+			var payloadJSON []byte
+			if err := rows.Scan(&payloadJSON); err == nil {
+				var payload map[string]interface{}
+				if json.Unmarshal(payloadJSON, &payload) == nil {
+					files = append(files, map[string]interface{}{
+						"path":   payload["path"],
+						"action": "modified",
+					})
+				}
+			}
+		}
+		response["files"] = files
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 // GetAffectedTests returns tests that might be affected by the changes in a changeset.
