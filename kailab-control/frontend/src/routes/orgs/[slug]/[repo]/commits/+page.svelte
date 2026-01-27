@@ -209,9 +209,9 @@
 	}
 
 	function getChangesetId(entry) {
-		// For changeset refs (cs.xxx), extract the ID
-		if (entry.ref && entry.ref.startsWith('cs.')) {
-			return entry.ref.replace('cs.', '');
+		// For changeset refs (cs.xxx), the ID is the short hex of the target
+		if (entry.ref && entry.ref.startsWith('cs.') && entry.new) {
+			return shortId(entry.new);
 		}
 		return null;
 	}
