@@ -24,6 +24,7 @@ type GitHandler struct {
 	disableReceivePack bool
 	capabilities       CapabilitiesConfig
 	objectStore        ObjectStore
+	webhookNotifier    *WebhookNotifier
 }
 
 // GitHandlerOptions configure Git handler behavior.
@@ -36,6 +37,7 @@ type GitHandlerOptions struct {
 	CapabilitiesDisable []string
 	Agent               string
 	ObjectStore         ObjectStore
+	ControlPlaneURL     string
 }
 
 // CapabilitiesConfig controls advertised Git capabilities.
@@ -50,6 +52,10 @@ func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerO
 	if logger == nil {
 		logger = log.Default()
 	}
+	var notifier *WebhookNotifier
+	if opts.ControlPlaneURL != "" {
+		notifier = NewWebhookNotifier(opts.ControlPlaneURL)
+	}
 	return &GitHandler{
 		registry:           registry,
 		logger:             logger,
@@ -62,7 +68,8 @@ func NewGitHandler(registry *repo.Registry, logger *log.Logger, opts GitHandlerO
 			Extra:   opts.CapabilitiesExtra,
 			Disable: opts.CapabilitiesDisable,
 		},
-		objectStore: opts.ObjectStore,
+		objectStore:     opts.ObjectStore,
+		webhookNotifier: notifier,
 	}
 }
 
@@ -153,6 +160,10 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 		if err := h.mirror.SyncRefs(context.Background(), handle, updatedRefs); err != nil {
 			h.logger.Printf("ssh mirror sync error: %v", err)
 		}
+	}
+	// Trigger webhooks asynchronously
+	if h.webhookNotifier != nil && len(updatedRefs) > 0 {
+		go h.webhookNotifier.NotifyPush(tenant+"/"+name, updatedRefs)
 	}
 	return nil
 }

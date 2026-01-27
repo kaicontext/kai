@@ -143,8 +143,31 @@ func NewRouter(h *Handler) http.Handler {
 	mux.Handle("POST /api/v1/me/ssh-keys", h.WithAuth(http.HandlerFunc(h.CreateSSHKey)))
 	mux.Handle("DELETE /api/v1/me/ssh-keys/{id}", h.WithAuth(http.HandlerFunc(h.DeleteSSHKey)))
 
-	// Internal SSH verification (service-to-service)
+	// Webhooks (authenticated + org maintainer)
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/webhooks", Chain(
+		http.HandlerFunc(h.ListWebhooks),
+		h.WithAuth,
+	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/webhooks", Chain(
+		http.HandlerFunc(h.CreateWebhook),
+		h.WithAuth,
+	))
+	mux.Handle("PATCH /api/v1/orgs/{org}/repos/{repo}/webhooks/{webhook_id}", Chain(
+		http.HandlerFunc(h.UpdateWebhook),
+		h.WithAuth,
+	))
+	mux.Handle("DELETE /api/v1/orgs/{org}/repos/{repo}/webhooks/{webhook_id}", Chain(
+		http.HandlerFunc(h.DeleteWebhook),
+		h.WithAuth,
+	))
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/webhooks/{webhook_id}/deliveries", Chain(
+		http.HandlerFunc(h.ListWebhookDeliveries),
+		h.WithAuth,
+	))
+
+	// Internal endpoints (service-to-service)
 	mux.HandleFunc("POST /internal/ssh/verify", h.VerifySSHKey)
+	mux.HandleFunc("POST /internal/webhooks/trigger", h.TriggerWebhooks)
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

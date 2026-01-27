@@ -32,6 +32,12 @@ var sqliteSSHKeysSchema string
 //go:embed schema/0002_ssh_keys_pg.sql
 var postgresSSHKeysSchema string
 
+//go:embed schema/0003_webhooks.sql
+var sqliteWebhooksSchema string
+
+//go:embed schema/0003_webhooks_pg.sql
+var postgresWebhooksSchema string
+
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -113,6 +119,10 @@ func (db *DB) initSQLite() error {
 	if _, err := db.DB.Exec(sqliteSSHKeysSchema); err != nil {
 		return fmt.Errorf("running SQLite SSH keys migrations: %w", err)
 	}
+	// Run webhooks schema
+	if _, err := db.DB.Exec(sqliteWebhooksSchema); err != nil {
+		return fmt.Errorf("running SQLite webhooks migrations: %w", err)
+	}
 	return nil
 }
 
@@ -125,6 +135,10 @@ func (db *DB) initPostgres() error {
 	// Run SSH keys schema
 	if _, err := db.DB.Exec(postgresSSHKeysSchema); err != nil {
 		return fmt.Errorf("running PostgreSQL SSH keys migrations: %w", err)
+	}
+	// Run webhooks schema
+	if _, err := db.DB.Exec(postgresWebhooksSchema); err != nil {
+		return fmt.Errorf("running PostgreSQL webhooks migrations: %w", err)
 	}
 	return nil
 }
@@ -879,4 +893,251 @@ func (db *DB) DeleteSSHKey(id string) error {
 func (db *DB) UpdateSSHKeyLastUsed(id string) error {
 	_, err := db.exec("UPDATE ssh_keys SET last_used_at = ? WHERE id = ?", time.Now().Unix(), id)
 	return err
+}
+
+// ----- Webhook Methods -----
+
+// CreateWebhook creates a new webhook for a repository.
+func (db *DB) CreateWebhook(repoID, url, secret string, events []string) (*model.Webhook, error) {
+	id := newUUID()
+	now := time.Now().Unix()
+	eventsStr := strings.Join(events, ",")
+
+	_, err := db.exec(
+		"INSERT INTO webhooks (id, repo_id, url, secret, events, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		id, repoID, url, secret, eventsStr, 1, now, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.Webhook{
+		ID:        id,
+		RepoID:    repoID,
+		URL:       url,
+		Secret:    secret,
+		Events:    events,
+		Active:    true,
+		CreatedAt: time.Unix(now, 0),
+		UpdatedAt: time.Unix(now, 0),
+	}, nil
+}
+
+// GetWebhookByID retrieves a webhook by ID.
+func (db *DB) GetWebhookByID(id string) (*model.Webhook, error) {
+	var w model.Webhook
+	var eventsStr string
+	var active int
+	var createdAt, updatedAt int64
+
+	err := db.queryRow(
+		"SELECT id, repo_id, url, secret, events, active, created_at, updated_at FROM webhooks WHERE id = ?",
+		id,
+	).Scan(&w.ID, &w.RepoID, &w.URL, &w.Secret, &eventsStr, &active, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	w.Events = strings.Split(eventsStr, ",")
+	w.Active = active == 1
+	w.CreatedAt = time.Unix(createdAt, 0)
+	w.UpdatedAt = time.Unix(updatedAt, 0)
+	return &w, nil
+}
+
+// ListRepoWebhooks lists all webhooks for a repository.
+func (db *DB) ListRepoWebhooks(repoID string) ([]*model.Webhook, error) {
+	rows, err := db.query(
+		"SELECT id, repo_id, url, secret, events, active, created_at, updated_at FROM webhooks WHERE repo_id = ? ORDER BY created_at DESC",
+		repoID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var webhooks []*model.Webhook
+	for rows.Next() {
+		var w model.Webhook
+		var eventsStr string
+		var active int
+		var createdAt, updatedAt int64
+
+		if err := rows.Scan(&w.ID, &w.RepoID, &w.URL, &w.Secret, &eventsStr, &active, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		w.Events = strings.Split(eventsStr, ",")
+		w.Active = active == 1
+		w.CreatedAt = time.Unix(createdAt, 0)
+		w.UpdatedAt = time.Unix(updatedAt, 0)
+		webhooks = append(webhooks, &w)
+	}
+	return webhooks, rows.Err()
+}
+
+// ListActiveWebhooksForEvent lists all active webhooks for a repo that subscribe to a given event.
+func (db *DB) ListActiveWebhooksForEvent(repoID, event string) ([]*model.Webhook, error) {
+	// We need to check if the event is in the comma-separated events field
+	// SQLite and Postgres handle this differently, but we can use LIKE for both
+	rows, err := db.query(
+		"SELECT id, repo_id, url, secret, events, active, created_at, updated_at FROM webhooks WHERE repo_id = ? AND active = 1 AND (events LIKE ? OR events LIKE ? OR events LIKE ? OR events = ?)",
+		repoID, event+",%", "%,"+event+",%", "%,"+event, event,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var webhooks []*model.Webhook
+	for rows.Next() {
+		var w model.Webhook
+		var eventsStr string
+		var active int
+		var createdAt, updatedAt int64
+
+		if err := rows.Scan(&w.ID, &w.RepoID, &w.URL, &w.Secret, &eventsStr, &active, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		w.Events = strings.Split(eventsStr, ",")
+		w.Active = active == 1
+		w.CreatedAt = time.Unix(createdAt, 0)
+		w.UpdatedAt = time.Unix(updatedAt, 0)
+		webhooks = append(webhooks, &w)
+	}
+	return webhooks, rows.Err()
+}
+
+// UpdateWebhook updates a webhook.
+func (db *DB) UpdateWebhook(id, url, secret string, events []string, active bool) error {
+	activeInt := 0
+	if active {
+		activeInt = 1
+	}
+	eventsStr := strings.Join(events, ",")
+	now := time.Now().Unix()
+
+	_, err := db.exec(
+		"UPDATE webhooks SET url = ?, secret = ?, events = ?, active = ?, updated_at = ? WHERE id = ?",
+		url, secret, eventsStr, activeInt, now, id,
+	)
+	return err
+}
+
+// DeleteWebhook deletes a webhook.
+func (db *DB) DeleteWebhook(id string) error {
+	_, err := db.exec("DELETE FROM webhooks WHERE id = ?", id)
+	return err
+}
+
+// ----- Webhook Delivery Methods -----
+
+// CreateWebhookDelivery creates a new webhook delivery record.
+func (db *DB) CreateWebhookDelivery(webhookID, event, payload string) (*model.WebhookDelivery, error) {
+	id := newUUID()
+	now := time.Now().Unix()
+
+	_, err := db.exec(
+		"INSERT INTO webhook_deliveries (id, webhook_id, event, payload, status, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, webhookID, event, payload, model.DeliveryPending, 0, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.WebhookDelivery{
+		ID:        id,
+		WebhookID: webhookID,
+		Event:     event,
+		Payload:   payload,
+		Status:    model.DeliveryPending,
+		Attempts:  0,
+		CreatedAt: time.Unix(now, 0),
+	}, nil
+}
+
+// UpdateWebhookDelivery updates a delivery record after an attempt.
+func (db *DB) UpdateWebhookDelivery(id, status string, responseCode int, responseBody string, attempts int) error {
+	now := time.Now().Unix()
+	_, err := db.exec(
+		"UPDATE webhook_deliveries SET status = ?, response_code = ?, response_body = ?, attempts = ?, delivered_at = ? WHERE id = ?",
+		status, responseCode, responseBody, attempts, now, id,
+	)
+	return err
+}
+
+// ListWebhookDeliveries lists recent deliveries for a webhook.
+func (db *DB) ListWebhookDeliveries(webhookID string, limit int) ([]*model.WebhookDelivery, error) {
+	rows, err := db.query(
+		"SELECT id, webhook_id, event, payload, status, response_code, response_body, attempts, created_at, delivered_at FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC LIMIT ?",
+		webhookID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deliveries []*model.WebhookDelivery
+	for rows.Next() {
+		var d model.WebhookDelivery
+		var responseCode sql.NullInt64
+		var responseBody sql.NullString
+		var createdAt int64
+		var deliveredAt sql.NullInt64
+
+		if err := rows.Scan(&d.ID, &d.WebhookID, &d.Event, &d.Payload, &d.Status, &responseCode, &responseBody, &d.Attempts, &createdAt, &deliveredAt); err != nil {
+			return nil, err
+		}
+		d.CreatedAt = time.Unix(createdAt, 0)
+		if responseCode.Valid {
+			d.ResponseCode = int(responseCode.Int64)
+		}
+		if responseBody.Valid {
+			d.ResponseBody = responseBody.String
+		}
+		if deliveredAt.Valid {
+			d.DeliveredAt = time.Unix(deliveredAt.Int64, 0)
+		}
+		deliveries = append(deliveries, &d)
+	}
+	return deliveries, rows.Err()
+}
+
+// GetPendingDeliveries gets deliveries that need to be retried.
+func (db *DB) GetPendingDeliveries(limit int) ([]*model.WebhookDelivery, error) {
+	rows, err := db.query(
+		"SELECT id, webhook_id, event, payload, status, response_code, response_body, attempts, created_at, delivered_at FROM webhook_deliveries WHERE status = ? AND attempts < 3 ORDER BY created_at ASC LIMIT ?",
+		model.DeliveryPending, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deliveries []*model.WebhookDelivery
+	for rows.Next() {
+		var d model.WebhookDelivery
+		var responseCode sql.NullInt64
+		var responseBody sql.NullString
+		var createdAt int64
+		var deliveredAt sql.NullInt64
+
+		if err := rows.Scan(&d.ID, &d.WebhookID, &d.Event, &d.Payload, &d.Status, &responseCode, &responseBody, &d.Attempts, &createdAt, &deliveredAt); err != nil {
+			return nil, err
+		}
+		d.CreatedAt = time.Unix(createdAt, 0)
+		if responseCode.Valid {
+			d.ResponseCode = int(responseCode.Int64)
+		}
+		if responseBody.Valid {
+			d.ResponseBody = responseBody.String
+		}
+		if deliveredAt.Valid {
+			d.DeliveredAt = time.Unix(deliveredAt.Int64, 0)
+		}
+		deliveries = append(deliveries, &d)
+	}
+	return deliveries, rows.Err()
 }

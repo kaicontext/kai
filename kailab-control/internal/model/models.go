@@ -163,3 +163,54 @@ type SSHKey struct {
 	CreatedAt   time.Time `json:"created_at"`
 	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
 }
+
+// Webhook represents a repository webhook.
+type Webhook struct {
+	ID        string    `json:"id"`
+	RepoID    string    `json:"repo_id"`
+	URL       string    `json:"url"`
+	Secret    string    `json:"-"` // Never expose in API responses
+	Events    []string  `json:"events"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Webhook event types
+const (
+	EventPush         = "push"
+	EventBranchCreate = "branch_create"
+	EventBranchDelete = "branch_delete"
+	EventTagCreate    = "tag_create"
+	EventTagDelete    = "tag_delete"
+)
+
+// AllWebhookEvents lists all supported webhook events.
+var AllWebhookEvents = []string{
+	EventPush,
+	EventBranchCreate,
+	EventBranchDelete,
+	EventTagCreate,
+	EventTagDelete,
+}
+
+// WebhookDelivery represents a webhook delivery attempt.
+type WebhookDelivery struct {
+	ID           string    `json:"id"`
+	WebhookID    string    `json:"webhook_id"`
+	Event        string    `json:"event"`
+	Payload      string    `json:"payload"`
+	Status       string    `json:"status"` // pending, success, failed
+	ResponseCode int       `json:"response_code,omitempty"`
+	ResponseBody string    `json:"response_body,omitempty"`
+	Attempts     int       `json:"attempts"`
+	CreatedAt    time.Time `json:"created_at"`
+	DeliveredAt  time.Time `json:"delivered_at,omitempty"`
+}
+
+// Delivery status constants
+const (
+	DeliveryPending = "pending"
+	DeliverySuccess = "success"
+	DeliveryFailed  = "failed"
+)

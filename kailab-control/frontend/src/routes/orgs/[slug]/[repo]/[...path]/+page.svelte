@@ -1164,21 +1164,7 @@ kai push origin snap.latest`;
 
 				<div class="p-4 border-b border-kai-border">
 					<div class="flex items-center gap-2 mb-2">
-						<span class="text-kai-text-muted text-sm">Git SSH:</span>
-					</div>
-					<div class="flex gap-2 items-center mb-4">
-						<input type="text" readonly value={getSshCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-						<button
-							class="btn"
-							onclick={() => {
-								navigator.clipboard.writeText(getSshCloneUrl());
-							}}
-						>
-							Copy
-						</button>
-					</div>
-					<div class="flex items-center gap-2 mb-2">
-						<span class="text-kai-text-muted text-sm">Kai CLI:</span>
+						<span class="text-kai-text-muted text-sm">Remote URL:</span>
 					</div>
 					<div class="flex gap-2 items-center">
 						<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
@@ -1193,16 +1179,8 @@ kai push origin snap.latest`;
 					</div>
 				</div>
 
-				<!-- Clone with Git -->
-				<div class="p-4">
-					<h4 class="font-medium mb-3">Clone with Git</h4>
-					<div class="code-block bg-kai-bg">
-						<pre class="text-sm">git clone {getSshCloneUrl()}</pre>
-					</div>
-				</div>
-
 				<!-- Push an existing repository -->
-				<div class="p-4 border-t border-kai-border">
+				<div class="p-4">
 					<h4 class="font-medium mb-3">…or push from an existing Kai repository</h4>
 					<div class="code-block bg-kai-bg">
 						<pre class="text-sm">kai remote set origin {getCloneUrl()}
@@ -1912,24 +1890,8 @@ kai push origin snap.latest</pre>
 			{:else if activeTab === 'setup'}
 				<div class="space-y-6">
 					<div class="border border-kai-border rounded-md p-4">
-						<h4 class="font-medium mb-3">Git SSH</h4>
-						<div class="flex gap-2 items-center mb-4">
-							<input type="text" readonly value={getSshCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-							<button
-								class="btn"
-								onclick={() => {
-									navigator.clipboard.writeText(getSshCloneUrl());
-								}}
-							>
-								Copy
-							</button>
-						</div>
-						<div class="code-block bg-kai-bg mb-6">
-							<pre class="text-sm">git clone {getSshCloneUrl()}</pre>
-						</div>
-
-						<h4 class="font-medium mb-3">Kai CLI</h4>
-						<div class="flex gap-2 items-center mb-4">
+						<h4 class="font-medium mb-3">Clone URL</h4>
+						<div class="flex gap-2 items-center mb-6">
 							<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
 							<button
 								class="btn"
@@ -1940,6 +1902,8 @@ kai push origin snap.latest</pre>
 								Copy
 							</button>
 						</div>
+
+						<h4 class="font-medium mb-3">Push to this repository</h4>
 						<div class="code-block bg-kai-bg">
 							<pre class="text-sm">kai remote set origin {getCloneUrl()}
 kai push origin snap.latest</pre>

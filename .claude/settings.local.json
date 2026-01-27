@@ -9,7 +9,10 @@
       "Bash(grep:*)",
       "Bash(xargs basename:*)",
       "mcp__1medium__task_create",
-      "mcp__1medium__task_update"
+      "mcp__1medium__task_update",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

@@ -157,6 +157,7 @@ func main() {
 			CapabilitiesDisable: cfg.GitCapabilitiesDisable,
 			Agent:               cfg.GitAgent,
 			ObjectStore:         objectStore,
+			ControlPlaneURL:     cfg.ControlPlaneURL,
 		})
 		var authorizer sshserver.SessionAuthorizer
 		if cfg.ControlPlaneURL != "" {
