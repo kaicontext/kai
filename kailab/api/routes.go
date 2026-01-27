@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -131,10 +132,13 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 
 	// Diff
 	mux.Handle("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withMetrics("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withRepo(http.HandlerFunc(h.GetFileDiff))))
+	mux.Handle("GET /{tenant}/{repo}/v1/semantic-diff/{csId}", withMetrics("GET /{tenant}/{repo}/v1/semantic-diff/{csId}", withRepo(http.HandlerFunc(h.GetSemanticDiff))))
 
 	// Reviews
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withMetrics("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews))))
 	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState))))
+	mux.Handle("GET /{tenant}/{repo}/v1/reviews/{id}/comments", withMetrics("GET /{tenant}/{repo}/v1/reviews/{id}/comments", withRepo(http.HandlerFunc(h.ListReviewComments))))
+	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/comments", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/comments", withRepo(http.HandlerFunc(h.CreateReviewComment))))
 
 	// Changesets
 	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}", withRepo(http.HandlerFunc(h.GetChangeset))))
@@ -999,6 +1003,399 @@ func (h *Handler) GetFileDiff(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetSemanticDiff returns semantic diff (functions, classes changed) for a changeset.
+func (h *Handler) GetSemanticDiff(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	csIdHex := r.PathValue("csId")
+	filePath := r.URL.Query().Get("path") // Optional: filter to specific file
+
+	csID, err := hex.DecodeString(csIdHex)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid changeset ID", err)
+		return
+	}
+
+	// Get changeset data including all nodes and edges
+	csData, err := h.getChangeSetDataWithNodes(rh.DB, csID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get changeset", err)
+		return
+	}
+
+	// Extract semantic units from the changeset nodes
+	units := h.extractSemanticUnits(csData, filePath)
+
+	// If no units found from stored data, compute from file content
+	if len(units) == 0 && filePath != "" {
+		baseHex, _ := csData["base"].(string)
+		headHex, _ := csData["head"].(string)
+		if baseHex != "" && headHex != "" {
+			units = h.computeSemanticDiffFromContent(rh.DB, baseHex, headHex, filePath)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"changesetId": csIdHex,
+		"path":        filePath,
+		"units":       units,
+	})
+}
+
+// SemanticUnit represents a semantic code unit (function, class, etc)
+type SemanticUnit struct {
+	Kind       string `json:"kind"`       // function, class, method, struct, etc
+	Name       string `json:"name"`       // Symbol name
+	FQName     string `json:"fqName"`     // Fully-qualified name
+	Action     string `json:"action"`     // added, modified, removed
+	File       string `json:"file"`       // File path
+	BeforeSig  string `json:"beforeSig,omitempty"`
+	AfterSig   string `json:"afterSig,omitempty"`
+	ChangeType string `json:"changeType,omitempty"` // API_SURFACE_CHANGED, IMPLEMENTATION_CHANGED
+}
+
+func (h *Handler) getChangeSetDataWithNodes(db *sql.DB, csID []byte) (map[string]interface{}, error) {
+	// Get changeset object
+	csData, kind, err := pack.ExtractObjectFromDB(db, csID)
+	if err != nil {
+		return nil, err
+	}
+	if kind != "ChangeSet" {
+		return nil, fmt.Errorf("not a changeset")
+	}
+
+	// Parse changeset payload
+	csJSON := csData
+	if idx := indexOf(csData, '\n'); idx >= 0 {
+		csJSON = csData[idx+1:]
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(csJSON, &payload); err != nil {
+		return nil, err
+	}
+
+	// Query for related nodes (symbols, files) via edges
+	nodes, err := h.getChangeSetNodes(db, csID)
+	if err == nil {
+		payload["nodes"] = nodes
+	}
+
+	return payload, nil
+}
+
+func (h *Handler) getChangeSetNodes(db *sql.DB, csID []byte) ([]map[string]interface{}, error) {
+	// Query edges from this changeset
+	rows, err := db.Query(`
+		SELECT o.data, o.kind FROM objects o
+		JOIN edges e ON o.digest = e.dst
+		WHERE e.src = ? AND e.type IN ('MODIFIES', 'CONTAINS')
+	`, csID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nodes []map[string]interface{}
+	for rows.Next() {
+		var data []byte
+		var kind string
+		if err := rows.Scan(&data, &kind); err != nil {
+			continue
+		}
+
+		// Parse node payload
+		nodeJSON := data
+		if idx := indexOf(data, '\n'); idx >= 0 {
+			nodeJSON = data[idx+1:]
+		}
+
+		var nodePayload map[string]interface{}
+		if err := json.Unmarshal(nodeJSON, &nodePayload); err != nil {
+			continue
+		}
+		nodePayload["kind"] = kind
+		nodes = append(nodes, nodePayload)
+	}
+
+	return nodes, nil
+}
+
+func (h *Handler) extractSemanticUnits(csData map[string]interface{}, filterPath string) []SemanticUnit {
+	var units []SemanticUnit
+
+	nodes, _ := csData["nodes"].([]map[string]interface{})
+	for _, node := range nodes {
+		kind, _ := node["kind"].(string)
+		if kind != "Symbol" {
+			continue
+		}
+
+		filePath, _ := node["file"].(string)
+		if filterPath != "" && filePath != filterPath {
+			continue
+		}
+
+		fqName, _ := node["fqName"].(string)
+		symKind, _ := node["symKind"].(string)
+		if symKind == "" {
+			symKind, _ = node["kind"].(string)
+		}
+		sig, _ := node["signature"].(string)
+		beforeSig, _ := node["beforeSignature"].(string)
+		changeType, _ := node["changeType"].(string)
+
+		// Determine action
+		action := "modified"
+		if changeType == "ADDED" || (beforeSig == "" && sig != "") {
+			action = "added"
+		} else if changeType == "REMOVED" || (beforeSig != "" && sig == "") {
+			action = "removed"
+		}
+
+		units = append(units, SemanticUnit{
+			Kind:       symKind,
+			Name:       extractSymbolName(fqName),
+			FQName:     fqName,
+			Action:     action,
+			File:       filePath,
+			BeforeSig:  beforeSig,
+			AfterSig:   sig,
+			ChangeType: changeType,
+		})
+	}
+
+	return units
+}
+
+func extractSymbolName(fqName string) string {
+	if fqName == "" {
+		return ""
+	}
+	for i := len(fqName) - 1; i >= 0; i-- {
+		if fqName[i] == '.' {
+			return fqName[i+1:]
+		}
+	}
+	return fqName
+}
+
+// computeSemanticDiffFromContent extracts symbols from file content and compares them
+func (h *Handler) computeSemanticDiffFromContent(db *sql.DB, baseHex, headHex, filePath string) []SemanticUnit {
+	baseContent, _ := h.getFileContentFromSnapshot(db, baseHex, filePath)
+	headContent, _ := h.getFileContentFromSnapshot(db, headHex, filePath)
+
+	baseSymbols := extractSymbolsFromContent(baseContent, filePath)
+	headSymbols := extractSymbolsFromContent(headContent, filePath)
+
+	var units []SemanticUnit
+
+	// Build map of base symbols by name
+	baseMap := make(map[string]extractedSymbol)
+	for _, sym := range baseSymbols {
+		baseMap[sym.Name] = sym
+	}
+
+	// Find added and modified symbols
+	for _, headSym := range headSymbols {
+		if baseSym, exists := baseMap[headSym.Name]; exists {
+			// Symbol exists in both - check if modified
+			if headSym.Signature != baseSym.Signature || headSym.Body != baseSym.Body {
+				changeType := "IMPLEMENTATION_CHANGED"
+				if headSym.Signature != baseSym.Signature {
+					changeType = "API_SURFACE_CHANGED"
+				}
+				units = append(units, SemanticUnit{
+					Kind:       headSym.Kind,
+					Name:       headSym.Name,
+					FQName:     headSym.Name,
+					Action:     "modified",
+					File:       filePath,
+					BeforeSig:  baseSym.Signature,
+					AfterSig:   headSym.Signature,
+					ChangeType: changeType,
+				})
+			}
+			delete(baseMap, headSym.Name)
+		} else {
+			// Symbol only in head - added
+			units = append(units, SemanticUnit{
+				Kind:     headSym.Kind,
+				Name:     headSym.Name,
+				FQName:   headSym.Name,
+				Action:   "added",
+				File:     filePath,
+				AfterSig: headSym.Signature,
+			})
+		}
+	}
+
+	// Remaining symbols in baseMap are removed
+	for _, baseSym := range baseMap {
+		units = append(units, SemanticUnit{
+			Kind:      baseSym.Kind,
+			Name:      baseSym.Name,
+			FQName:    baseSym.Name,
+			Action:    "removed",
+			File:      filePath,
+			BeforeSig: baseSym.Signature,
+		})
+	}
+
+	return units
+}
+
+type extractedSymbol struct {
+	Kind      string
+	Name      string
+	Signature string
+	Body      string
+}
+
+// extractSymbolsFromContent extracts functions/classes from file content using regex
+func extractSymbolsFromContent(content, filePath string) []extractedSymbol {
+	var symbols []extractedSymbol
+	if content == "" {
+		return symbols
+	}
+
+	ext := getFileExtension(filePath)
+
+	switch ext {
+	case ".js", ".ts", ".jsx", ".tsx", ".mjs":
+		symbols = extractJSSymbols(content)
+	case ".go":
+		symbols = extractGoSymbols(content)
+	case ".py":
+		symbols = extractPythonSymbols(content)
+	}
+
+	return symbols
+}
+
+func getFileExtension(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+		if path[i] == '/' {
+			return ""
+		}
+	}
+	return ""
+}
+
+// extractJSSymbols extracts functions and classes from JavaScript/TypeScript
+func extractJSSymbols(content string) []extractedSymbol {
+	var symbols []extractedSymbol
+
+	// Match function declarations: function name(...) or async function name(...)
+	funcRegex := regexp.MustCompile(`(?m)^[\t ]*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)`)
+	for _, match := range funcRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "function",
+			Name:      match[1],
+			Signature: "function " + match[1] + "(" + match[2] + ")",
+		})
+	}
+
+	// Match arrow functions: const name = (...) => or const name = async (...) =>
+	arrowRegex := regexp.MustCompile(`(?m)^[\t ]*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>`)
+	for _, match := range arrowRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "function",
+			Name:      match[1],
+			Signature: "const " + match[1] + " = () =>",
+		})
+	}
+
+	// Match class declarations
+	classRegex := regexp.MustCompile(`(?m)^[\t ]*(?:export\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?`)
+	for _, match := range classRegex.FindAllStringSubmatch(content, -1) {
+		sig := "class " + match[1]
+		if match[2] != "" {
+			sig += " extends " + match[2]
+		}
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "class",
+			Name:      match[1],
+			Signature: sig,
+		})
+	}
+
+	// Match method definitions inside classes: name(...) { or async name(...) {
+	methodRegex := regexp.MustCompile(`(?m)^[\t ]+(?:async\s+)?(\w+)\s*\(([^)]*)\)\s*\{`)
+	for _, match := range methodRegex.FindAllStringSubmatch(content, -1) {
+		if match[1] != "if" && match[1] != "for" && match[1] != "while" && match[1] != "switch" && match[1] != "function" {
+			symbols = append(symbols, extractedSymbol{
+				Kind:      "method",
+				Name:      match[1],
+				Signature: match[1] + "(" + match[2] + ")",
+			})
+		}
+	}
+
+	return symbols
+}
+
+// extractGoSymbols extracts functions and types from Go code
+func extractGoSymbols(content string) []extractedSymbol {
+	var symbols []extractedSymbol
+
+	// Match function declarations: func name(...) or func (r Recv) name(...)
+	funcRegex := regexp.MustCompile(`(?m)^func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(([^)]*)\)`)
+	for _, match := range funcRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "function",
+			Name:      match[1],
+			Signature: "func " + match[1] + "(" + match[2] + ")",
+		})
+	}
+
+	// Match type declarations: type Name struct/interface
+	typeRegex := regexp.MustCompile(`(?m)^type\s+(\w+)\s+(struct|interface)`)
+	for _, match := range typeRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      match[2],
+			Name:      match[1],
+			Signature: "type " + match[1] + " " + match[2],
+		})
+	}
+
+	return symbols
+}
+
+// extractPythonSymbols extracts functions and classes from Python code
+func extractPythonSymbols(content string) []extractedSymbol {
+	var symbols []extractedSymbol
+
+	// Match function definitions: def name(...):
+	funcRegex := regexp.MustCompile(`(?m)^[\t ]*def\s+(\w+)\s*\(([^)]*)\)`)
+	for _, match := range funcRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "function",
+			Name:      match[1],
+			Signature: "def " + match[1] + "(" + match[2] + ")",
+		})
+	}
+
+	// Match class definitions: class Name:
+	classRegex := regexp.MustCompile(`(?m)^class\s+(\w+)(?:\([^)]*\))?:`)
+	for _, match := range classRegex.FindAllStringSubmatch(content, -1) {
+		symbols = append(symbols, extractedSymbol{
+			Kind:      "class",
+			Name:      match[1],
+			Signature: "class " + match[1],
+		})
+	}
+
+	return symbols
+}
+
 func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath string) (string, error) {
 	snapshotID, err := hex.DecodeString(snapshotHex)
 	if err != nil {
@@ -1493,6 +1890,175 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"state":   req.State,
 	})
+}
+
+// ListReviewComments returns all comments for a review
+func (h *Handler) ListReviewComments(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	reviewID := r.PathValue("id")
+	if reviewID == "" {
+		writeError(w, http.StatusBadRequest, "review id required", nil)
+		return
+	}
+
+	// Find review ref to get the review object
+	refName := "review." + reviewID
+	ref, err := store.GetRef(rh.DB, refName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "review not found", err)
+		return
+	}
+
+	// Get comments via HAS_COMMENT edges from this review
+	rows, err := rh.DB.Query(`
+		SELECT o.data FROM objects o
+		JOIN edges e ON o.digest = e.dst
+		WHERE e.src = ? AND e.type = 'HAS_COMMENT'
+		ORDER BY e.created_at
+	`, ref.Target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query comments", err)
+		return
+	}
+	defer rows.Close()
+
+	var comments []map[string]interface{}
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			continue
+		}
+
+		// Parse comment payload
+		commentJSON := data
+		if idx := indexOf(data, '\n'); idx >= 0 {
+			commentJSON = data[idx+1:]
+		}
+
+		var comment map[string]interface{}
+		if err := json.Unmarshal(commentJSON, &comment); err != nil {
+			continue
+		}
+		comments = append(comments, comment)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"comments": comments,
+	})
+}
+
+// CreateReviewComment creates a new comment on a review
+func (h *Handler) CreateReviewComment(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	reviewID := r.PathValue("id")
+	if reviewID == "" {
+		writeError(w, http.StatusBadRequest, "review id required", nil)
+		return
+	}
+
+	// Parse request
+	var req struct {
+		Body     string `json:"body"`
+		Author   string `json:"author"`
+		FilePath string `json:"filePath,omitempty"` // Optional: for inline comments
+		Line     int    `json:"line,omitempty"`     // Optional: line number
+		ParentID string `json:"parentId,omitempty"` // Optional: for replies
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if req.Body == "" {
+		writeError(w, http.StatusBadRequest, "comment body required", nil)
+		return
+	}
+
+	// Find review ref
+	refName := "review." + reviewID
+	ref, err := store.GetRef(rh.DB, refName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "review not found", err)
+		return
+	}
+
+	// Create comment payload
+	commentID := uuid.New().String()[:8]
+	now := time.Now().UnixMilli()
+
+	comment := map[string]interface{}{
+		"id":        commentID,
+		"body":      req.Body,
+		"author":    req.Author,
+		"createdAt": float64(now),
+	}
+	if req.FilePath != "" {
+		comment["filePath"] = req.FilePath
+	}
+	if req.Line > 0 {
+		comment["line"] = req.Line
+	}
+	if req.ParentID != "" {
+		comment["parentId"] = req.ParentID
+	}
+
+	// Create ReviewComment object
+	commentJSON, err := json.Marshal(comment)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to serialize comment", err)
+		return
+	}
+	commentContent := append([]byte("ReviewComment\n"), commentJSON...)
+	commentDigest := computeBlake3(commentContent)
+
+	// Store in transaction
+	tx, err := rh.DB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// Store comment object
+	segmentChecksum := computeBlake3(commentContent)
+	segmentID, err := store.InsertSegmentTx(tx, segmentChecksum, commentContent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store segment", err)
+		return
+	}
+
+	err = store.InsertObjectTx(tx, commentDigest, segmentID, 0, int64(len(commentContent)), "ReviewComment")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to index object", err)
+		return
+	}
+
+	// Create HAS_COMMENT edge from review to comment
+	ts := time.Now().UnixMilli()
+	_, err = tx.Exec(`INSERT OR IGNORE INTO edges (src, type, dst, at, created_at) VALUES (?, 'HAS_COMMENT', ?, NULL, ?)`,
+		ref.Target, commentDigest, ts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create edge", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit", err)
+		return
+	}
+
+	comment["id"] = commentID
+	writeJSON(w, http.StatusCreated, comment)
 }
 
 // computeBlake3 computes blake3 hash of data
