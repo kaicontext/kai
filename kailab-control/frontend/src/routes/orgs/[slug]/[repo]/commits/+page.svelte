@@ -208,22 +208,40 @@
 		return null;
 	}
 
+	function getChangesetId(entry) {
+		// For changeset refs (cs.xxx), extract the ID
+		if (entry.ref && entry.ref.startsWith('cs.')) {
+			return entry.ref.replace('cs.', '');
+		}
+		return null;
+	}
+
 	function viewDiff(entry) {
-		const cs = getChangesetForEntry(entry);
-		if (cs && cs.base && cs.head) {
-			goto(`/orgs/${$page.params.slug}/${$page.params.repo}?diff=${cs.base}..${cs.head}`);
-		} else if (entry.old && entry.new) {
-			// Fallback: use old/new from log entry for snapshot refs
-			const oldHex = hexEncode(entry.old);
-			const newHex = hexEncode(entry.new);
-			goto(`/orgs/${$page.params.slug}/${$page.params.repo}?diff=${oldHex}..${newHex}`);
+		const csId = getChangesetId(entry);
+		if (csId) {
+			// Navigate to changeset detail view in file browser
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${csId}`);
+			return;
+		}
+
+		// For snapshot updates, find a matching changeset or show snapshot comparison
+		if (entry.ref && entry.ref.startsWith('snap.')) {
+			const cs = getChangesetForEntry(entry);
+			if (cs && cs.id) {
+				// Found a changeset for this snapshot, go to its view
+				const shortId = cs.id.slice(0, 8);
+				goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes/${shortId}`);
+				return;
+			}
+			// Fallback: go to snapshots tab
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}/snapshots`);
 		}
 	}
 
 	function canViewDiff(entry) {
-		const cs = getChangesetForEntry(entry);
-		if (cs && cs.base && cs.head) return true;
-		// For snapshot updates, we can diff old vs new
+		// Changeset refs can always view diff
+		if (entry.ref && entry.ref.startsWith('cs.')) return true;
+		// Snapshot refs with old/new can view diff
 		if (entry.ref && entry.ref.startsWith('snap.') && entry.old && entry.new) return true;
 		return false;
 	}
