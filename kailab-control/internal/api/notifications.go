@@ -24,6 +24,8 @@ type NotifyCommentRequest struct {
 	CommentBody string `json:"commentBody"`
 	// ParentCommentAuthor is set if this is a reply (the author of the parent comment)
 	ParentCommentAuthor string `json:"parentCommentAuthor,omitempty"`
+	// Mentions is a list of @mentioned usernames
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // NotifyComment handles internal notifications for new comments.
@@ -43,39 +45,7 @@ func (h *Handler) NotifyComment(w http.ResponseWriter, r *http.Request) {
 	// Build review URL
 	reviewURL := h.cfg.BaseURL + "/orgs/" + req.Org + "/" + req.Repo + "/reviews/" + req.ReviewID
 
-	// Determine who to notify
-	var notifyEmail string
-	var isReply bool
-
-	if req.ParentCommentAuthor != "" {
-		// This is a reply - notify the parent comment author
-		notifyEmail = req.ParentCommentAuthor
-		isReply = true
-	} else {
-		// New comment on review - notify review author
-		notifyEmail = req.ReviewAuthor
-		isReply = false
-	}
-
-	// Don't notify yourself
-	if notifyEmail == req.CommentAuthor {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "skipped", "reason": "self comment"})
-		return
-	}
-
-	// Look up user email if notifyEmail is a user ID
-	user, err := h.db.GetUserByID(notifyEmail)
-	if err != nil {
-		// Try as email directly
-		user, err = h.db.GetUserByEmail(notifyEmail)
-	}
-	if err != nil || user == nil {
-		log.Printf("notify: could not find user %s: %v", notifyEmail, err)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "skipped", "reason": "user not found"})
-		return
-	}
-
-	// Get commenter name for the email
+	// Get commenter name for emails
 	commenterName := req.CommentAuthor
 	commenter, _ := h.db.GetUserByEmail(req.CommentAuthor)
 	if commenter == nil {
@@ -91,21 +61,87 @@ func (h *Handler) NotifyComment(w http.ResponseWriter, r *http.Request) {
 		reviewTitle = "Review " + req.ReviewID
 	}
 
-	// Send the notification
-	err = h.email.SendCommentNotification(
-		user.Email,
-		commenterName,
-		reviewTitle,
-		req.CommentBody,
-		reviewURL,
-		isReply,
-	)
-	if err != nil {
-		log.Printf("notify: failed to send email to %s: %v", user.Email, err)
-		writeError(w, http.StatusInternalServerError, "failed to send notification", err)
+	// Track who we've notified to avoid duplicates
+	notified := make(map[string]bool)
+	notified[req.CommentAuthor] = true // Don't notify the commenter
+
+	var sentTo []string
+
+	// Notify reply recipient or review author
+	var primaryNotify string
+	var isReply bool
+	if req.ParentCommentAuthor != "" {
+		primaryNotify = req.ParentCommentAuthor
+		isReply = true
+	} else {
+		primaryNotify = req.ReviewAuthor
+		isReply = false
+	}
+
+	if primaryNotify != "" && !notified[primaryNotify] {
+		user, err := h.db.GetUserByEmail(primaryNotify)
+		if err != nil {
+			user, err = h.db.GetUserByID(primaryNotify)
+		}
+		if err == nil && user != nil {
+			err = h.email.SendCommentNotification(
+				user.Email,
+				commenterName,
+				reviewTitle,
+				req.CommentBody,
+				reviewURL,
+				isReply,
+			)
+			if err != nil {
+				log.Printf("notify: failed to send email to %s: %v", user.Email, err)
+			} else {
+				sentTo = append(sentTo, user.Email)
+				notified[primaryNotify] = true
+				notified[user.Email] = true
+			}
+		}
+	}
+
+	// Notify @mentioned users
+	for _, mention := range req.Mentions {
+		if notified[mention] {
+			continue
+		}
+
+		user, err := h.db.GetUserByEmail(mention)
+		if err != nil {
+			user, err = h.db.GetUserByID(mention)
+		}
+		if err != nil || user == nil {
+			// Try treating mention as a partial email match
+			continue
+		}
+
+		if notified[user.Email] {
+			continue
+		}
+
+		err = h.email.SendMentionNotification(
+			user.Email,
+			commenterName,
+			reviewTitle,
+			req.CommentBody,
+			reviewURL,
+		)
+		if err != nil {
+			log.Printf("notify: failed to send mention email to %s: %v", user.Email, err)
+		} else {
+			sentTo = append(sentTo, user.Email)
+			notified[mention] = true
+			notified[user.Email] = true
+		}
+	}
+
+	if len(sentTo) == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "skipped", "reason": "no recipients"})
 		return
 	}
 
-	log.Printf("notify: sent comment notification to %s for review %s/%s/%s", user.Email, req.Org, req.Repo, req.ReviewID)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": user.Email})
+	log.Printf("notify: sent notifications to %v for review %s/%s/%s", sentTo, req.Org, req.Repo, req.ReviewID)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "to": sentTo})
 }

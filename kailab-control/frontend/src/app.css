@@ -93,4 +93,71 @@
 	a {
 		@apply text-kai-accent hover:underline;
 	}
+
+	/* Mentions */
+	.mention {
+		@apply text-blue-400 font-medium cursor-pointer;
+	}
+
+	.mention:hover {
+		@apply underline;
+	}
+
+	/* Prose overrides for dark theme */
+	.prose {
+		@apply text-kai-text;
+	}
+
+	.prose pre {
+		@apply bg-kai-bg border border-kai-border rounded-md p-3 my-2;
+	}
+
+	.prose code {
+		@apply bg-kai-bg-tertiary px-1.5 py-0.5 rounded text-sm font-mono;
+	}
+
+	.prose pre code {
+		@apply bg-transparent p-0;
+	}
+
+	.prose p {
+		@apply my-2;
+	}
+
+	.prose ul, .prose ol {
+		@apply my-2 pl-5;
+	}
+
+	.prose li {
+		@apply my-1;
+	}
+
+	.prose blockquote {
+		@apply border-l-4 border-kai-border pl-4 my-2 text-kai-text-muted italic;
+	}
+
+	.prose h1, .prose h2, .prose h3, .prose h4 {
+		@apply font-semibold mt-4 mb-2 text-kai-text;
+	}
+
+	.prose a {
+		@apply text-kai-accent hover:underline;
+	}
+
+	.prose strong {
+		@apply font-semibold text-kai-text;
+	}
+
+	.prose em {
+		@apply italic;
+	}
+
+	/* Button size variants */
+	.btn-sm {
+		@apply px-2 py-1 text-xs;
+	}
+
+	.btn-secondary {
+		@apply bg-kai-bg border-kai-border;
+	}
 }

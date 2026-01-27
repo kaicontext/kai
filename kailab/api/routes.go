@@ -2130,13 +2130,31 @@ func (h *Handler) findCommentAuthor(db *sql.DB, reviewTarget []byte, commentID s
 	return ""
 }
 
+// extractMentions finds @username patterns in text
+func extractMentions(text string) []string {
+	mentionRegex := regexp.MustCompile(`@([a-zA-Z0-9_-]+)`)
+	matches := mentionRegex.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool)
+	var mentions []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			mentions = append(mentions, m[1])
+		}
+	}
+	return mentions
+}
+
 // notifyComment sends a comment notification to the control plane
 func (h *Handler) notifyComment(org, repo, reviewID, reviewTitle, reviewAuthor, commentAuthor, commentBody, parentAuthor string) {
 	if h.cfg.ControlPlaneURL == "" {
 		return
 	}
 
-	payload := map[string]string{
+	// Extract @mentions from comment body
+	mentions := extractMentions(commentBody)
+
+	payload := map[string]interface{}{
 		"org":           org,
 		"repo":          repo,
 		"reviewId":      reviewID,
@@ -2147,6 +2165,9 @@ func (h *Handler) notifyComment(org, repo, reviewID, reviewTitle, reviewAuthor, 
 	}
 	if parentAuthor != "" {
 		payload["parentCommentAuthor"] = parentAuthor
+	}
+	if len(mentions) > 0 {
+		payload["mentions"] = mentions
 	}
 
 	jsonBody, err := json.Marshal(payload)

@@ -4,6 +4,68 @@
 	import { page } from '$app/stores';
 	import { currentUser } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
+	import { renderMarkdown, extractMentions } from '$lib/markdown.js';
+	import hljs from 'highlight.js';
+
+	// Get language from filename extension
+	function getLanguageFromFile(filename) {
+		if (!filename) return 'plaintext';
+		const ext = filename.split('.').pop()?.toLowerCase();
+		const langMap = {
+			'js': 'javascript',
+			'jsx': 'javascript',
+			'ts': 'typescript',
+			'tsx': 'typescript',
+			'py': 'python',
+			'rb': 'ruby',
+			'go': 'go',
+			'rs': 'rust',
+			'java': 'java',
+			'c': 'c',
+			'cpp': 'cpp',
+			'h': 'c',
+			'hpp': 'cpp',
+			'cs': 'csharp',
+			'php': 'php',
+			'swift': 'swift',
+			'kt': 'kotlin',
+			'scala': 'scala',
+			'sh': 'bash',
+			'bash': 'bash',
+			'zsh': 'bash',
+			'yml': 'yaml',
+			'yaml': 'yaml',
+			'json': 'json',
+			'xml': 'xml',
+			'html': 'html',
+			'htm': 'html',
+			'css': 'css',
+			'scss': 'scss',
+			'less': 'less',
+			'md': 'markdown',
+			'sql': 'sql',
+			'graphql': 'graphql',
+			'dockerfile': 'dockerfile',
+			'svelte': 'html',
+			'vue': 'html',
+		};
+		return langMap[ext] || 'plaintext';
+	}
+
+	// Highlight a single line of code
+	function highlightLine(content, filename) {
+		if (!content) return '';
+		const lang = getLanguageFromFile(filename);
+		try {
+			if (hljs.getLanguage(lang)) {
+				return hljs.highlight(content, { language: lang }).value;
+			}
+		} catch (e) {
+			// Fall back to plain text
+		}
+		// Escape HTML for plain text
+		return content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
 
 	let review = $state(null);
 	let changeset = $state(null);
@@ -693,7 +755,7 @@
 											<span class="flex-shrink-0 w-5 text-center py-0.5 {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text-muted'}">
 												{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
 											</span>
-											<span class="flex-1 py-0.5 pr-4 {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : ''}">{line.content}</span>
+											<code class="flex-1 py-0.5 pr-4 hljs {line.type === 'add' ? 'bg-green-900/20' : line.type === 'delete' ? 'bg-red-900/20' : ''}">{@html highlightLine(line.content, selectedFile)}</code>
 											<span class="w-8 flex-shrink-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-blue-400" title="Add comment">
 												+
 											</span>
@@ -705,7 +767,7 @@
 													<span class="text-xs font-medium">{comment.author || 'Anonymous'}</span>
 													<span class="text-xs text-kai-text-muted">{formatDate(comment.createdAt)}</span>
 												</div>
-												<p class="text-sm">{comment.body}</p>
+												<div class="text-sm prose prose-invert prose-sm max-w-none">{@html renderMarkdown(comment.body, $page.params.slug)}</div>
 											</div>
 										{/each}
 										<!-- Inline comment form -->
@@ -791,7 +853,7 @@
 										{thread.createdAt ? formatDate(thread.createdAt) : ''}
 									</span>
 								</div>
-								<p class="text-sm whitespace-pre-wrap">{thread.body}</p>
+								<div class="text-sm prose prose-invert prose-sm max-w-none">{@html renderMarkdown(thread.body, $page.params.slug)}</div>
 								{#if thread.filePath}
 									<div class="mt-2 text-xs text-kai-text-muted font-mono">
 										{thread.filePath}{thread.line ? `:${thread.line}` : ''}
@@ -816,7 +878,7 @@
 													{reply.createdAt ? formatDate(reply.createdAt) : ''}
 												</span>
 											</div>
-											<p class="text-sm whitespace-pre-wrap">{reply.body}</p>
+											<div class="text-sm prose prose-invert prose-sm max-w-none">{@html renderMarkdown(reply.body, $page.params.slug)}</div>
 										</div>
 									{/each}
 								</div>

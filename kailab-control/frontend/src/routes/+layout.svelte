@@ -1,5 +1,6 @@
 <script>
 	import '../app.css';
+	import 'highlight.js/styles/github-dark.css';
 	import { currentUser } from '$lib/stores.js';
 	import { loadUser, logout } from '$lib/api.js';
 	import { onMount } from 'svelte';
