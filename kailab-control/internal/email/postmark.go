@@ -135,3 +135,60 @@ If you didn't request this email, you can safely ignore it.`, loginURL, token)
 
 	return c.Send(to, subject, htmlBody, textBody)
 }
+
+// SendCommentNotification sends a notification about a new comment or reply.
+func (c *Client) SendCommentNotification(to, commenterName, reviewTitle, commentBody, reviewURL string, isReply bool) error {
+	var subject string
+	var action string
+	if isReply {
+		subject = fmt.Sprintf("%s replied to your comment", commenterName)
+		action = "replied to your comment on"
+	} else {
+		subject = fmt.Sprintf("%s commented on your review", commenterName)
+		action = "commented on"
+	}
+
+	// Truncate comment body for preview
+	preview := commentBody
+	if len(preview) > 200 {
+		preview = preview[:200] + "..."
+	}
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 560px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <h1 style="margin: 0 0 16px; font-size: 20px; color: #111;">%s %s</h1>
+    <p style="margin: 0 0 8px; color: #666; font-size: 14px;">Review: <strong>%s</strong></p>
+    <div style="margin: 24px 0; padding: 16px; background: #f9f9f9; border-left: 3px solid #ddd; border-radius: 4px;">
+      <p style="margin: 0; color: #333; line-height: 1.6; white-space: pre-wrap;">%s</p>
+    </div>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Comment
+    </a>
+    <p style="margin: 24px 0 0; color: #999; font-size: 12px;">
+      You're receiving this because you're involved in this review.
+    </p>
+  </div>
+</body>
+</html>`, commenterName, action, reviewTitle, preview, reviewURL)
+
+	textBody := fmt.Sprintf(`%s %s
+
+Review: %s
+
+---
+%s
+---
+
+View the comment: %s
+
+You're receiving this because you're involved in this review.`, commenterName, action, reviewTitle, preview, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}

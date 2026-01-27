@@ -168,6 +168,7 @@ func NewRouter(h *Handler) http.Handler {
 	// Internal endpoints (service-to-service)
 	mux.HandleFunc("POST /internal/ssh/verify", h.VerifySSHKey)
 	mux.HandleFunc("POST /internal/webhooks/trigger", h.TriggerWebhooks)
+	mux.HandleFunc("POST /internal/notify/comment", h.NotifyComment)
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

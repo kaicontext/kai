@@ -1992,6 +1992,24 @@ func (h *Handler) CreateReviewComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get review details for notification
+	var reviewTitle, reviewAuthor string
+	reviewContent, reviewKind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+	if err == nil && reviewKind == "Review" {
+		reviewJSON := reviewContent
+		if idx := indexOf(reviewContent, '\n'); idx >= 0 {
+			reviewJSON = reviewContent[idx+1:]
+		}
+		var reviewPayload struct {
+			Title  string `json:"title"`
+			Author string `json:"author"`
+		}
+		if json.Unmarshal(reviewJSON, &reviewPayload) == nil {
+			reviewTitle = reviewPayload.Title
+			reviewAuthor = reviewPayload.Author
+		}
+	}
+
 	// Create comment payload
 	commentID := uuid.New().String()[:8]
 	now := time.Now().UnixMilli()
@@ -2057,8 +2075,97 @@ func (h *Handler) CreateReviewComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Send notification to control plane (async, don't block response)
+	if h.cfg.ControlPlaneURL != "" {
+		go func() {
+			// If this is a reply, find parent comment author
+			var parentAuthor string
+			if req.ParentID != "" {
+				parentAuthor = h.findCommentAuthor(rh.DB, ref.Target, req.ParentID)
+			}
+
+			h.notifyComment(rh.Tenant, rh.Name, reviewID, reviewTitle, reviewAuthor, req.Author, req.Body, parentAuthor)
+		}()
+	}
+
 	comment["id"] = commentID
 	writeJSON(w, http.StatusCreated, comment)
+}
+
+// findCommentAuthor looks up a comment by ID and returns its author
+func (h *Handler) findCommentAuthor(db *sql.DB, reviewTarget []byte, commentID string) string {
+	// Query all comments on this review
+	rows, err := db.Query(`SELECT dst FROM edges WHERE src = ? AND type = 'HAS_COMMENT'`, reviewTarget)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var commentDigest []byte
+		if err := rows.Scan(&commentDigest); err != nil {
+			continue
+		}
+
+		// Load comment
+		content, kind, err := pack.ExtractObjectFromDB(db, commentDigest)
+		if err != nil || kind != "ReviewComment" {
+			continue
+		}
+
+		// Parse comment
+		commentJSON := content
+		if idx := indexOf(content, '\n'); idx >= 0 {
+			commentJSON = content[idx+1:]
+		}
+
+		var comment struct {
+			ID     string `json:"id"`
+			Author string `json:"author"`
+		}
+		if json.Unmarshal(commentJSON, &comment) == nil && comment.ID == commentID {
+			return comment.Author
+		}
+	}
+	return ""
+}
+
+// notifyComment sends a comment notification to the control plane
+func (h *Handler) notifyComment(org, repo, reviewID, reviewTitle, reviewAuthor, commentAuthor, commentBody, parentAuthor string) {
+	if h.cfg.ControlPlaneURL == "" {
+		return
+	}
+
+	payload := map[string]string{
+		"org":           org,
+		"repo":          repo,
+		"reviewId":      reviewID,
+		"reviewTitle":   reviewTitle,
+		"reviewAuthor":  reviewAuthor,
+		"commentAuthor": commentAuthor,
+		"commentBody":   commentBody,
+	}
+	if parentAuthor != "" {
+		payload["parentCommentAuthor"] = parentAuthor
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("notify: failed to marshal payload: %v", err)
+		return
+	}
+
+	url := h.cfg.ControlPlaneURL + "/internal/notify/comment"
+	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		log.Printf("notify: failed to call control plane: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("notify: control plane returned %d", resp.StatusCode)
+	}
 }
 
 // computeBlake3 computes blake3 hash of data
