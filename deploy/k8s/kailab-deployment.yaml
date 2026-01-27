@@ -142,7 +142,10 @@ spec:
             - name: KLC_LISTEN
               value: ":8080"
             - name: KLC_DB_URL
-              value: "postgres://kailab_admin:REDACTED@10.34.65.2:5432/kailab?sslmode=verify-ca&sslrootcert=/certs/ca.crt&sslcert=/certs/client.crt&sslkey=/certs/client.key"
+              valueFrom:
+                secretKeyRef:
+                  name: kailab-db-secret
+                  key: DATABASE_URL
             - name: KLC_JWT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
