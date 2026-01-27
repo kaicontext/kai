@@ -5255,8 +5255,14 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 	// Handle --explain flag for human-readable output
 	if ciExplain {
 		// First show concept explanations
+		selectorDisplay := "@cs:last"
+		if len(args) > 0 {
+			selectorDisplay = args[0]
+		} else if ciGitRange != "" {
+			selectorDisplay = ciGitRange
+		}
 		ctx := explain.ExplainCIPlan(
-			args[0],
+			selectorDisplay,
 			plan.Policy.Strategy,
 			len(plan.Impact.FilesChanged),
 			len(plan.Targets.Run),
