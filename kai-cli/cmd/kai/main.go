@@ -2544,14 +2544,29 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	// Update refs - like git commit, capture always updates snap.latest
-	fmt.Print("Updating refs... ")
-	autoRefMgr := ref.NewAutoRefManager(db)
-
 	// Check if this is the first scan (no snap.latest ref exists)
 	refMgr := ref.NewRefManager(db)
 	existingLatest, _ := refMgr.Get("snap.latest")
 	isFirstScan := existingLatest == nil
+
+	// Store previous snapshot ID before updating refs
+	var previousSnapID []byte
+	if existingLatest != nil {
+		previousSnapID = existingLatest.TargetID
+	}
+
+	// Compute change summary BEFORE updating refs (so @snap:last still points to old snapshot)
+	var changeSummary *captureSummary
+	if !isFirstScan {
+		fmt.Println()
+		fmt.Print("Computing changes... ")
+		changeSummary = computeCaptureSummary(db, snapshotID, matcher)
+		fmt.Println("done")
+	}
+
+	// Update refs - like git commit, capture always updates snap.latest
+	fmt.Print("Updating refs... ")
+	autoRefMgr := ref.NewAutoRefManager(db)
 
 	// Always update snap.latest (like git commit updates HEAD)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
@@ -2561,13 +2576,17 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println("done")
 	}
 
-	// Compute change summary if not first scan
-	var changeSummary *captureSummary
-	if !isFirstScan {
-		fmt.Println()
-		fmt.Print("Computing changes... ")
-		changeSummary = computeCaptureSummary(db, snapshotID, matcher)
-		fmt.Println("done")
+	// Auto-create changeset if there are changes
+	var changesetID []byte
+	if changeSummary != nil && changeSummary.hasChanges && previousSnapID != nil {
+		fmt.Print("Creating changeset... ")
+		changesetID, err = createChangesetFromSnapshots(db, previousSnapID, snapshotID, "")
+		if err != nil {
+			fmt.Println("failed")
+			fmt.Fprintf(os.Stderr, "warning: failed to create changeset: %v\n", err)
+		} else {
+			fmt.Println("done")
+		}
 	}
 
 	// Summary
@@ -2576,6 +2595,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	fmt.Println("│  ✓ Scan complete!")
 	fmt.Println("│")
 	fmt.Printf("│  Snapshot: %s\n", util.BytesToHex(snapshotID)[:12])
+	if changesetID != nil {
+		fmt.Printf("│  Changeset: %s\n", util.BytesToHex(changesetID)[:12])
+	}
 	fmt.Printf("│  Files: %d\n", len(files))
 	fmt.Printf("│  Modules: %d\n", moduleCount)
 
@@ -2622,8 +2644,12 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println("│    kai review open    # Create a review")
 	} else if changeSummary != nil && changeSummary.hasChanges {
 		fmt.Println("│  Snapshot updated (snap.latest).")
+		if changesetID != nil {
+			fmt.Println("│  Changeset created (cs.latest).")
+		}
 		fmt.Println("│")
 		fmt.Println("│  Next:")
+		fmt.Println("│    kai review summary # View semantic changes")
 		fmt.Println("│    kai review open    # Create a review")
 		fmt.Println("│    kai ci plan        # Get selective test plan")
 		fmt.Println("│    kai push           # Push to remote")
