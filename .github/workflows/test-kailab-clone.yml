@@ -1,0 +1,88 @@
+# Test cloning from git.kailayer.com via SSH
+# Validates that GitHub Actions can use Kailab as a git remote
+
+name: Test Kailab Clone
+
+on:
+  workflow_dispatch:  # Manual trigger for testing
+  # Uncomment to run on schedule:
+  # schedule:
+  #   - cron: '0 0 * * *'  # Daily at midnight
+
+jobs:
+  test-clone:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.KAILAB_SSH_KEY }}" > ~/.ssh/kailab
+          chmod 600 ~/.ssh/kailab
+
+          # Add git.kailayer.com to known hosts
+          ssh-keyscan -H git.kailayer.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Configure SSH to use this key for git.kailayer.com
+          cat >> ~/.ssh/config << EOF
+          Host git.kailayer.com
+            IdentityFile ~/.ssh/kailab
+            IdentitiesOnly yes
+          EOF
+
+      - name: Test SSH connection
+        run: |
+          ssh -T git@git.kailayer.com 2>&1 || true
+
+      - name: Clone from Kailab
+        run: |
+          git clone git@git.kailayer.com:kailayer/test.git kailab-test
+
+      - name: Verify clone
+        run: |
+          cd kailab-test
+          echo "Clone successful!"
+          echo "Remote: $(git remote -v)"
+          echo "Refs:"
+          git show-ref || echo "No refs yet"
+
+      - name: Test push (if write access)
+        continue-on-error: true
+        run: |
+          cd kailab-test
+          echo "CI test $(date)" >> ci-test.txt
+          git config user.email "ci@kailayer.com"
+          git config user.name "Kailab CI"
+          git add ci-test.txt
+          git commit -m "CI test commit"
+          git push origin HEAD:refs/heads/ci-test || echo "Push test completed (may fail without write access)"
+
+  test-shallow-clone:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.KAILAB_SSH_KEY }}" > ~/.ssh/kailab
+          chmod 600 ~/.ssh/kailab
+          ssh-keyscan -H git.kailayer.com >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config << EOF
+          Host git.kailayer.com
+            IdentityFile ~/.ssh/kailab
+            IdentitiesOnly yes
+          EOF
+
+      - name: Test shallow clone (depth=1)
+        run: |
+          git clone --depth=1 git@git.kailayer.com:kailayer/test.git shallow-test
+
+      - name: Verify shallow clone
+        run: |
+          cd shallow-test
+          echo "Shallow clone successful!"
+          DEPTH=$(git rev-list --count HEAD)
+          echo "Commit count: $DEPTH"
+          if [ "$DEPTH" -eq "1" ]; then
+            echo "Shallow clone verified (depth=1)"
+          else
+            echo "Warning: Expected depth 1, got $DEPTH"
+          fi
