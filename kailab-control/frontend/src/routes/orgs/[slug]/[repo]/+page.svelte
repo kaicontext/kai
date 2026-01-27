@@ -2,9 +2,9 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 
-	// Redirect to the full repo view (changes tab is default)
+	// Redirect to the full repo view (commits tab is default)
 	$effect(() => {
-		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/changes`, { replaceState: true });
+		goto(`/orgs/${$page.params.slug}/${$page.params.repo}/commits`, { replaceState: true });
 	});
 </script>
 
