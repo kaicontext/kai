@@ -236,6 +236,49 @@ If you don't recognize this organization, you can ignore this email or contact s
 	return c.Send(to, subject, htmlBody, textBody)
 }
 
+// SendReviewCreated sends an email when a new review is created.
+func (c *Client) SendReviewCreated(to, authorName, reviewTitle, reviewURL, org, repo string) error {
+	subject := fmt.Sprintf("[%s/%s] New review: %s", org, repo, reviewTitle)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <h1 style="margin: 0 0 24px; font-size: 24px; color: #111;">New Review Created</h1>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> created a new review in <strong>%s/%s</strong>:
+    </p>
+    <div style="margin: 16px 0; padding: 16px; background: #f9f9f9; border-left: 3px solid #3b82f6; border-radius: 4px;">
+      <p style="margin: 0; font-size: 16px; font-weight: 500; color: #111;">%s</p>
+    </div>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+    <p style="margin: 24px 0 0; color: #999; font-size: 13px; line-height: 1.5;">
+      You're receiving this because you're a reviewer on this review.
+    </p>
+  </div>
+</body>
+</html>`, authorName, org, repo, reviewTitle, reviewURL)
+
+	textBody := fmt.Sprintf(`New Review Created
+
+%s created a new review in %s/%s:
+
+%s
+
+View the review: %s
+
+You're receiving this because you're a reviewer on this review.`, authorName, org, repo, reviewTitle, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
 // SendOrgRemoval sends an email when someone is removed from an organization.
 func (c *Client) SendOrgRemoval(to, removerName, orgName string) error {
 	subject := fmt.Sprintf("You've been removed from %s on Kailab", orgName)
