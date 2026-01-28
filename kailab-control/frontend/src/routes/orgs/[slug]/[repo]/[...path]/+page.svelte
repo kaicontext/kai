@@ -1167,25 +1167,27 @@ kai push origin snap.latest`;
 					<h3 class="font-semibold">Quick setup</h3>
 				</div>
 
+				<!-- Clone this repository -->
 				<div class="p-4 border-b border-kai-border">
-					<div class="flex items-center gap-2 mb-2">
-						<span class="text-kai-text-muted text-sm">Remote URL:</span>
-					</div>
-					<div class="flex gap-2 items-center">
-						<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-						<button
-							class="btn"
-							onclick={() => {
-								navigator.clipboard.writeText(getCloneUrl());
-							}}
-						>
-							Copy
-						</button>
+					<h4 class="font-medium mb-3">Clone this repository</h4>
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<div class="text-xs text-kai-text-muted mb-2 uppercase tracking-wide">Kai CLI</div>
+							<div class="code-block bg-kai-bg">
+								<pre class="text-sm">kai clone {$page.params.slug}/{$page.params.repo}</pre>
+							</div>
+						</div>
+						<div>
+							<div class="text-xs text-kai-text-muted mb-2 uppercase tracking-wide">Git SSH</div>
+							<div class="code-block bg-kai-bg">
+								<pre class="text-sm">git clone {getSshCloneUrl()}</pre>
+							</div>
+						</div>
 					</div>
 				</div>
 
 				<!-- Push an existing repository -->
-				<div class="p-4">
+				<div class="p-4 border-b border-kai-border">
 					<h4 class="font-medium mb-3">…or push from an existing Kai repository</h4>
 					<div class="code-block bg-kai-bg">
 						<pre class="text-sm">kai remote set origin {getCloneUrl()}
@@ -1195,13 +1197,12 @@ kai push origin snap.latest</pre>
 				</div>
 
 				<!-- Create new from command line -->
-				<div class="p-4 border-t border-kai-border">
+				<div class="p-4">
 					<h4 class="font-medium mb-3">…or create a new snapshot from command line</h4>
 					<div class="code-block bg-kai-bg">
 						<pre class="text-sm">cd your-project
 kai init
-kai snapshot main --repo .
-kai analyze symbols @snap:last
+kai snap
 kai remote set origin {getCloneUrl()}
 kai auth login
 kai push origin snap.latest</pre>
@@ -1901,17 +1902,20 @@ kai push origin snap.latest</pre>
 			{:else if activeTab === 'setup'}
 				<div class="space-y-6">
 					<div class="border border-kai-border rounded-md p-4">
-						<h4 class="font-medium mb-3">Clone URL</h4>
-						<div class="flex gap-2 items-center mb-6">
-							<input type="text" readonly value={getCloneUrl()} class="input flex-1 font-mono text-sm bg-kai-bg" />
-							<button
-								class="btn"
-								onclick={() => {
-									navigator.clipboard.writeText(getCloneUrl());
-								}}
-							>
-								Copy
-							</button>
+						<h4 class="font-medium mb-3">Clone this repository</h4>
+						<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+							<div>
+								<div class="text-xs text-kai-text-muted mb-2 uppercase tracking-wide">Kai CLI</div>
+								<div class="code-block bg-kai-bg">
+									<pre class="text-sm">kai clone {$page.params.slug}/{$page.params.repo}</pre>
+								</div>
+							</div>
+							<div>
+								<div class="text-xs text-kai-text-muted mb-2 uppercase tracking-wide">Git SSH</div>
+								<div class="code-block bg-kai-bg">
+									<pre class="text-sm">git clone {getSshCloneUrl()}</pre>
+								</div>
+							</div>
 						</div>
 
 						<h4 class="font-medium mb-3">Push to this repository</h4>
