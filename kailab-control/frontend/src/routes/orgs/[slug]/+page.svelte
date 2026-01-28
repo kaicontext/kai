@@ -16,6 +16,14 @@
 	let newMemberEmail = $state('');
 	let newMemberRole = $state('developer');
 
+	// Check if current user is admin or owner
+	let isAdmin = $derived(() => {
+		const user = $currentUser;
+		if (!user) return false;
+		const myMembership = members.find(m => m.user_id === user.id);
+		return myMembership?.role === 'admin' || myMembership?.role === 'owner';
+	});
+
 	$effect(() => {
 		currentOrg.set($page.params.slug);
 	});
@@ -122,7 +130,7 @@
 		<h2 class="text-xl font-semibold">{$page.params.slug}</h2>
 		{#if activeTab === 'repos'}
 			<button class="btn btn-primary" onclick={() => (showCreateModal = true)}>New Repository</button>
-		{:else if activeTab === 'members'}
+		{:else if activeTab === 'members' && isAdmin()}
 			<button class="btn btn-primary" onclick={() => (showAddMemberModal = true)}>Add Member</button>
 		{/if}
 	</div>
@@ -186,9 +194,11 @@
 			<div class="card text-center py-12">
 				<div class="text-5xl mb-4">👥</div>
 				<p class="text-kai-text-muted mb-4">No members yet</p>
-				<button class="btn btn-primary" onclick={() => (showAddMemberModal = true)}>
-					Add your first member
-				</button>
+				{#if isAdmin()}
+					<button class="btn btn-primary" onclick={() => (showAddMemberModal = true)}>
+						Add your first member
+					</button>
+				{/if}
 			</div>
 		{:else}
 			<div class="card p-0">
@@ -207,7 +217,7 @@
 						</div>
 						<div class="flex items-center gap-3">
 							<span class="px-2 py-1 text-xs rounded-full {getRoleBadgeColor(member.role)}">{member.role}</span>
-							{#if member.role !== 'owner'}
+							{#if isAdmin() && member.role !== 'owner'}
 								<button
 									class="text-kai-text-muted hover:text-red-400 transition-colors"
 									onclick={() => removeMember(member.user_id)}
