@@ -751,8 +751,12 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 	// Determine target - either from ref lookup or raw hex ID
 	var target []byte
 
+	// Track if we can cache (raw hex IDs are immutable, ref names are not)
+	canCache := false
+
 	// Check if refName looks like a raw hex digest (64 hex chars)
 	if len(refName) == 64 && isHexString(refName) {
+		canCache = true // Content-addressed = immutable
 		// Use raw snapshot ID directly
 		var err error
 		target, err = hex.DecodeString(refName)
@@ -812,6 +816,17 @@ func (h *Handler) ListSnapshotFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var files []*proto.FileEntry
+
+	// Set caching headers for immutable content-addressed snapshots
+	if canCache {
+		etag := `"` + hex.EncodeToString(target)[:16] + `"`
+		if match := r.Header.Get("If-None-Match"); match == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, max-age=3600") // 1 hour
+	}
 
 	// Debug: log which path we're taking
 	log.Printf("Snapshot has %d inline files, %d file digests", len(snapshotPayload.Files), len(snapshotPayload.FileDigests))
