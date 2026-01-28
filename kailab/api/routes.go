@@ -2252,10 +2252,9 @@ func (h *Handler) ListReviewComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get comments via HAS_COMMENT edges from this review
+	// Get comment digests via HAS_COMMENT edges from this review
 	rows, err := rh.DB.Query(`
-		SELECT o.data FROM objects o
-		JOIN edges e ON o.digest = e.dst
+		SELECT e.dst FROM edges e
 		WHERE e.src = ? AND e.type = 'HAS_COMMENT'
 		ORDER BY e.created_at
 	`, ref.Target)
@@ -2265,10 +2264,19 @@ func (h *Handler) ListReviewComments(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var comments []map[string]interface{}
+	var commentDigests [][]byte
 	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var digest []byte
+		if err := rows.Scan(&digest); err != nil {
+			continue
+		}
+		commentDigests = append(commentDigests, digest)
+	}
+
+	var comments []map[string]interface{}
+	for _, digest := range commentDigests {
+		data, kind, err := pack.ExtractObjectFromDB(rh.DB, digest)
+		if err != nil || kind != "ReviewComment" {
 			continue
 		}
 
