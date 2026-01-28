@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,18 @@ import (
 	"kailab/sshserver"
 	"kailab/store"
 )
+
+// cachedSnapshot holds parsed snapshot data for fast lookups.
+type cachedSnapshot struct {
+	filesByPath map[string]string // path -> contentDigest
+	parsedAt    time.Time
+}
+
+// snapshotCache is a simple in-memory cache for parsed snapshots.
+// Key: "tenant/repo:snapshotHex", Value: *cachedSnapshot
+var snapshotCache sync.Map
+
+const snapshotCacheMaxAge = 5 * time.Minute
 
 // Handler wraps the registry and config for HTTP handlers.
 type Handler struct {
@@ -983,14 +996,21 @@ func (h *Handler) GetFileDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch content from both snapshots
-	baseContent, err := h.getFileContentFromSnapshot(rh.DB, baseHex, filePath)
+	// Generate ETag from base+head+path (content-addressable = immutable)
+	etag := `"` + baseHex[:8] + headHex[:8] + `"`
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// Fetch content from both snapshots (with caching)
+	baseContent, err := h.getFileContentFromSnapshotWithCache(rh.DB, rh.Tenant, rh.Name, baseHex, filePath)
 	if err != nil && err != store.ErrObjectNotFound {
 		writeError(w, http.StatusInternalServerError, "failed to get base content", err)
 		return
 	}
 
-	headContent, err := h.getFileContentFromSnapshot(rh.DB, headHex, filePath)
+	headContent, err := h.getFileContentFromSnapshotWithCache(rh.DB, rh.Tenant, rh.Name, headHex, filePath)
 	if err != nil && err != store.ErrObjectNotFound {
 		writeError(w, http.StatusInternalServerError, "failed to get head content", err)
 		return
@@ -998,6 +1018,10 @@ func (h *Handler) GetFileDiff(w http.ResponseWriter, r *http.Request) {
 
 	// Compute diff
 	hunks := computeUnifiedDiff(baseContent, headContent)
+
+	// Set caching headers - diffs are immutable (content-addressed)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, max-age=3600") // 1 hour
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":  filePath,
@@ -1398,13 +1422,105 @@ func extractPythonSymbols(content string) []extractedSymbol {
 	return symbols
 }
 
+// getCachedSnapshot returns a cached snapshot or parses and caches it.
+func (h *Handler) getCachedSnapshot(db *sql.DB, tenant, repoName, snapshotHex string) (*cachedSnapshot, error) {
+	cacheKey := tenant + "/" + repoName + ":" + snapshotHex
+
+	// Check cache
+	if cached, ok := snapshotCache.Load(cacheKey); ok {
+		cs := cached.(*cachedSnapshot)
+		if time.Since(cs.parsedAt) < snapshotCacheMaxAge {
+			return cs, nil
+		}
+		// Expired, remove it
+		snapshotCache.Delete(cacheKey)
+	}
+
+	// Parse snapshot
+	snapshotID, err := hex.DecodeString(snapshotHex)
+	if err != nil {
+		return nil, err
+	}
+
+	content, kind, err := pack.ExtractObjectFromDB(db, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	if kind != "Snapshot" {
+		return nil, fmt.Errorf("not a snapshot")
+	}
+
+	snapshotJSON := content
+	if idx := indexOf(content, '\n'); idx >= 0 {
+		snapshotJSON = content[idx+1:]
+	}
+
+	var snapshot struct {
+		Files []struct {
+			Path          string `json:"path"`
+			Digest        string `json:"digest"`
+			ContentDigest string `json:"contentDigest"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(snapshotJSON, &snapshot); err != nil {
+		return nil, err
+	}
+
+	// Build path index
+	cs := &cachedSnapshot{
+		filesByPath: make(map[string]string, len(snapshot.Files)),
+		parsedAt:    time.Now(),
+	}
+	for _, f := range snapshot.Files {
+		digest := f.ContentDigest
+		if digest == "" {
+			digest = f.Digest
+		}
+		cs.filesByPath[f.Path] = digest
+	}
+
+	// Cache it
+	snapshotCache.Store(cacheKey, cs)
+
+	return cs, nil
+}
+
 func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath string) (string, error) {
+	return h.getFileContentFromSnapshotWithCache(db, "", "", snapshotHex, filePath)
+}
+
+func (h *Handler) getFileContentFromSnapshotWithCache(db *sql.DB, tenant, repoName, snapshotHex, filePath string) (string, error) {
+	// Use cache if tenant/repo provided
+	if tenant != "" && repoName != "" {
+		cs, err := h.getCachedSnapshot(db, tenant, repoName, snapshotHex)
+		if err != nil {
+			return "", err
+		}
+
+		contentDigestHex, ok := cs.filesByPath[filePath]
+		if !ok {
+			return "", store.ErrObjectNotFound
+		}
+
+		contentDigest, err := hex.DecodeString(contentDigestHex)
+		if err != nil {
+			return "", err
+		}
+
+		fileContent, _, err := pack.ExtractObjectFromDB(db, contentDigest)
+		if err != nil {
+			return "", err
+		}
+
+		return string(fileContent), nil
+	}
+
+	// Fallback: no caching (backward compat)
 	snapshotID, err := hex.DecodeString(snapshotHex)
 	if err != nil {
 		return "", err
 	}
 
-	// Get snapshot object
 	content, kind, err := pack.ExtractObjectFromDB(db, snapshotID)
 	if err != nil {
 		return "", err
@@ -1413,7 +1529,6 @@ func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath s
 		return "", fmt.Errorf("not a snapshot")
 	}
 
-	// Parse snapshot to get files
 	snapshotJSON := content
 	if idx := indexOf(content, '\n'); idx >= 0 {
 		snapshotJSON = content[idx+1:]
@@ -1430,7 +1545,6 @@ func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath s
 		return "", err
 	}
 
-	// Find the file
 	var contentDigestHex string
 	for _, f := range snapshot.Files {
 		if f.Path == filePath {
@@ -1445,7 +1559,6 @@ func (h *Handler) getFileContentFromSnapshot(db *sql.DB, snapshotHex, filePath s
 		return "", store.ErrObjectNotFound
 	}
 
-	// Fetch content
 	contentDigest, err := hex.DecodeString(contentDigestHex)
 	if err != nil {
 		return "", err
