@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"kailab-control/internal/model"
@@ -244,4 +245,65 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	h.db.WriteAudit(&org.ID, &actor.ID, "member.remove", "user", userID, nil)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// SearchMembers searches org members by email/name prefix for @mention autocomplete.
+func (h *Handler) SearchMembers(w http.ResponseWriter, r *http.Request) {
+	org := OrgFromContext(r.Context())
+	if org == nil {
+		writeError(w, http.StatusInternalServerError, "missing org context", nil)
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" || len(query) < 1 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"users": []interface{}{}})
+		return
+	}
+
+	// Get all org members
+	members, err := h.db.ListOrgMembers(org.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list members", err)
+		return
+	}
+
+	// Filter by query prefix (case-insensitive)
+	type userResult struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+
+	var results []userResult
+	queryLower := strings.ToLower(query)
+
+	for _, m := range members {
+		user, err := h.db.GetUserByID(m.UserID)
+		if err != nil || user == nil {
+			continue
+		}
+
+		// Match email or name prefix
+		emailLower := strings.ToLower(user.Email)
+		nameLower := strings.ToLower(user.Name)
+		emailPrefix := strings.Split(emailLower, "@")[0]
+
+		if strings.HasPrefix(emailLower, queryLower) ||
+			strings.HasPrefix(emailPrefix, queryLower) ||
+			strings.HasPrefix(nameLower, queryLower) {
+			results = append(results, userResult{
+				ID:    user.ID,
+				Email: user.Email,
+				Name:  user.Name,
+			})
+		}
+
+		// Limit results
+		if len(results) >= 10 {
+			break
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"users": results})
 }

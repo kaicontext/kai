@@ -104,6 +104,12 @@ func NewRouter(h *Handler) http.Handler {
 		h.WithOrg,
 		h.RequireMembership("admin"),
 	))
+	mux.Handle("GET /api/v1/orgs/{org}/members/search", Chain(
+		http.HandlerFunc(h.SearchMembers),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+	))
 
 	// Repos (authenticated + org)
 	mux.Handle("GET /api/v1/orgs/{org}/repos", Chain(

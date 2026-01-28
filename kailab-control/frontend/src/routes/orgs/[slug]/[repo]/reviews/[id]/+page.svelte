@@ -5,6 +5,7 @@
 	import { currentUser } from '$lib/stores.js';
 	import { api, loadUser } from '$lib/api.js';
 	import { renderMarkdown, extractMentions } from '$lib/markdown.js';
+	import MentionInput from '$lib/components/MentionInput.svelte';
 	import hljs from 'highlight.js';
 
 	// Get language from filename extension
@@ -987,12 +988,13 @@
 										<!-- Inline comment form -->
 										{#if inlineCommentLine?.file === selectedFile && inlineCommentLine?.line === lineNum && inlineCommentLine?.type === line.type}
 											<div class="ml-12 mr-4 my-2 p-3 bg-kai-bg-tertiary rounded-lg border border-blue-500">
-												<textarea
+												<MentionInput
 													bind:value={inlineCommentText}
-													placeholder="Add a comment on this line..."
+													placeholder="Add a comment on this line... (use @ to mention)"
+													org={$page.params.slug}
+													rows={2}
 													class="w-full px-2 py-1 bg-kai-bg border border-kai-border rounded text-sm focus:outline-none focus:border-kai-accent resize-none"
-													rows="2"
-												></textarea>
+												/>
 												<div class="flex justify-end gap-2 mt-2">
 													<button class="btn btn-secondary btn-sm" onclick={cancelInlineComment}>Cancel</button>
 													<button
@@ -1101,12 +1103,13 @@
 							<!-- Reply form -->
 							{#if replyingTo === thread.id}
 								<div class="p-4 border-t border-kai-border bg-kai-bg-tertiary/30">
-									<textarea
+									<MentionInput
 										bind:value={replyText}
-										placeholder="Write a reply..."
+										placeholder="Write a reply... (use @ to mention)"
+										org={$page.params.slug}
+										rows={2}
 										class="w-full px-3 py-2 bg-kai-bg border border-kai-border rounded text-sm focus:outline-none focus:border-kai-accent resize-none"
-										rows="2"
-									></textarea>
+									/>
 									<div class="flex justify-end gap-2 mt-2">
 										<button class="btn btn-secondary btn-sm" onclick={cancelReply}>Cancel</button>
 										<button
@@ -1126,12 +1129,13 @@
 
 			<!-- Add comment form -->
 			<div class="border-t border-kai-border pt-4">
-				<textarea
+				<MentionInput
 					bind:value={newComment}
-					placeholder="Add a comment..."
+					placeholder="Add a comment... (use @ to mention)"
+					org={$page.params.slug}
+					rows={3}
 					class="w-full px-3 py-2 bg-kai-bg border border-kai-border rounded-lg text-sm focus:outline-none focus:border-kai-accent resize-none"
-					rows="3"
-				></textarea>
+				/>
 				<div class="flex justify-end mt-2">
 					<button
 						class="btn btn-primary btn-sm"
@@ -1177,13 +1181,13 @@
 			<p class="text-sm text-kai-text-muted mb-4">
 				Explain what changes are needed before this review can be approved.
 			</p>
-			<textarea
+			<MentionInput
 				bind:value={changesRequestedSummary}
-				placeholder="Describe the changes needed..."
+				placeholder="Describe the changes needed... (use @ to mention)"
+				org={$page.params.slug}
+				rows={4}
 				class="w-full px-3 py-2 bg-kai-bg border border-kai-border rounded-lg text-sm focus:outline-none focus:border-kai-accent resize-none"
-				rows="4"
-				autofocus
-			></textarea>
+			/>
 			<div class="flex justify-end gap-2 mt-4">
 				<button class="btn" onclick={closeChangesModal}>Cancel</button>
 				<button
