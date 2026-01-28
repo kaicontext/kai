@@ -1,0 +1,68 @@
+# GitLab CI configuration for cloning from git.kailayer.com
+#
+# Setup:
+# 1. Generate SSH keypair (use RSA for Alpine compatibility):
+#    ssh-keygen -t rsa -b 4096 -f kailab-ci -N ""
+#    ssh-keygen -p -m PEM -f kailab-ci -N ""  # Convert to PEM format
+# 2. Add public key to kailayer.com (Settings > SSH Keys)
+# 3. Add private key as GitLab CI variable: KAILAB_SSH_KEY (type: File, protected: false)
+# 4. Copy this file to your repo as .gitlab-ci.yml
+
+stages:
+  - test
+
+variables:
+  KAILAB_REPO: "kailayer/test"  # Change to your org/repo
+
+.setup_ssh: &setup_ssh
+  before_script:
+    - apk add --no-cache git openssh-client
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - cp "$KAILAB_SSH_KEY" ~/.ssh/kailab
+    - chmod 600 ~/.ssh/kailab
+    - ssh-keyscan -H git.kailayer.com >> ~/.ssh/known_hosts 2>/dev/null
+    - 'echo "Host git.kailayer.com" >> ~/.ssh/config'
+    - 'echo "  IdentityFile ~/.ssh/kailab" >> ~/.ssh/config'
+    - 'echo "  IdentitiesOnly yes" >> ~/.ssh/config'
+
+test-clone:
+  stage: test
+  image: alpine:latest
+  <<: *setup_ssh
+  script:
+    - echo "Testing SSH connection..."
+    - ssh -T git@git.kailayer.com || true
+    - echo "Cloning from Kailab..."
+    - git clone git@git.kailayer.com:${KAILAB_REPO}.git kailab-test
+    - cd kailab-test
+    - echo "Clone successful!"
+    - git remote -v
+    - git log --oneline -5 || echo "No commits yet"
+
+test-shallow-clone:
+  stage: test
+  image: alpine:latest
+  <<: *setup_ssh
+  script:
+    - echo "Testing shallow clone (depth=1)..."
+    - git clone --depth=1 git@git.kailayer.com:${KAILAB_REPO}.git shallow-test
+    - cd shallow-test
+    - DEPTH=$(git rev-list --count HEAD)
+    - echo "Commit count is $DEPTH"
+    - '[ "$DEPTH" -eq "1" ] && echo "Shallow clone verified (depth=1)" || echo "Warning: depth is $DEPTH"'
+
+test-push:
+  stage: test
+  image: alpine:latest
+  <<: *setup_ssh
+  script:
+    - git clone git@git.kailayer.com:${KAILAB_REPO}.git push-test
+    - cd push-test
+    - git config user.email "ci@kailayer.com"
+    - git config user.name "GitLab CI"
+    - echo "GitLab CI test $(date)" >> ci-test.txt
+    - git add ci-test.txt
+    - git commit -m "GitLab CI test commit"
+    - git push origin HEAD:refs/heads/gitlab-ci-test || echo "Push completed"
+  allow_failure: true

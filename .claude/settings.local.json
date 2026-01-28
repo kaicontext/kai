@@ -12,7 +12,8 @@
       "mcp__1medium__task_update",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(./scripts/gen-huge-review.sh:*)"
     ],
     "deny": [],
     "ask": []
