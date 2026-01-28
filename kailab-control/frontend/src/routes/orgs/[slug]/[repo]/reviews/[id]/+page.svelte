@@ -86,6 +86,8 @@
 	let inlineCommentText = $state('');
 	let replyingTo = $state(null); // comment id being replied to
 	let replyText = $state('');
+	let editingIntent = $state(false);
+	let intentDraft = $state('');
 
 	// Organize comments into threads (top-level comments with their replies)
 	let commentThreads = $derived(() => {
@@ -280,6 +282,32 @@
 			}
 		} catch (e) {
 			console.error('Failed to load changeset', e);
+		}
+	}
+
+	function startEditingIntent() {
+		intentDraft = changeset?.intent || '';
+		editingIntent = true;
+	}
+
+	function cancelEditingIntent() {
+		editingIntent = false;
+		intentDraft = '';
+	}
+
+	async function saveIntent() {
+		if (!changeset?.id) return;
+		const { slug, repo } = $page.params;
+		try {
+			const data = await api('PATCH', `/${slug}/${repo}/v1/changesets/${changeset.id}`, {
+				intent: intentDraft
+			});
+			if (!data.error) {
+				changeset = { ...changeset, intent: intentDraft };
+				editingIntent = false;
+			}
+		} catch (e) {
+			console.error('Failed to save intent', e);
 		}
 	}
 
@@ -564,6 +592,48 @@
 				{/if}
 			</div>
 		</div>
+
+		<!-- Intent Summary -->
+		{#if changeset}
+			<div class="mb-6 p-4 bg-kai-bg-secondary border border-kai-border rounded-lg">
+				<div class="flex items-start justify-between gap-4">
+					<div class="flex-1">
+						<div class="flex items-center gap-2 mb-2">
+							<svg class="w-5 h-5 text-kai-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+							</svg>
+							<span class="text-sm font-medium text-kai-text-muted">What changed</span>
+						</div>
+						{#if editingIntent}
+							<div class="flex gap-2">
+								<input
+									type="text"
+									class="input flex-1"
+									bind:value={intentDraft}
+									placeholder="Describe what this change does..."
+									onkeydown={(e) => e.key === 'Enter' && saveIntent()}
+								/>
+								<button class="btn btn-primary btn-sm" onclick={saveIntent}>Save</button>
+								<button class="btn btn-sm" onclick={cancelEditingIntent}>Cancel</button>
+							</div>
+						{:else}
+							<p class="text-lg">
+								{changeset.intent || 'No description'}
+								<button
+									class="ml-2 text-kai-text-muted hover:text-kai-text text-sm"
+									onclick={startEditingIntent}
+									title="Edit intent"
+								>
+									<svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+									</svg>
+								</button>
+							</p>
+						{/if}
+					</div>
+				</div>
+			</div>
+		{/if}
 
 		<!-- Actions -->
 		{#if review.state === 'open' || review.state === 'draft'}

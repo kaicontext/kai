@@ -142,6 +142,7 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 
 	// Changesets
 	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}", withRepo(http.HandlerFunc(h.GetChangeset))))
+	mux.Handle("PATCH /{tenant}/{repo}/v1/changesets/{id}", withMetrics("PATCH /{tenant}/{repo}/v1/changesets/{id}", withRepo(http.HandlerFunc(h.UpdateChangeset))))
 	mux.Handle("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withMetrics("GET /{tenant}/{repo}/v1/changesets/{id}/affected-tests", withRepo(http.HandlerFunc(h.GetAffectedTests))))
 
 	// Edges
@@ -2298,6 +2299,82 @@ func (h *Handler) GetChangeset(w http.ResponseWriter, r *http.Request) {
 
 	response["files"] = files
 	writeJSON(w, http.StatusOK, response)
+}
+
+// UpdateChangeset updates changeset metadata (like intent).
+func (h *Handler) UpdateChangeset(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	changesetID := r.PathValue("id")
+	if changesetID == "" {
+		writeError(w, http.StatusBadRequest, "missing changeset ID", nil)
+		return
+	}
+
+	var req struct {
+		Intent string `json:"intent"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Resolve changeset ID
+	fullDigest, _ := hex.DecodeString(changesetID)
+	if len(fullDigest) != 32 {
+		// Try to find by short ID
+		rows, err := rh.DB.Query(`SELECT digest FROM objects WHERE kind = 'ChangeSet' AND hex(digest) LIKE ? LIMIT 1`, changesetID+"%")
+		if err == nil {
+			defer rows.Close()
+			if rows.Next() {
+				rows.Scan(&fullDigest)
+			}
+		}
+	}
+
+	if fullDigest == nil {
+		writeError(w, http.StatusNotFound, "changeset not found", nil)
+		return
+	}
+
+	// Get existing changeset
+	csData, _, err := pack.ExtractObjectFromDB(rh.DB, fullDigest)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "changeset not found", err)
+		return
+	}
+
+	// Parse existing payload
+	csJSON := csData
+	if idx := indexOf(csData, '\n'); idx >= 0 {
+		csJSON = csData[idx+1:]
+	}
+
+	var csPayload map[string]interface{}
+	json.Unmarshal(csJSON, &csPayload)
+
+	// Update intent
+	csPayload["intent"] = req.Intent
+
+	// Re-encode and update the object
+	newJSON, _ := json.Marshal(csPayload)
+	newData := append([]byte("ChangeSet\n"), newJSON...)
+
+	// Update the object data in the database
+	_, err = rh.DB.Exec(`UPDATE objects SET data = ? WHERE digest = ?`, newData, fullDigest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update changeset", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":     hex.EncodeToString(fullDigest),
+		"intent": req.Intent,
+	})
 }
 
 // computeSnapshotDiff compares two snapshots and returns file changes
