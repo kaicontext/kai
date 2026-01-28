@@ -493,3 +493,56 @@ func TestSnapshotCache(t *testing.T) {
 	snapshotCache.Delete(cacheKey)
 }
 
+func TestIsBinaryContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected bool
+	}{
+		{"empty", "", false},
+		{"plain text", "Hello, World!\nThis is a test.", false},
+		{"text with tabs", "func main() {\n\treturn\n}", false},
+		{"null byte", "hello\x00world", true},
+		{"binary with null", string([]byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0x0A}), true}, // PNG-like with null byte
+		{"high non-printable ratio", string([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isBinaryContent(tt.content)
+			if result != tt.expected {
+				t.Errorf("isBinaryContent(%q) = %v, expected %v", tt.name, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsImageFile(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"image.png", true},
+		{"photo.jpg", true},
+		{"photo.JPEG", true},
+		{"icon.gif", true},
+		{"logo.svg", true},
+		{"image.webp", true},
+		{"favicon.ico", true},
+		{"bitmap.bmp", true},
+		{"document.pdf", false},
+		{"code.go", false},
+		{"data.json", false},
+		{"src/assets/logo.PNG", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			result := isImageFile(tt.path)
+			if result != tt.expected {
+				t.Errorf("isImageFile(%q) = %v, expected %v", tt.path, result, tt.expected)
+			}
+		})
+	}
+}
+

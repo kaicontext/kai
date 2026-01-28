@@ -43,6 +43,47 @@ var snapshotCache sync.Map
 
 const snapshotCacheMaxAge = 5 * time.Minute
 
+// Diff display limits - files exceeding these are not rendered
+const (
+	maxDiffFileSize  = 1 * 1024 * 1024 // 1 MB
+	maxDiffLineCount = 10000           // 10k lines
+)
+
+// isBinaryContent checks if content appears to be binary (contains null bytes or high ratio of non-printable chars).
+func isBinaryContent(content string) bool {
+	if len(content) == 0 {
+		return false
+	}
+	// Check first 8KB for binary indicators
+	sample := content
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	// Null byte is a strong indicator of binary
+	if strings.ContainsRune(sample, 0) {
+		return true
+	}
+	// High ratio of non-printable characters suggests binary
+	nonPrintable := 0
+	for _, r := range sample {
+		if r < 32 && r != '\n' && r != '\r' && r != '\t' {
+			nonPrintable++
+		}
+	}
+	return float64(nonPrintable)/float64(len(sample)) > 0.1
+}
+
+// isImageFile checks if a file path looks like an image.
+func isImageFile(path string) bool {
+	lower := strings.ToLower(path)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // Handler wraps the registry and config for HTTP handlers.
 type Handler struct {
 	reg    *repo.Registry
@@ -1016,12 +1057,47 @@ func (h *Handler) GetFileDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute diff
-	hunks := computeUnifiedDiff(baseContent, headContent)
-
 	// Set caching headers - diffs are immutable (content-addressed)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age=3600") // 1 hour
+
+	// Check for binary content
+	isImage := isImageFile(filePath)
+	if isBinaryContent(baseContent) || isBinaryContent(headContent) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path":    filePath,
+			"binary":  true,
+			"isImage": isImage,
+			"hunks":   []DiffHunk{},
+		})
+		return
+	}
+
+	// Check for files that are too large
+	maxSize := len(baseContent)
+	if len(headContent) > maxSize {
+		maxSize = len(headContent)
+	}
+	baseLines := strings.Count(baseContent, "\n")
+	headLines := strings.Count(headContent, "\n")
+	maxLines := baseLines
+	if headLines > maxLines {
+		maxLines = headLines
+	}
+
+	if maxSize > maxDiffFileSize || maxLines > maxDiffLineCount {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path":     filePath,
+			"tooLarge": true,
+			"size":     maxSize,
+			"lines":    maxLines,
+			"hunks":    []DiffHunk{},
+		})
+		return
+	}
+
+	// Compute diff
+	hunks := computeUnifiedDiff(baseContent, headContent)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":  filePath,

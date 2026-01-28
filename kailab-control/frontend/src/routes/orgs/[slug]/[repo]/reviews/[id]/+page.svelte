@@ -907,6 +907,45 @@
 					{:else}
 						<div class="text-center py-8 text-kai-text-muted">No semantic changes detected</div>
 					{/if}
+				{:else if fileDiff?.binary}
+					<!-- Binary File View -->
+					<div class="bg-kai-bg rounded-lg p-8 text-center">
+						{#if fileDiff.isImage}
+							<div class="text-kai-text-muted mb-4">
+								<svg class="w-12 h-12 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+								</svg>
+								<p class="font-medium">Image file</p>
+								<p class="text-sm mt-1">Binary image files cannot be diffed</p>
+							</div>
+						{:else}
+							<div class="text-kai-text-muted">
+								<svg class="w-12 h-12 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+								</svg>
+								<p class="font-medium">Binary file</p>
+								<p class="text-sm mt-1">Binary files cannot be displayed as text</p>
+							</div>
+						{/if}
+					</div>
+				{:else if fileDiff?.tooLarge}
+					<!-- Large File View -->
+					<div class="bg-kai-bg rounded-lg p-8 text-center">
+						<div class="text-kai-text-muted">
+							<svg class="w-12 h-12 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+							</svg>
+							<p class="font-medium">File too large to display</p>
+							<p class="text-sm mt-1">
+								{#if fileDiff.lines > 10000}
+									{fileDiff.lines.toLocaleString()} lines
+								{:else}
+									{(fileDiff.size / 1024).toFixed(1)} KB
+								{/if}
+								exceeds the display limit
+							</p>
+						</div>
+					</div>
 				{:else if fileDiff?.hunks && fileDiff.hunks.length > 0}
 					<!-- Line Diff View -->
 					<div class="bg-kai-bg rounded-lg overflow-x-auto">
