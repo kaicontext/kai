@@ -86,9 +86,10 @@ func isImageFile(path string) bool {
 
 // Handler wraps the registry and config for HTTP handlers.
 type Handler struct {
-	reg    *repo.Registry
-	cfg    *config.Config
-	mirror *sshserver.GitMirror
+	reg             *repo.Registry
+	cfg             *config.Config
+	mirror          *sshserver.GitMirror
+	webhookNotifier *sshserver.WebhookNotifier
 }
 
 func (h *Handler) mirrorRefs(ctx context.Context, rh *repo.Handle, refs []string) {
@@ -97,6 +98,65 @@ func (h *Handler) mirrorRefs(ctx context.Context, rh *repo.Handle, refs []string
 	}
 	if err := h.mirror.SyncRefs(ctx, rh, refs); err != nil {
 		log.Printf("git mirror sync failed for %s/%s: %v", rh.Tenant, rh.Name, err)
+	}
+}
+
+// notifyReviewCreated checks for new review refs and sends email notifications.
+func (h *Handler) notifyReviewCreated(rh *repo.Handle, refs []string) {
+	if h.webhookNotifier == nil || rh == nil || len(refs) == 0 {
+		return
+	}
+
+	for _, refName := range refs {
+		// Only process review refs (review.xyz format, not review.xyz.target etc.)
+		if !strings.HasPrefix(refName, "review.") {
+			continue
+		}
+		parts := strings.Split(refName, ".")
+		if len(parts) != 2 {
+			continue
+		}
+		reviewID := parts[1]
+
+		// Fetch the review object to get metadata
+		ref, err := store.GetRef(rh.DB, refName)
+		if err != nil {
+			continue
+		}
+
+		content, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+		if err != nil || kind != "Review" {
+			continue
+		}
+
+		// Parse review payload
+		reviewJSON := content
+		if idx := indexOf(content, '\n'); idx >= 0 {
+			reviewJSON = content[idx+1:]
+		}
+
+		var payload struct {
+			Title     string   `json:"title"`
+			State     string   `json:"state"`
+			Author    string   `json:"author"`
+			Reviewers []string `json:"reviewers"`
+		}
+		if err := json.Unmarshal(reviewJSON, &payload); err != nil {
+			continue
+		}
+
+		// Only notify for newly created reviews (state should be "draft" or "open")
+		// Skip if already approved/merged/etc
+		if payload.State != "draft" && payload.State != "open" {
+			continue
+		}
+
+		// Send notification asynchronously
+		go func(repo, reviewID, title, author string, reviewers []string) {
+			if err := h.webhookNotifier.NotifyReviewCreated(repo, reviewID, title, author, reviewers); err != nil {
+				log.Printf("notify: review created notification failed: %v", err)
+			}
+		}(rh.Tenant+"/"+rh.Name, reviewID, payload.Title, payload.Author, payload.Reviewers)
 	}
 }
 
@@ -139,7 +199,11 @@ func NewHandler(reg *repo.Registry, cfg *config.Config) *Handler {
 		Rollback:   cfg.GitMirrorRollback,
 		Logger:     log.Default(),
 	})
-	return &Handler{reg: reg, cfg: cfg, mirror: mirror}
+	var notifier *sshserver.WebhookNotifier
+	if cfg.ControlPlaneURL != "" {
+		notifier = sshserver.NewWebhookNotifier(cfg.ControlPlaneURL)
+	}
+	return &Handler{reg: reg, cfg: cfg, mirror: mirror, webhookNotifier: notifier}
 }
 
 // NewRouter creates the HTTP router with all routes registered.
@@ -559,6 +623,9 @@ func (h *Handler) UpdateRef(w http.ResponseWriter, r *http.Request) {
 
 	h.mirrorRefs(r.Context(), rh, []string{name})
 
+	// Notify on new review refs (fire-and-forget)
+	h.notifyReviewCreated(rh, []string{name})
+
 	ref, err := store.GetRef(rh.DB, name)
 	resp := proto.RefUpdateResponse{
 		OK:     true,
@@ -665,6 +732,9 @@ func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.mirrorRefs(r.Context(), rh, syncedRefs)
+
+	// Notify on new review refs (fire-and-forget)
+	h.notifyReviewCreated(rh, syncedRefs)
 
 	writeJSON(w, http.StatusOK, proto.BatchRefUpdateResponse{
 		PushID:  pushID,
