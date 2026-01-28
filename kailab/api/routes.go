@@ -136,6 +136,7 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 
 	// Reviews
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews", withMetrics("GET /{tenant}/{repo}/v1/reviews", withRepo(http.HandlerFunc(h.ListReviews))))
+	mux.Handle("PATCH /{tenant}/{repo}/v1/reviews/{id}", withMetrics("PATCH /{tenant}/{repo}/v1/reviews/{id}", withRepo(http.HandlerFunc(h.UpdateReview))))
 	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/state", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/state", withRepo(http.HandlerFunc(h.UpdateReviewState))))
 	mux.Handle("GET /{tenant}/{repo}/v1/reviews/{id}/comments", withMetrics("GET /{tenant}/{repo}/v1/reviews/{id}/comments", withRepo(http.HandlerFunc(h.ListReviewComments))))
 	mux.Handle("POST /{tenant}/{repo}/v1/reviews/{id}/comments", withMetrics("POST /{tenant}/{repo}/v1/reviews/{id}/comments", withRepo(http.HandlerFunc(h.CreateReviewComment))))
@@ -1758,7 +1759,9 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req struct {
-		State string `json:"state"`
+		State   string `json:"state"`
+		Summary string `json:"summary,omitempty"` // Optional summary for changes_requested
+		Actor   string `json:"actor,omitempty"`   // Who made this state change
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
@@ -1809,6 +1812,20 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 	// Update state and timestamp
 	payload["state"] = req.State
 	payload["updatedAt"] = float64(time.Now().UnixMilli())
+
+	// Store summary and actor for changes_requested
+	if req.State == "changes_requested" {
+		if req.Summary != "" {
+			payload["changesRequestedSummary"] = req.Summary
+		}
+		if req.Actor != "" {
+			payload["changesRequestedBy"] = req.Actor
+		}
+	} else {
+		// Clear changes requested fields when moving to other states
+		delete(payload, "changesRequestedSummary")
+		delete(payload, "changesRequestedBy")
+	}
 
 	// Create new review object content
 	newPayloadJSON, err := json.Marshal(payload)
@@ -1890,6 +1907,122 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"state":   req.State,
+	})
+}
+
+// UpdateReview updates review metadata (assignees, title, description).
+func (h *Handler) UpdateReview(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	reviewID := r.PathValue("id")
+	if reviewID == "" {
+		writeError(w, http.StatusBadRequest, "review id required", nil)
+		return
+	}
+
+	var req struct {
+		Assignees   []string `json:"assignees,omitempty"`
+		Title       string   `json:"title,omitempty"`
+		Description string   `json:"description,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Find review ref
+	refName := "review." + reviewID
+	ref, err := store.GetRef(rh.DB, refName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "review not found", err)
+		return
+	}
+
+	// Get review object
+	content, kind, err := pack.ExtractObjectFromDB(rh.DB, ref.Target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get review", err)
+		return
+	}
+	if kind != "Review" {
+		writeError(w, http.StatusBadRequest, "not a review object", nil)
+		return
+	}
+
+	// Parse existing payload
+	reviewJSON := content
+	if idx := indexOf(content, '\n'); idx >= 0 {
+		reviewJSON = content[idx+1:]
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(reviewJSON, &payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse review", err)
+		return
+	}
+
+	// Update fields if provided
+	if req.Assignees != nil {
+		payload["assignees"] = req.Assignees
+	}
+	if req.Title != "" {
+		payload["title"] = req.Title
+	}
+	if req.Description != "" {
+		payload["description"] = req.Description
+	}
+	payload["updatedAt"] = float64(time.Now().UnixMilli())
+
+	// Create new review object content
+	newPayloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to serialize review", err)
+		return
+	}
+	newContent := append([]byte("Review\n"), newPayloadJSON...)
+
+	// Compute object digest
+	newDigest := computeBlake3(newContent)
+	segmentChecksum := computeBlake3(newContent)
+
+	// Store in transaction
+	tx, err := rh.DB.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction", err)
+		return
+	}
+	defer tx.Rollback()
+
+	segmentID, err := store.InsertSegmentTx(tx, segmentChecksum, newContent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store segment", err)
+		return
+	}
+
+	err = store.InsertObjectTx(tx, newDigest, segmentID, 0, int64(len(newContent)), "Review")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to index object", err)
+		return
+	}
+
+	err = store.ForceSetRef(rh.DB, tx, refName, newDigest, "", "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update ref", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"assignees": req.Assignees,
 	})
 }
 

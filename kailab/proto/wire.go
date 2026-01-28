@@ -240,10 +240,14 @@ type ReviewEntry struct {
 	State       string   `json:"state"`       // draft, open, approved, changes_requested, merged, abandoned
 	Author      string   `json:"author"`
 	Reviewers   []string `json:"reviewers,omitempty"`
+	Assignees   []string `json:"assignees,omitempty"` // Users assigned to review
 	TargetID    string   `json:"targetId"`    // hex-encoded changeset/workspace ID
 	TargetKind  string   `json:"targetKind"`  // ChangeSet or Workspace
 	CreatedAt   int64    `json:"createdAt"`
 	UpdatedAt   int64    `json:"updatedAt"`
+	// State change metadata
+	ChangesRequestedSummary string `json:"changesRequestedSummary,omitempty"` // Summary when changes were requested
+	ChangesRequestedBy      string `json:"changesRequestedBy,omitempty"`      // Who requested changes
 }
 
 // ReviewsListResponse contains a list of reviews.

@@ -88,6 +88,10 @@
 	let replyText = $state('');
 	let editingIntent = $state(false);
 	let intentDraft = $state('');
+	let showChangesModal = $state(false);
+	let changesRequestedSummary = $state('');
+	let editingAssignees = $state(false);
+	let assigneeDraft = $state('');
 
 	// Organize comments into threads (top-level comments with their replies)
 	let commentThreads = $derived(() => {
@@ -452,12 +456,61 @@
 		}
 	}
 
-	async function updateState(newState) {
+	async function updateState(newState, summary = '') {
 		const { slug, repo, id } = $page.params;
-		const data = await api('POST', `/${slug}/${repo}/v1/reviews/${id}/state`, { state: newState });
-		if (!data.error) {
-			review = { ...review, state: newState };
+		const body = { state: newState };
+		if (summary) {
+			body.summary = summary;
+			body.actor = $currentUser?.email || 'anonymous';
 		}
+		const data = await api('POST', `/${slug}/${repo}/v1/reviews/${id}/state`, body);
+		if (!data.error) {
+			review = {
+				...review,
+				state: newState,
+				changesRequestedSummary: summary || undefined,
+				changesRequestedBy: summary ? ($currentUser?.email || 'anonymous') : undefined
+			};
+		}
+	}
+
+	function openChangesModal() {
+		changesRequestedSummary = '';
+		showChangesModal = true;
+	}
+
+	function closeChangesModal() {
+		showChangesModal = false;
+		changesRequestedSummary = '';
+	}
+
+	async function submitChangesRequested() {
+		await updateState('changes_requested', changesRequestedSummary);
+		closeChangesModal();
+	}
+
+	async function updateAssignees(assignees) {
+		const { slug, repo, id } = $page.params;
+		const data = await api('PATCH', `/${slug}/${repo}/v1/reviews/${id}`, { assignees });
+		if (!data.error) {
+			review = { ...review, assignees };
+		}
+	}
+
+	function startEditingAssignees() {
+		assigneeDraft = (review?.assignees || []).join(', ');
+		editingAssignees = true;
+	}
+
+	function cancelEditingAssignees() {
+		editingAssignees = false;
+		assigneeDraft = '';
+	}
+
+	async function saveAssignees() {
+		const assignees = assigneeDraft.split(',').map(a => a.trim()).filter(a => a);
+		await updateAssignees(assignees);
+		editingAssignees = false;
 	}
 
 	async function loadFileDiff(filePath) {
@@ -635,14 +688,66 @@
 			</div>
 		{/if}
 
+		<!-- Assignees -->
+		<div class="mb-4 flex items-center gap-2 text-sm">
+			<span class="text-kai-text-muted">Assignees:</span>
+			{#if editingAssignees}
+				<input
+					type="text"
+					class="input flex-1 max-w-md"
+					bind:value={assigneeDraft}
+					placeholder="user1, user2, ..."
+					onkeydown={(e) => e.key === 'Enter' && saveAssignees()}
+				/>
+				<button class="btn btn-sm btn-primary" onclick={saveAssignees}>Save</button>
+				<button class="btn btn-sm" onclick={cancelEditingAssignees}>Cancel</button>
+			{:else}
+				{#if review.assignees?.length > 0}
+					<span class="font-medium">{review.assignees.join(', ')}</span>
+				{:else}
+					<span class="text-kai-text-muted italic">No one assigned</span>
+				{/if}
+				<button
+					class="text-kai-text-muted hover:text-kai-text"
+					onclick={startEditingAssignees}
+					title="Edit assignees"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+					</svg>
+				</button>
+			{/if}
+		</div>
+
+		<!-- Changes Requested Summary -->
+		{#if review.state === 'changes_requested' && review.changesRequestedSummary}
+			<div class="mb-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+				<div class="flex items-start gap-3">
+					<svg class="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+					</svg>
+					<div>
+						<div class="font-medium text-yellow-400 mb-1">Changes requested{#if review.changesRequestedBy} by {review.changesRequestedBy}{/if}</div>
+						<p class="text-kai-text">{review.changesRequestedSummary}</p>
+					</div>
+				</div>
+			</div>
+		{/if}
+
 		<!-- Actions -->
 		{#if review.state === 'open' || review.state === 'draft'}
 			<div class="flex gap-2 mb-6">
 				<button class="btn btn-primary" onclick={() => updateState('approved')}>Approve</button>
-				<button class="btn" onclick={() => updateState('changes_requested')}>Request Changes</button>
+				<button class="btn" onclick={openChangesModal}>Request Changes</button>
 				{#if review.state === 'draft'}
 					<button class="btn" onclick={() => updateState('open')}>Mark Ready</button>
 				{/if}
+			</div>
+		{/if}
+		{#if review.state === 'changes_requested'}
+			<div class="flex gap-2 mb-6">
+				<button class="btn btn-primary" onclick={() => updateState('approved')}>Approve</button>
+				<button class="btn" onclick={() => updateState('open')}>Re-open</button>
 			</div>
 		{/if}
 
@@ -1024,3 +1129,32 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Request Changes Modal -->
+{#if showChangesModal}
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick={closeChangesModal}>
+		<div class="bg-kai-bg-secondary border border-kai-border rounded-lg p-6 w-full max-w-md mx-4" onclick={(e) => e.stopPropagation()}>
+			<h2 class="text-lg font-semibold mb-4">Request Changes</h2>
+			<p class="text-sm text-kai-text-muted mb-4">
+				Explain what changes are needed before this review can be approved.
+			</p>
+			<textarea
+				bind:value={changesRequestedSummary}
+				placeholder="Describe the changes needed..."
+				class="w-full px-3 py-2 bg-kai-bg border border-kai-border rounded-lg text-sm focus:outline-none focus:border-kai-accent resize-none"
+				rows="4"
+				autofocus
+			></textarea>
+			<div class="flex justify-end gap-2 mt-4">
+				<button class="btn" onclick={closeChangesModal}>Cancel</button>
+				<button
+					class="btn btn-danger"
+					onclick={submitChangesRequested}
+					disabled={!changesRequestedSummary.trim()}
+				>
+					Request Changes
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
