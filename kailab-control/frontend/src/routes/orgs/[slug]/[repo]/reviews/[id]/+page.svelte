@@ -751,6 +751,12 @@
 				<button class="btn" onclick={() => updateState('open')}>Re-open</button>
 			</div>
 		{/if}
+		{#if review.state !== 'merged' && review.state !== 'abandoned'}
+			<div class="flex gap-2 mb-6">
+				<button class="btn btn-primary" onclick={() => updateState('merged')}>Merge</button>
+				<button class="btn btn-danger" onclick={() => updateState('abandoned')}>Abandon</button>
+			</div>
+		{/if}
 
 		<!-- Progressive Disclosure: Level 1 - What Changed -->
 		<div class="card mb-6">
@@ -961,7 +967,7 @@
 										{@const lineComments = getCommentsForLine(selectedFile, lineNum)}
 										<!-- Line row -->
 										<div
-											class="group flex items-stretch hover:bg-kai-bg-tertiary/50 cursor-pointer {line.type === 'add' ? 'bg-green-900/30' : line.type === 'delete' ? 'bg-red-900/30' : ''}"
+											class="group flex w-full items-stretch hover:bg-kai-bg-tertiary/50 cursor-pointer {line.type === 'add' ? 'bg-green-900/30' : line.type === 'delete' ? 'bg-red-900/30' : ''}"
 											onclick={() => openInlineComment(lineNum, line.type)}
 										>
 											<span class="w-12 flex-shrink-0 text-right pr-2 text-kai-text-muted text-xs py-0.5 select-none border-r border-kai-border">
@@ -970,7 +976,7 @@
 											<span class="flex-shrink-0 w-5 text-center py-0.5 {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text-muted'}">
 												{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
 											</span>
-											<code class="flex-1 py-0.5 pr-4 hljs whitespace-pre {line.type === 'add' ? 'bg-green-900/20' : line.type === 'delete' ? 'bg-red-900/20' : ''}">{@html highlightLine(line.content, selectedFile)}</code>
+											<code class="flex-1 py-0.5 pr-4 hljs whitespace-pre">{@html highlightLine(line.content, selectedFile)}</code>
 											<span class="w-8 flex-shrink-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-blue-400" title="Add comment">
 												+
 											</span>

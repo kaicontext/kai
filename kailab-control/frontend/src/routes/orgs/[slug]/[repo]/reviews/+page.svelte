@@ -35,7 +35,7 @@
 				error = data.error;
 				reviews = [];
 			} else {
-				reviews = data.reviews || [];
+				reviews = (data.reviews || []).filter(review => !['merged', 'abandoned'].includes(review.state));
 			}
 		} catch (e) {
 			error = 'Failed to load reviews';

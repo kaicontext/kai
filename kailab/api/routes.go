@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pmezard/go-difflib/difflib"
 	"kai-core/cas"
 	"kailab/background"
 	"kailab/config"
@@ -1753,99 +1754,78 @@ type DiffHunk struct {
 func computeUnifiedDiff(oldText, newText string) []DiffHunk {
 	oldLines := strings.Split(oldText, "\n")
 	newLines := strings.Split(newText, "\n")
-
-	// Use Myers diff algorithm (simplified LCS-based approach)
-	lcs := longestCommonSubsequence(oldLines, newLines)
-
-	var hunks []DiffHunk
-	var currentHunk *DiffHunk
-
-	oldIdx, newIdx, lcsIdx := 0, 0, 0
 	contextLines := 3
+	matcher := difflib.NewMatcher(oldLines, newLines)
+	groups := matcher.GetGroupedOpCodes(contextLines)
+	hunks := make([]DiffHunk, 0, len(groups))
 
-	for oldIdx < len(oldLines) || newIdx < len(newLines) {
-		// Check if current lines match LCS
-		oldMatch := lcsIdx < len(lcs) && oldIdx < len(oldLines) && oldLines[oldIdx] == lcs[lcsIdx]
-		newMatch := lcsIdx < len(lcs) && newIdx < len(newLines) && newLines[newIdx] == lcs[lcsIdx]
-
-		if oldMatch && newMatch {
-			// Context line
-			if currentHunk != nil {
-				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-					Type:    "context",
-					Content: oldLines[oldIdx],
-					OldLine: oldIdx + 1,
-					NewLine: newIdx + 1,
-				})
-				currentHunk.OldLines++
-				currentHunk.NewLines++
-			}
-			oldIdx++
-			newIdx++
-			lcsIdx++
-		} else if !oldMatch && oldIdx < len(oldLines) && (lcsIdx >= len(lcs) || oldLines[oldIdx] != lcs[lcsIdx]) {
-			// Deletion
-			if currentHunk == nil {
-				currentHunk = &DiffHunk{
-					OldStart: max(1, oldIdx+1-contextLines),
-					NewStart: max(1, newIdx+1-contextLines),
-				}
-				// Add leading context
-				for i := max(0, oldIdx-contextLines); i < oldIdx; i++ {
-					if i < len(oldLines) {
-						currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-							Type:    "context",
-							Content: oldLines[i],
-							OldLine: i + 1,
-							NewLine: newIdx - (oldIdx - i) + 1,
-						})
-						currentHunk.OldLines++
-						currentHunk.NewLines++
-					}
-				}
-			}
-			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-				Type:    "delete",
-				Content: oldLines[oldIdx],
-				OldLine: oldIdx + 1,
-			})
-			currentHunk.OldLines++
-			oldIdx++
-		} else if !newMatch && newIdx < len(newLines) {
-			// Addition
-			if currentHunk == nil {
-				currentHunk = &DiffHunk{
-					OldStart: max(1, oldIdx+1-contextLines),
-					NewStart: max(1, newIdx+1-contextLines),
-				}
-				// Add leading context
-				for i := max(0, newIdx-contextLines); i < newIdx; i++ {
-					if i < len(newLines) && i-newIdx+oldIdx >= 0 && i-newIdx+oldIdx < len(oldLines) {
-						currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-							Type:    "context",
-							Content: oldLines[i-newIdx+oldIdx],
-							OldLine: i - newIdx + oldIdx + 1,
-							NewLine: i + 1,
-						})
-						currentHunk.OldLines++
-						currentHunk.NewLines++
-					}
-				}
-			}
-			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
-				Type:    "add",
-				Content: newLines[newIdx],
-				NewLine: newIdx + 1,
-			})
-			currentHunk.NewLines++
-			newIdx++
-		} else {
-			break
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
 		}
-	}
 
-	if currentHunk != nil && len(currentHunk.Lines) > 0 {
-		hunks = append(hunks, *currentHunk)
+		first := group[0]
+		hunk := DiffHunk{
+			OldStart: max(1, first.I1+1),
+			NewStart: max(1, first.J1+1),
+		}
+
+		for _, op := range group {
+			switch op.Tag {
+			case "equal":
+				for i := 0; i < op.I2-op.I1; i++ {
+					oldIdx := op.I1 + i
+					newIdx := op.J1 + i
+					hunk.Lines = append(hunk.Lines, DiffLine{
+						Type:    "context",
+						Content: oldLines[oldIdx],
+						OldLine: oldIdx + 1,
+						NewLine: newIdx + 1,
+					})
+					hunk.OldLines++
+					hunk.NewLines++
+				}
+			case "delete":
+				for i := op.I1; i < op.I2; i++ {
+					hunk.Lines = append(hunk.Lines, DiffLine{
+						Type:    "delete",
+						Content: oldLines[i],
+						OldLine: i + 1,
+					})
+					hunk.OldLines++
+				}
+			case "insert":
+				for j := op.J1; j < op.J2; j++ {
+					hunk.Lines = append(hunk.Lines, DiffLine{
+						Type:    "add",
+						Content: newLines[j],
+						NewLine: j + 1,
+					})
+					hunk.NewLines++
+				}
+			case "replace":
+				for i := op.I1; i < op.I2; i++ {
+					hunk.Lines = append(hunk.Lines, DiffLine{
+						Type:    "delete",
+						Content: oldLines[i],
+						OldLine: i + 1,
+					})
+					hunk.OldLines++
+				}
+				for j := op.J1; j < op.J2; j++ {
+					hunk.Lines = append(hunk.Lines, DiffLine{
+						Type:    "add",
+						Content: newLines[j],
+						NewLine: j + 1,
+					})
+					hunk.NewLines++
+				}
+			}
+		}
+
+		if len(hunk.Lines) > 0 {
+			hunks = append(hunks, hunk)
+		}
 	}
 
 	return hunks
