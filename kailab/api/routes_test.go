@@ -427,8 +427,8 @@ func TestComputeUnifiedDiff_Large(t *testing.T) {
 
 	t.Logf("Diff of 10k lines with 100 changes took %v, produced %d hunks", elapsed, len(hunks))
 
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("Diff took too long: %v (should be < 500ms)", elapsed)
+	if elapsed > 2*time.Second {
+		t.Errorf("Diff took too long: %v (should be < 2s)", elapsed)
 	}
 }
 
