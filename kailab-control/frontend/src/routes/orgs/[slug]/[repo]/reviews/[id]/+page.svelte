@@ -969,7 +969,7 @@
 											<span class="flex-shrink-0 w-5 text-center py-0.5 {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text-muted'}">
 												{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
 											</span>
-											<code class="flex-1 py-0.5 pr-4 hljs {line.type === 'add' ? 'bg-green-900/20' : line.type === 'delete' ? 'bg-red-900/20' : ''}">{@html highlightLine(line.content, selectedFile)}</code>
+											<code class="flex-1 py-0.5 pr-4 hljs whitespace-pre {line.type === 'add' ? 'bg-green-900/20' : line.type === 'delete' ? 'bg-red-900/20' : ''}">{@html highlightLine(line.content, selectedFile)}</code>
 											<span class="w-8 flex-shrink-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-blue-400" title="Add comment">
 												+
 											</span>
