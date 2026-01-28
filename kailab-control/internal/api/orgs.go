@@ -247,6 +247,9 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get user email before removing (for notification)
+	removedUser, _ := h.db.GetUserByID(userID)
+
 	// Remove membership
 	if err := h.db.RemoveMember(org.ID, userID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove member", err)
@@ -255,6 +258,17 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	// Audit
 	h.db.WriteAudit(&org.ID, &actor.ID, "member.remove", "user", userID, nil)
+
+	// Send removal email (async, don't block response)
+	if h.email != nil && removedUser != nil {
+		go func() {
+			removerName := actor.Email
+			if actor.Name != "" {
+				removerName = actor.Name
+			}
+			_ = h.email.SendOrgRemoval(removedUser.Email, removerName, org.Name)
+		}()
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
