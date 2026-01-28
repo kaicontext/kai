@@ -4,126 +4,75 @@
 
 
 ## Why Kai exists
-Modern software tools only understand **text**, but developers think in **meaning**.  
-Git tells you what lines changed — but not what actually happened.
-
-It cannot tell you:
-
-- whether a refactor changed behavior  
-- whether a rename is truly a rename  
-- whether a parameter change breaks API contracts  
-- which modules or tests are impacted  
-- what the developer intended  
-- how the change propagates through the system  
-
-AI coding tools run into the same wall: without semantic grounding, they guess.
-
-CI systems run the entire test suite because they can't reliably detect impact.
-
-**We are building larger and larger systems on top of tools that can’t see meaning.**  
-Kai exists to fix that.
+Git shows you which lines changed, not what changed. Developers think in symbols, behavior, and intent. Kai adds a semantic layer on top of Git so diffs, reviews, and CI can reason about meaning instead of raw text.
 
 ---
 
-## What Kai is
-**Kai is a semantic engine for your codebase.**  
-It builds a meaning-aware model of your project and computes:
+## What Kai is (and is not)
+**Kai is a semantic engine for your codebase.** It builds meaning-aware snapshots from Git refs or working directories and computes:
 
-- **Semantic Snapshots** of any Git ref or working directory  
-- **Semantic Diffs (ChangeSets)** that describe behavior-level change  
-- **Impact Maps** showing exactly what depends on what  
-- **Intent Summaries** explaining the purpose of a change  
-- **Selective CI Plans** that run only the tests affected — safely
+- Semantic Snapshots (content + symbols + module membership)
+- ChangeSets (behavior-level diffs)
+- Intent summaries (what the change means)
+- Impact maps (what depends on what)
+- Selective CI plans (tests that actually matter)
 
-Kai works **on top of Git**, not instead of it.  
-Your repo, branches, commits, and PRs stay exactly the same.
-
-Kai provides the missing semantic layer Git can’t express.
+**Kai is not a replacement for Git.** Your repo, branches, commits, and PRs remain unchanged. Kai sits alongside Git to provide semantic understanding.
 
 ---
 
-## What you can use Kai to do
-
-### Understand code changes at a human level
-Replace noisy line diffs with clean semantic deltas, for example:  
-> Reduced session timeout (3600 → 1800 seconds)
-
-### Generate safe selective CI plans
-Kai maps changes to affected tests via semantic analysis.  
-CI runs only what matters — with strict safety guarantees.
-
-### Detect refactors vs behavior changes
-Kai classifies each change as:
-- refactor  
-- feature  
-- risky  
-- breaking  
-- structural  
-
-### Power AI coding agents with real semantics
-LLMs get:
-- structured diffs  
-- stable symbol identity  
-- deterministic context  
-- dependency-aware reasoning  
-
-### Analyze module-level impact
-Kai reveals which subsystems were touched and how the change propagates.
-
-### Review PRs faster
-Human-readable intent summaries make changes clear at a glance.
-
----
-
-## One-line summary
-**Kai reveals the meaning of change — for humans, CI, and AI.**
-
-# 🧠 Why Developers Use Kai
-
-### **1. Understand changes at a human level**
-
-No more reading raw diffs to guess intent.
-
-### **2. Ship faster with safe selective CI**
-
-Most repos run **far too many tests**.
-Kai runs only the ones that matter—*safely*.
-
-### **3. Better reviews**
-
-Kai’s semantic hunks make PRs dramatically easier to understand.
-
-### **4. Automated intent & change summaries**
-
-Kai gives reviewers and AI assistants better tooling than Git’s text diffs.
-
-### **5. High-fidelity semantic tooling**
-
-Because Kai sees symbols and AST structure, downstream tools become smarter.
-
----
-
-# 🚀 Quick Start
+## Mental model (4 commands)
 
 ```bash
-kai init
-kai capture
-# make changes 
-kai diff
-kai review open
-kai ci plan
-kai push
+kai capture        # snapshot
+kai diff           # semantic diff
+kai review open    # create review
+kai ci plan        # selective tests
 ```
-
-No new source-control model.
-No branching semantics.
-Just Git → snapshot → semantic insight.
 
 ---
 
-# 🧩 How Kai Fits Into Your Workflow
+## Quick Start (Git repo)
 
-You already have:
+This is the most common dev flow: compare a feature branch against main, open a review, and push to Kailab.
+
+```bash
+git fetch origin
+kai init
+
+# Snapshot main and feature (local refs required)
+kai snapshot create --git main --repo .
+kai snapshot create --git feat/my-branch --repo .
+
+# Name the snapshots
+kai ref set snap.main @snap:prev
+kai ref set snap.feat/my-branch @snap:last
+
+# Create a changeset + review
+kai changeset create snap.main snap.feat/my-branch
+kai review open @cs:last --title "My change"
+
+# Push to Kailab
+kai push origin
+```
+
+Notes:
+- `kai review open` with no args uses `@snap:prev → @snap:last`. Use an explicit changeset when you care about exact branch diffs.
+- `kai snapshot create --git` accepts local refs only (not `origin/main`). `git fetch` first, then use local branch names.
+
+---
+
+## Kailab remotes (push/fetch)
+
+```bash
+kai remote set origin https://kailab.example.com --tenant acme --repo webapp
+kai push origin
+kai fetch origin
+```
+
+---
+
+## How Kai fits into your workflow
 
 ```
 Git repo → GitHub PR → CI
@@ -132,67 +81,32 @@ Git repo → GitHub PR → CI
 Kai plugs into the middle:
 
 ```
-Git repo → Kai semantic understanding → GitHub PR  
+Git repo → Kai semantic understanding → GitHub PR
                                    ↘ selective CI
 ```
 
-You still:
-
-* branch normally
-* commit normally
-* push normally
-* open PRs normally
-
-Kai just gives you:
-
-* clearer diffs
-* stronger signals
-* faster CI
-* better reviews
-
-Zero disruption.
+You still branch/commit/push normally. Kai adds clearer diffs, stronger signals, and safer selective CI.
 
 ---
 
-# 🔑 Key Concepts (Git-Safe Definitions)
+## Key concepts (short)
 
-### **Snapshot**
-
-A semantic capture of a Git ref (not a commit replacement).
-
-### **ChangeSet**
-
-The semantic difference between two snapshots:
-
-* functions changed
-* conditions updated
-* API surface modified
-* which modules affected
-
-### **Intent**
-
-A one-line summary describing what the diff *means*.
-
-### **Modules**
-
-Logical areas of your project defined by path patterns.
-
-### **Selective Test Plan**
-
-Kai’s CI engine determines which tests are meaningfully connected to what changed.
+- **Snapshot**: semantic capture of a Git ref (not a commit replacement)
+- **ChangeSet**: semantic diff between two snapshots
+- **Intent**: a one-line meaning summary
+- **Modules**: logical areas defined by path patterns
+- **Selective Test Plan**: targeted tests based on semantic impact
 
 ---
 
-# 🛡 Safety First: Selective CI
+## Safety first: selective CI
 
-Kai never silently skips tests incorrectly.
+Kai never silently skips tests incorrectly. The safety model:
 
-The safety model:
-
-1. **Shadow mode** – Learn without risk
-2. **Guarded mode** – Auto-expand when uncertain
-3. **Strict mode** – Mature teams only
-4. **Tripwire** – Runtime fallback triggers full suite
+1. Shadow mode (learn without risk)
+2. Guarded mode (auto-expand when uncertain)
+3. Strict mode (mature teams only)
+4. Tripwire (runtime fallback to full suite)
 
 Kai treats correctness as sacred.
 
@@ -200,11 +114,12 @@ Kai treats correctness as sacred.
 
 ## Table of Contents
 
-- [Design Principles](#design-principles)
+- [Quick Start (Git repo)](#quick-start-git-repo)
+- [Kailab remotes (push/fetch)](#kailab-remotes-pushfetch)
 - [Key Concepts](#key-concepts)
 - [Kai vs Git](#kai-vs-git)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
+- [Workflow Examples](#workflow-examples)
 - [Human-Friendly References](#human-friendly-references)
 - [Workspace Workflow](#workspace-workflow)
 - [Complete Workflow Tutorial](#complete-workflow-tutorial)
@@ -225,7 +140,7 @@ Kai treats correctness as sacred.
 
 ### Snapshots
 A **snapshot** is a semantic capture of your codebase at a specific Git ref (branch, tag, or commit). Unlike a Git commit which stores file diffs, a snapshot stores:
-- All TypeScript/JavaScript files with their content hashes
+- Supported source/config files with their content hashes (e.g., .go, .ts/.tsx, .js/.jsx, .json, .yaml/.yml, .sql, .proto, .graphql/.gql, .toml)
 - Parsed symbol information (functions, classes, variables)
 - Module associations based on path patterns
 
@@ -368,7 +283,7 @@ sudo ln -s /path/to/kai/kai-cli/kai /usr/local/bin/kai
 
 ---
 
-## Quick Start
+## Workflow Examples
 
 ### The 4-Command Mental Model
 
@@ -420,6 +335,30 @@ kai capture --explain     # Shows: Snapshot, Symbols, Modules
 kai diff --explain     # Shows: Snapshot, ChangeTypes
 kai ci plan --explain  # Shows: ChangeSet, CallGraph, Strategy
 ```
+
+### Git branch review (main vs feature)
+
+Use this when you want the review to match a specific branch diff (like a GitLab MR).
+
+```bash
+git fetch origin
+git checkout main
+git reset --hard origin/main
+kai snapshot create --git main --repo .
+
+git checkout feat/my-branch
+git reset --hard origin/feat/my-branch
+kai snapshot create --git feat/my-branch --repo .
+
+kai ref set snap.main @snap:prev
+kai ref set snap.feat/my-branch @snap:last
+kai changeset create snap.main snap.feat/my-branch
+kai review open @cs:last --title "My change"
+```
+
+Notes:
+- `kai snapshot create --git` requires local refs. Use `git fetch` and local branch names (not `origin/main`).
+- `kai review open` without a changeset uses `@snap:prev → @snap:last`. Use `@cs:last` for explicit branch diffs.
 
 ### Detailed Workflow (Advanced)
 
@@ -2948,7 +2887,15 @@ Solution: Ensure you're in a Git repository or specify `--repo` path.
 ```
 Error: resolving ref "main": not a branch, tag, or commit hash
 ```
-Solution: Verify the Git ref exists (`git branch -a`, `git tag`).
+Solution: Verify the Git ref exists locally (`git branch -a`, `git tag`). `kai snapshot create --git` accepts local refs (not `origin/main`). Run `git fetch` and use local branch names.
+
+**"Kai diff doesn't match Git/GitLab diff"**
+Symptoms: Git shows more files changed than Kai.
+
+Checklist:
+1) Ensure snapshots point to the exact Git refs you intended.
+2) Use explicit changesets for reviews (`kai changeset create snap.main snap.feature` then `kai review open @cs:last`).
+3) Confirm file types are supported (see `detectLang` in `kai-cli/internal/gitio/gitio.go`).
 
 **"invalid snapshot ID"**
 ```
