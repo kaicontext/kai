@@ -555,6 +555,11 @@
 		}
 
 		// If URL had snapshot, load files
+		// If files tab but no snapshot, redirect to snap.latest
+		if (activeTab === 'files' && !snapshot) {
+			goto(`/orgs/${$page.params.slug}/${$page.params.repo}/files/snap.latest`, { replaceState: true });
+			return;
+		}
 		if (snapshot && activeTab === 'files') {
 			// If we have a file path, load that file immediately while loading full list in background
 			if (filePath) {
