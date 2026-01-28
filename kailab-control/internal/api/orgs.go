@@ -1,13 +1,23 @@
 package api
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"kailab-control/internal/model"
 )
+
+// gravatarURL generates a Gravatar URL for an email with identicon fallback.
+func gravatarURL(email string, size int) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	hash := md5.Sum([]byte(email))
+	return fmt.Sprintf("https://www.gravatar.com/avatar/%s?d=identicon&s=%d", hex.EncodeToString(hash[:]), size)
+}
 
 // ----- Orgs -----
 
@@ -123,6 +133,7 @@ type MemberResponse struct {
 	Email     string `json:"email"`
 	Name      string `json:"name,omitempty"`
 	Role      string `json:"role"`
+	AvatarURL string `json:"avatar_url"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -150,6 +161,7 @@ func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
 			Email:     user.Email,
 			Name:      user.Name,
 			Role:      m.Role,
+			AvatarURL: gravatarURL(user.Email, 80),
 			CreatedAt: m.CreatedAt.Format(time.RFC3339),
 		})
 	}
@@ -220,9 +232,10 @@ func (h *Handler) AddMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, MemberResponse{
-		UserID: user.ID,
-		Email:  user.Email,
-		Role:   req.Role,
+		UserID:    user.ID,
+		Email:     user.Email,
+		Role:      req.Role,
+		AvatarURL: gravatarURL(user.Email, 80),
 	})
 }
 
@@ -296,9 +309,10 @@ func (h *Handler) SearchMembers(w http.ResponseWriter, r *http.Request) {
 
 	// Filter by query prefix (case-insensitive)
 	type userResult struct {
-		ID    string `json:"id"`
-		Email string `json:"email"`
-		Name  string `json:"name"`
+		ID        string `json:"id"`
+		Email     string `json:"email"`
+		Name      string `json:"name"`
+		AvatarURL string `json:"avatar_url"`
 	}
 
 	var results []userResult
@@ -319,9 +333,10 @@ func (h *Handler) SearchMembers(w http.ResponseWriter, r *http.Request) {
 			strings.HasPrefix(emailPrefix, queryLower) ||
 			strings.HasPrefix(nameLower, queryLower) {
 			results = append(results, userResult{
-				ID:    user.ID,
-				Email: user.Email,
-				Name:  user.Name,
+				ID:        user.ID,
+				Email:     user.Email,
+				Name:      user.Name,
+				AvatarURL: gravatarURL(user.Email, 40),
 			})
 		}
 

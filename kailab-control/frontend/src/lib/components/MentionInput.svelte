@@ -145,9 +145,11 @@
 						class="w-full px-3 py-2 text-left text-sm hover:bg-kai-bg-tertiary flex items-center gap-2 {i === selectedIndex ? 'bg-kai-bg-tertiary' : ''}"
 						onmousedown={() => selectSuggestion(user)}
 					>
-						<span class="w-6 h-6 rounded-full bg-kai-accent/20 flex items-center justify-center text-xs font-medium text-kai-accent">
-							{user.name?.[0]?.toUpperCase() || user.email[0].toUpperCase()}
-						</span>
+						<img
+							src={user.avatar_url}
+							alt=""
+							class="w-6 h-6 rounded-full bg-kai-bg-tertiary"
+						/>
 						<div class="flex-1 min-w-0">
 							{#if user.name}
 								<div class="font-medium truncate">{user.name}</div>

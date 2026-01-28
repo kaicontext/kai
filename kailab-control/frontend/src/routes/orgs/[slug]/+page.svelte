@@ -205,9 +205,11 @@
 				{#each members as member}
 					<div class="list-item flex items-center justify-between">
 						<div class="flex items-center gap-3">
-							<div class="w-8 h-8 rounded-full bg-kai-accent/20 flex items-center justify-center text-sm font-medium text-kai-accent">
-								{member.name?.[0]?.toUpperCase() || member.email[0].toUpperCase()}
-							</div>
+							<img
+								src={member.avatar_url}
+								alt=""
+								class="w-8 h-8 rounded-full bg-kai-bg-tertiary"
+							/>
 							<div>
 								<div class="font-medium">{member.name || member.email}</div>
 								{#if member.name}
