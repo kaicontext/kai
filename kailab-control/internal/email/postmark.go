@@ -193,6 +193,49 @@ You're receiving this because you're involved in this review.`, commenterName, a
 	return c.Send(to, subject, htmlBody, textBody)
 }
 
+// SendOrgInvitation sends an email when someone is added to an organization.
+func (c *Client) SendOrgInvitation(to, inviterName, orgName, role, orgURL string) error {
+	subject := fmt.Sprintf("You've been added to %s on Kailab", orgName)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <h1 style="margin: 0 0 24px; font-size: 24px; color: #111;">You've been added to %s</h1>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> has added you to the <strong>%s</strong> organization on Kailab as a <strong>%s</strong>.
+    </p>
+    <p style="margin: 0 0 24px; color: #555; line-height: 1.5;">
+      You can now access the organization's repositories and collaborate with the team.
+    </p>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Organization
+    </a>
+    <p style="margin: 24px 0 0; color: #999; font-size: 13px; line-height: 1.5;">
+      If you don't recognize this organization, you can ignore this email or contact support.
+    </p>
+  </div>
+</body>
+</html>`, orgName, inviterName, orgName, role, orgURL)
+
+	textBody := fmt.Sprintf(`You've been added to %s
+
+%s has added you to the %s organization on Kailab as a %s.
+
+You can now access the organization's repositories and collaborate with the team.
+
+View the organization: %s
+
+If you don't recognize this organization, you can ignore this email or contact support.`, orgName, inviterName, orgName, role, orgURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
 // SendMentionNotification sends a notification when someone is @mentioned.
 func (c *Client) SendMentionNotification(to, commenterName, reviewTitle, commentBody, reviewURL string) error {
 	subject := fmt.Sprintf("%s mentioned you in a comment", commenterName)

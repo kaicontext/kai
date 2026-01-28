@@ -207,6 +207,18 @@ func (h *Handler) AddMember(w http.ResponseWriter, r *http.Request) {
 		"role":  req.Role,
 	})
 
+	// Send invitation email (async, don't block response)
+	if h.email != nil {
+		go func() {
+			inviterName := actor.Email
+			if actor.Name != "" {
+				inviterName = actor.Name
+			}
+			orgURL := "https://kailayer.com/orgs/" + org.Slug
+			_ = h.email.SendOrgInvitation(req.Email, inviterName, org.Name, req.Role, orgURL)
+		}()
+	}
+
 	writeJSON(w, http.StatusCreated, MemberResponse{
 		UserID: user.ID,
 		Email:  user.Email,
