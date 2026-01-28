@@ -985,7 +985,7 @@
 											</div>
 										{/each}
 										<!-- Inline comment form -->
-										{#if inlineCommentLine?.file === selectedFile && inlineCommentLine?.line === lineNum}
+										{#if inlineCommentLine?.file === selectedFile && inlineCommentLine?.line === lineNum && inlineCommentLine?.type === line.type}
 											<div class="ml-12 mr-4 my-2 p-3 bg-kai-bg-tertiary rounded-lg border border-blue-500">
 												<textarea
 													bind:value={inlineCommentText}
