@@ -184,7 +184,7 @@
 		{:else if latestSnapshot}
 			<div class="card p-8 text-center text-kai-text-muted">
 				<p>No README found in this repository.</p>
-				<a href="/orgs/{slug}/{repo}/files" class="text-kai-accent hover:underline mt-2 inline-block">
+				<a href="/orgs/{slug}/{repo}/files/snap.latest" class="text-kai-accent hover:underline mt-2 inline-block">
 					Browse files
 				</a>
 			</div>
