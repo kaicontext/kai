@@ -3,9 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"kailab/config"
 	"kailab/proto"
@@ -399,3 +402,94 @@ func TestIngestPack_TooLarge(t *testing.T) {
 		t.Logf("got status %d", w.Code)
 	}
 }
+
+
+// ----- Diff Performance Tests -----
+
+func TestComputeUnifiedDiff_Large(t *testing.T) {
+	// Generate large files
+	var oldLines, newLines []string
+	for i := 0; i < 10000; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("line %d original content here", i))
+		if i%100 == 0 {
+			newLines = append(newLines, fmt.Sprintf("line %d MODIFIED content here", i))
+		} else {
+			newLines = append(newLines, fmt.Sprintf("line %d original content here", i))
+		}
+	}
+
+	oldText := strings.Join(oldLines, "\n")
+	newText := strings.Join(newLines, "\n")
+
+	start := time.Now()
+	hunks := computeUnifiedDiff(oldText, newText)
+	elapsed := time.Since(start)
+
+	t.Logf("Diff of 10k lines with 100 changes took %v, produced %d hunks", elapsed, len(hunks))
+
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Diff took too long: %v (should be < 500ms)", elapsed)
+	}
+}
+
+func BenchmarkComputeUnifiedDiff_Small(b *testing.B) {
+	oldText := "line1\nline2\nline3\nline4\nline5"
+	newText := "line1\nline2 modified\nline3\nline4\nline5\nline6"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		computeUnifiedDiff(oldText, newText)
+	}
+}
+
+func BenchmarkComputeUnifiedDiff_Large(b *testing.B) {
+	var oldLines, newLines []string
+	for i := 0; i < 5000; i++ {
+		oldLines = append(oldLines, fmt.Sprintf("line %d content", i))
+		if i%50 == 0 {
+			newLines = append(newLines, fmt.Sprintf("line %d CHANGED", i))
+		} else {
+			newLines = append(newLines, fmt.Sprintf("line %d content", i))
+		}
+	}
+
+	oldText := strings.Join(oldLines, "\n")
+	newText := strings.Join(newLines, "\n")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		computeUnifiedDiff(oldText, newText)
+	}
+}
+
+func TestSnapshotCache(t *testing.T) {
+	// Test cache key generation and expiry
+	cacheKey := "test/repo:abc123"
+
+	cs := &cachedSnapshot{
+		filesByPath: map[string]string{
+			"file1.go": "digest1",
+			"file2.go": "digest2",
+		},
+		parsedAt: time.Now(),
+	}
+
+	snapshotCache.Store(cacheKey, cs)
+
+	// Should retrieve from cache
+	if cached, ok := snapshotCache.Load(cacheKey); ok {
+		retrieved := cached.(*cachedSnapshot)
+		if len(retrieved.filesByPath) != 2 {
+			t.Errorf("Expected 2 files, got %d", len(retrieved.filesByPath))
+		}
+		if retrieved.filesByPath["file1.go"] != "digest1" {
+			t.Error("Wrong digest for file1.go")
+		}
+	} else {
+		t.Error("Cache miss when hit expected")
+	}
+
+	// Cleanup
+	snapshotCache.Delete(cacheKey)
+}
+
