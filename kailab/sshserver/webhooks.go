@@ -74,7 +74,7 @@ func (n *WebhookNotifier) NotifyReviewCreated(repo, reviewID, title, author stri
 		return err
 	}
 
-	req, err := http.NewRequest("POST", n.baseURL+"/internal/notify/review", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", n.baseURL+"/_internal/notify/review", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (n *WebhookNotifier) NotifyCI(repo, event, ref, sha string, payload map[str
 		return err
 	}
 
-	req, err := http.NewRequest("POST", n.baseURL+"/internal/ci/trigger", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", n.baseURL+"/_internal/ci/trigger", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func (n *WebhookNotifier) trigger(repo, event string, payload map[string]interfa
 		return err
 	}
 
-	req, err := http.NewRequest("POST", n.baseURL+"/internal/webhooks/trigger", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", n.baseURL+"/_internal/webhooks/trigger", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

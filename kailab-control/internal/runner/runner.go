@@ -99,7 +99,7 @@ func (r *Runner) claimJob(ctx context.Context) (*model.JobClaimResponse, error) 
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/internal/runners/%s/jobs/claim", r.cfg.ControlPlaneURL, r.cfg.RunnerID)
+	url := fmt.Sprintf("%s/_internal/runners/%s/jobs/claim", r.cfg.ControlPlaneURL, r.cfg.RunnerID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -241,7 +241,7 @@ func (r *Runner) startJob(ctx context.Context, jobID string) error {
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/internal/jobs/%s/start", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/_internal/jobs/%s/start", r.cfg.ControlPlaneURL, jobID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -269,7 +269,7 @@ func (r *Runner) appendLogs(ctx context.Context, jobID, stepID, content string) 
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/internal/jobs/%s/logs", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/_internal/jobs/%s/logs", r.cfg.ControlPlaneURL, jobID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -292,7 +292,7 @@ func (r *Runner) completeStep(ctx context.Context, jobID string, stepNumber int,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/internal/jobs/%s/steps/%d/complete", r.cfg.ControlPlaneURL, jobID, stepNumber)
+	url := fmt.Sprintf("%s/_internal/jobs/%s/steps/%d/complete", r.cfg.ControlPlaneURL, jobID, stepNumber)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -315,7 +315,7 @@ func (r *Runner) completeJob(ctx context.Context, jobID, conclusion string) erro
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/internal/jobs/%s/complete", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/_internal/jobs/%s/complete", r.cfg.ControlPlaneURL, jobID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
