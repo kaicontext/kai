@@ -1,0 +1,107 @@
+name: Test Kailab CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-ci-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.KAILAB_SSH_KEY }}" > ~/.ssh/kailab
+          chmod 600 ~/.ssh/kailab
+          ssh-keyscan -H git.kailayer.com >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config << EOF
+          Host git.kailayer.com
+            IdentityFile ~/.ssh/kailab
+            IdentitiesOnly yes
+          EOF
+
+      - name: Create test project
+        run: |
+          mkdir test-ci-project
+          cd test-ci-project
+          git init
+          git config user.email "ci@kailayer.com"
+          git config user.name "Kailab CI Test"
+
+          # Create go files
+          cat > main.go << 'GOEOF'
+          package main
+
+          import "fmt"
+
+          func main() {
+              fmt.Println("Hello from Kailab CI!")
+              fmt.Printf("2 + 2 = %d\n", Add(2, 2))
+          }
+
+          func Add(a, b int) int {
+              return a + b
+          }
+          GOEOF
+
+          cat > main_test.go << 'GOEOF'
+          package main
+
+          import "testing"
+
+          func TestAdd(t *testing.T) {
+              if Add(2, 2) != 4 {
+                  t.Error("2 + 2 should equal 4")
+              }
+          }
+          GOEOF
+
+          cat > go.mod << 'GOEOF'
+          module test-ci-project
+
+          go 1.22
+          GOEOF
+
+          # Create Kailab CI workflow
+          mkdir -p .kailab/workflows
+          cat > .kailab/workflows/ci.yml << 'YMLEOF'
+          name: Test CI
+
+          on:
+            push:
+              branches: [main]
+            workflow_dispatch:
+
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-go@v5
+                  with:
+                    go-version: '1.22'
+                - name: Run tests
+                  run: go test -v ./...
+          YMLEOF
+
+          git add -A
+          git commit -m "Initial commit with CI workflow"
+
+      - name: Push to Kailab
+        run: |
+          cd test-ci-project
+          git remote add origin git@git.kailayer.com:kailayer/ci-test.git
+          git push -u origin main --force
+          echo "Pushed to Kailab successfully"
+
+      - name: Wait for CI to trigger
+        run: |
+          echo "Waiting 10 seconds for CI to trigger..."
+          sleep 10
+
+      - name: Check CI status
+        run: |
+          echo "Checking CI run status..."
+          # Use curl to check the workflow runs API
+          # Note: This requires the control plane to be accessible
+          curl -s "https://kailayer.com/api/v1/orgs/kailayer/repos/ci-test/runs" \
+            -H "Authorization: Bearer ${{ secrets.KAILAB_TOKEN }}" || echo "Could not check CI status (auth required)"
