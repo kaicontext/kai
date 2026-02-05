@@ -288,6 +288,7 @@ func NewRouter(h *Handler) http.Handler {
 	mux.HandleFunc("POST /-/ci/jobs/logs", h.AppendLogs)
 	mux.HandleFunc("POST /-/ci/jobs/step-complete", h.CompleteStep)
 	mux.HandleFunc("POST /-/ci/jobs/complete", h.CompleteJob)
+	mux.HandleFunc("POST /-/ci/bootstrap-workflow", h.BootstrapWorkflow) // For testing
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

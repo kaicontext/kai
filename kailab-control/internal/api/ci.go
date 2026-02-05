@@ -1246,3 +1246,95 @@ func (h *Handler) checkAndCompleteWorkflowRun(runID string) {
 
 	h.db.CompleteWorkflowRun(runID, conclusion)
 }
+
+// BootstrapWorkflowRequest creates a test workflow for a repo.
+type BootstrapWorkflowRequest struct {
+	Repo string `json:"repo"` // org/repo format
+}
+
+// BootstrapWorkflow creates a test workflow for CI testing purposes.
+// This is an internal endpoint for testing - it creates a simple CI workflow.
+func (h *Handler) BootstrapWorkflow(w http.ResponseWriter, r *http.Request) {
+	var req BootstrapWorkflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Parse org/repo
+	parts := strings.SplitN(req.Repo, "/", 2)
+	if len(parts) != 2 {
+		writeError(w, http.StatusBadRequest, "invalid repo format", nil)
+		return
+	}
+	orgSlug, repoName := parts[0], parts[1]
+
+	// Get org and repo
+	org, err := h.db.GetOrgBySlug(orgSlug)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "org not found", err)
+		return
+	}
+
+	repo, err := h.db.GetRepoByOrgAndName(org.ID, repoName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "repo not found", err)
+		return
+	}
+
+	// Check if workflow already exists
+	existing, err := h.db.GetWorkflowByRepoAndPath(repo.ID, ".kailab/workflows/ci.yml")
+	if err == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message": "workflow already exists",
+			"id":      existing.ID,
+		})
+		return
+	}
+
+	// Create a simple test workflow
+	testWorkflowContent := `name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "Hello from Kailab CI!"
+      - name: List files
+        run: ls -la
+`
+	// Parse workflow
+	parsed, err := workflow.Parse([]byte(testWorkflowContent))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse workflow", err)
+		return
+	}
+
+	parsedJSON, err := parsed.ToJSON()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to serialize workflow", err)
+		return
+	}
+
+	hash := sha256.Sum256([]byte(testWorkflowContent))
+	contentHash := hex.EncodeToString(hash[:])
+	triggers := parsed.GetTriggerTypes()
+
+	// Create workflow
+	wf, err := h.db.CreateWorkflow(repo.ID, ".kailab/workflows/ci.yml", parsed.Name, contentHash, parsedJSON, triggers)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create workflow", err)
+		return
+	}
+
+	log.Printf("Created bootstrap workflow %s for %s/%s", wf.ID, orgSlug, repoName)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "workflow created",
+		"id":      wf.ID,
+	})
+}
