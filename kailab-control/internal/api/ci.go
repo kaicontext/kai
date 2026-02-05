@@ -717,10 +717,13 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 		return fmt.Errorf("no shard configured")
 	}
 
-	// Fetch files from the data plane - use the ref or default to snap.latest
+	// Fetch files from the data plane - convert refs/heads/main to snap.main
 	filesRef := ref
-	if filesRef == "" || strings.HasPrefix(filesRef, "refs/") {
-		filesRef = "snap.latest"
+	if strings.HasPrefix(filesRef, "refs/heads/") {
+		branchName := strings.TrimPrefix(filesRef, "refs/heads/")
+		filesRef = "snap." + branchName
+	} else if filesRef == "" {
+		filesRef = "snap.main" // Default to main branch
 	}
 	filesURL := fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
 	resp, err := http.Get(filesURL)
