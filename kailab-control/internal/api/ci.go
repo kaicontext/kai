@@ -1,7 +1,12 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -704,6 +709,121 @@ func (h *Handler) DeleteSecret(w http.ResponseWriter, r *http.Request) {
 
 // ----- Internal Endpoints (for runner and kailabd) -----
 
+// syncWorkflowsFromDataPlane fetches workflow files from the data plane and syncs them to the database.
+func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref string) error {
+	// Get the shard URL for this repo - use default shard
+	shardURL := h.shards.GetShardURL("default")
+	if shardURL == "" {
+		return fmt.Errorf("no shard configured")
+	}
+
+	// Fetch files from the data plane - use the ref or default to snap.latest
+	filesRef := ref
+	if filesRef == "" || strings.HasPrefix(filesRef, "refs/") {
+		filesRef = "snap.latest"
+	}
+	filesURL := fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
+	resp, err := http.Get(filesURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch files: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch files: status %d", resp.StatusCode)
+	}
+
+	var filesResp struct {
+		Files []struct {
+			Path          string `json:"path"`
+			Digest        string `json:"digest"`
+			ContentDigest string `json:"contentDigest"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&filesResp); err != nil {
+		return fmt.Errorf("failed to decode files response: %w", err)
+	}
+
+	// Find workflow files
+	workflowFiles := make(map[string]string) // path -> contentDigest
+	for _, f := range filesResp.Files {
+		if strings.HasPrefix(f.Path, ".kailab/workflows/") && strings.HasSuffix(f.Path, ".yml") {
+			digest := f.ContentDigest
+			if digest == "" {
+				digest = f.Digest
+			}
+			workflowFiles[f.Path] = digest
+		}
+	}
+
+	if len(workflowFiles) == 0 {
+		return nil // No workflow files
+	}
+
+	// Fetch and sync each workflow file
+	for path, contentDigest := range workflowFiles {
+		// Fetch content
+		contentURL := fmt.Sprintf("%s/%s/%s/v1/content/%s", shardURL, orgSlug, repoName, contentDigest)
+		contentResp, err := http.Get(contentURL)
+		if err != nil {
+			log.Printf("Failed to fetch workflow content for %s: %v", path, err)
+			continue
+		}
+
+		content, err := io.ReadAll(contentResp.Body)
+		contentResp.Body.Close()
+		if err != nil {
+			log.Printf("Failed to read workflow content for %s: %v", path, err)
+			continue
+		}
+
+		// Parse and sync workflow
+		hash := sha256.Sum256(content)
+		contentHash := hex.EncodeToString(hash[:])
+
+		// Check if workflow exists and has changed
+		existing, err := h.db.GetWorkflowByRepoAndPath(repoID, path)
+		if err == nil && existing.ContentHash == contentHash {
+			continue // No change
+		}
+
+		// Parse workflow
+		parsed, err := workflow.Parse(content)
+		if err != nil {
+			log.Printf("Failed to parse workflow %s: %v", path, err)
+			continue
+		}
+
+		parsedJSON, err := parsed.ToJSON()
+		if err != nil {
+			log.Printf("Failed to serialize workflow %s: %v", path, err)
+			continue
+		}
+
+		triggers := parsed.GetTriggerTypes()
+
+		if err == db.ErrNotFound {
+			// Create new workflow
+			_, err = h.db.CreateWorkflow(repoID, path, parsed.Name, contentHash, parsedJSON, triggers)
+			if err != nil {
+				log.Printf("Failed to create workflow %s: %v", path, err)
+			} else {
+				log.Printf("Created workflow %s for %s/%s", path, orgSlug, repoName)
+			}
+		} else if err == nil {
+			// Update existing workflow
+			err = h.db.UpdateWorkflow(existing.ID, parsed.Name, contentHash, parsedJSON, triggers, true)
+			if err != nil {
+				log.Printf("Failed to update workflow %s: %v", path, err)
+			} else {
+				log.Printf("Updated workflow %s for %s/%s", path, orgSlug, repoName)
+			}
+		}
+	}
+
+	return nil
+}
+
 // TriggerCIRequest is sent by kailabd to trigger CI workflows.
 type TriggerCIRequest struct {
 	Repo    string                 `json:"repo"`    // org/repo format
@@ -744,6 +864,12 @@ func (h *Handler) TriggerCI(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusNotFound, "repo not found", nil)
 		return
+	}
+
+	// Sync workflows from data plane (auto-sync on trigger)
+	if err := h.syncWorkflowsFromDataPlane(repo.ID, orgSlug, repoName, req.Ref); err != nil {
+		log.Printf("Warning: failed to sync workflows for %s/%s: %v", orgSlug, repoName, err)
+		// Continue anyway - there might be existing workflows in the database
 	}
 
 	// Find matching workflows
