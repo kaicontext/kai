@@ -719,7 +719,7 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 
 	// First, try to get the head snapshot from cs.latest (latest changeset)
 	// This handles the case where snap.main points to a changeset instead of snapshot
-	csURL := fmt.Sprintf("%s/%s/%s/v1/changeset/cs.latest", shardURL, orgSlug, repoName)
+	csURL := fmt.Sprintf("%s/%s/%s/v1/changesets/cs.latest", shardURL, orgSlug, repoName)
 	csResp, err := http.Get(csURL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch changeset: %w", err)
