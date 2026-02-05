@@ -85,6 +85,7 @@ jobs:
 
           git add -A
           git commit -m "Initial commit with CI workflow"
+          git branch -M main
 
       - name: Push to Kailab
         run: |
