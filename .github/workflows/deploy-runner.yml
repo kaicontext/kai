@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'cmd/kailab-runner/**'
-      - 'internal/runner/**'
-      - 'deploy/kubernetes/**'
+      - 'kailab-control/cmd/kailab-runner/**'
+      - 'kailab-control/internal/runner/**'
+      - 'kailab-control/deploy/kubernetes/**'
       - '.github/workflows/deploy-runner.yml'
   workflow_dispatch:
 
@@ -47,8 +47,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: deploy/kubernetes/Dockerfile.runner
+          context: ./kailab-control
+          file: kailab-control/deploy/kubernetes/Dockerfile.runner
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -72,12 +72,12 @@ jobs:
 
       - name: Update image tag
         run: |
-          cd deploy/kubernetes
+          cd kailab-control/deploy/kubernetes
           kustomize edit set image ghcr.io/kailayerhq/kailab-runner=ghcr.io/kailayerhq/kailab-runner:${{ github.sha }}
 
       - name: Deploy to Kubernetes
         run: |
-          kubectl apply -k deploy/kubernetes/
+          kubectl apply -k kailab-control/deploy/kubernetes/
 
       - name: Wait for rollout
         run: |
