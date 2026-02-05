@@ -280,12 +280,14 @@ func NewRouter(h *Handler) http.Handler {
 	mux.HandleFunc("POST /-/notify/review", h.NotifyReview)
 
 	// Internal CI endpoints (for runner)
+	// Note: Using fixed paths (no wildcards) to avoid conflict with /{org}/{repo}/v1/ pattern
+	// IDs are passed in the request body instead of path parameters
 	mux.HandleFunc("POST /-/ci/trigger", h.TriggerCI)
-	mux.HandleFunc("POST /-/runners/{runner_id}/jobs/claim", h.ClaimJob)
-	mux.HandleFunc("POST /-/jobs/{job_id}/start", h.StartJob)
-	mux.HandleFunc("POST /-/jobs/{job_id}/logs", h.AppendLogs)
-	mux.HandleFunc("POST /-/jobs/{job_id}/steps/{step_number}/complete", h.CompleteStep)
-	mux.HandleFunc("POST /-/jobs/{job_id}/complete", h.CompleteJob)
+	mux.HandleFunc("POST /-/ci/runners/claim", h.ClaimJob)
+	mux.HandleFunc("POST /-/ci/jobs/start", h.StartJob)
+	mux.HandleFunc("POST /-/ci/jobs/logs", h.AppendLogs)
+	mux.HandleFunc("POST /-/ci/jobs/step-complete", h.CompleteStep)
+	mux.HandleFunc("POST /-/ci/jobs/complete", h.CompleteJob)
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

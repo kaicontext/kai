@@ -95,11 +95,12 @@ func (r *Runner) poll(ctx context.Context) error {
 // claimJob attempts to claim a job from the control plane.
 func (r *Runner) claimJob(ctx context.Context) (*model.JobClaimResponse, error) {
 	reqBody := map[string]interface{}{
-		"labels": r.cfg.Labels,
+		"runner_id": r.cfg.RunnerID,
+		"labels":    r.cfg.Labels,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/-/runners/%s/jobs/claim", r.cfg.ControlPlaneURL, r.cfg.RunnerID)
+	url := fmt.Sprintf("%s/-/ci/runners/claim", r.cfg.ControlPlaneURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -237,11 +238,12 @@ func (r *Runner) executeStep(ctx context.Context, job *model.Job, step *model.St
 // startJob marks a job as started.
 func (r *Runner) startJob(ctx context.Context, jobID string) error {
 	reqBody := map[string]string{
+		"job_id":      jobID,
 		"runner_name": r.cfg.RunnerName,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/-/jobs/%s/start", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/-/ci/jobs/start", r.cfg.ControlPlaneURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -264,12 +266,13 @@ func (r *Runner) startJob(ctx context.Context, jobID string) error {
 // appendLogs sends logs to the control plane.
 func (r *Runner) appendLogs(ctx context.Context, jobID, stepID, content string) error {
 	reqBody := map[string]string{
+		"job_id":  jobID,
 		"step_id": stepID,
 		"content": content,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/-/jobs/%s/logs", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/-/ci/jobs/logs", r.cfg.ControlPlaneURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -287,12 +290,14 @@ func (r *Runner) appendLogs(ctx context.Context, jobID, stepID, content string) 
 
 // completeStep marks a step as completed.
 func (r *Runner) completeStep(ctx context.Context, jobID string, stepNumber int, conclusion string) error {
-	reqBody := map[string]string{
-		"conclusion": conclusion,
+	reqBody := map[string]interface{}{
+		"job_id":      jobID,
+		"step_number": stepNumber,
+		"conclusion":  conclusion,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/-/jobs/%s/steps/%d/complete", r.cfg.ControlPlaneURL, jobID, stepNumber)
+	url := fmt.Sprintf("%s/-/ci/jobs/step-complete", r.cfg.ControlPlaneURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -311,11 +316,12 @@ func (r *Runner) completeStep(ctx context.Context, jobID string, stepNumber int,
 // completeJob marks a job as completed.
 func (r *Runner) completeJob(ctx context.Context, jobID, conclusion string) error {
 	reqBody := map[string]string{
+		"job_id":     jobID,
 		"conclusion": conclusion,
 	}
 	body, _ := json.Marshal(reqBody)
 
-	url := fmt.Sprintf("%s/-/jobs/%s/complete", r.cfg.ControlPlaneURL, jobID)
+	url := fmt.Sprintf("%s/-/ci/jobs/complete", r.cfg.ControlPlaneURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err

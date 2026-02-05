@@ -121,7 +121,6 @@ Kai treats correctness as sacred.
 - [Installation](#installation)
 - [Workflow Examples](#workflow-examples)
 - [Human-Friendly References](#human-friendly-references)
-- [Workspace Workflow](#workspace-workflow)
 - [Complete Workflow Tutorial](#complete-workflow-tutorial)
 - [Command Reference](#command-reference)
 - [CI & Test Selection](#ci--test-selection)
@@ -831,6 +830,37 @@ Created snapshot: <64-character-hex-id>
 
 ---
 
+### `kai snap`
+
+Quick directory snapshot without Git.
+
+```bash
+kai snap [path]
+```
+
+**Arguments:**
+- `[path]` - Directory path (default: current directory)
+
+**Examples:**
+```bash
+# Snapshot current directory
+kai snap
+
+# Snapshot specific path
+kai snap src/
+
+# Snapshot build output
+kai snap ./build
+```
+
+This is a shortcut for `kai snapshot create --dir <path>`. It:
+- Never reads Git
+- Includes uncommitted changes
+- Works without a Git repository
+- Is ideal for workspaces, CI, and local development
+
+---
+
 ### `kai analyze symbols`
 
 Extract symbols from all files in a snapshot.
@@ -865,6 +895,35 @@ Symbol analysis complete
 - `kind` - `function`, `class`, or `variable`
 - `range` - Start and end positions `{start: [line, col], end: [line, col]}`
 - `signature` - Declaration signature (e.g., `function login(user, device)`)
+
+---
+
+### `kai analyze calls`
+
+Build a call graph for JavaScript/TypeScript files.
+
+```bash
+kai analyze calls <snapshot-id>
+```
+
+**Arguments:**
+- `<snapshot-id>` - Hex ID of the snapshot to analyze
+
+**Examples:**
+```bash
+kai analyze calls @snap:last
+kai analyze calls d9ec990243e5...
+```
+
+**What it creates:**
+- `File --IMPORTS--> File` (import dependencies)
+- `File --CALLS--> File` (function call relationships)
+- `File --TESTS--> File` (test file to source file mapping)
+
+**Enables:**
+- Finding all callers of a function
+- Determining which tests cover a file
+- Running only affected tests after changes
 
 ---
 
@@ -1379,6 +1438,139 @@ kai merge base.js left.js right.js --json
 
 ---
 
+### `kai checkout`
+
+Restore the filesystem to match a snapshot's state.
+
+```bash
+kai checkout <snapshot-id> [flags]
+```
+
+**Arguments:**
+- `<snapshot-id>` - Snapshot ID, ref name, or selector
+
+**Flags:**
+- `--dir <path>` - Target directory (default: current directory)
+- `--clean` - Delete files not in the snapshot
+
+**Examples:**
+```bash
+# Restore to specific directory
+kai checkout abc123... --dir ./src
+
+# Restore with cleanup of extra files
+kai checkout @snap:last --dir ./src --clean
+```
+
+---
+
+### `kai cherry-pick`
+
+Apply a changeset onto a target snapshot.
+
+```bash
+kai cherry-pick <changeset> <target-snapshot>
+```
+
+**Arguments:**
+- `<changeset>` - ChangeSet ID, ref name, or selector
+- `<target-snapshot>` - Target snapshot to apply changes onto
+
+**Examples:**
+```bash
+kai cherry-pick cs.login_fix snap.main
+kai cherry-pick @cs:last @snap:last
+```
+
+Creates a new changeset representing the applied changes.
+
+---
+
+### `kai rebase`
+
+Reapply one or more changesets onto a new base snapshot.
+
+```bash
+kai rebase <target-snapshot> <changeset> [changeset...]
+```
+
+**Arguments:**
+- `<target-snapshot>` - New base snapshot
+- `<changeset>` - One or more changesets to reapply (in order)
+
+**Examples:**
+```bash
+kai rebase snap.main cs.a1b2 cs.c3d4
+kai rebase @snap:last @cs:prev @cs:last
+```
+
+---
+
+### `kai bisect`
+
+Find a regression via binary search over snapshots.
+
+**Subcommands:**
+
+#### `kai bisect start`
+
+Start a bisect session.
+
+```bash
+kai bisect start <good-snapshot> <bad-snapshot>
+```
+
+**Arguments:**
+- `<good-snapshot>` - Known good snapshot (no regression)
+- `<bad-snapshot>` - Known bad snapshot (has regression)
+
+#### `kai bisect good`
+
+Mark the current snapshot as good (no regression).
+
+```bash
+kai bisect good
+```
+
+#### `kai bisect bad`
+
+Mark the current snapshot as bad (has regression).
+
+```bash
+kai bisect bad
+```
+
+#### `kai bisect next`
+
+Show the next snapshot to test.
+
+```bash
+kai bisect next
+```
+
+#### `kai bisect reset`
+
+End the bisect session.
+
+```bash
+kai bisect reset
+```
+
+**Workflow Example:**
+```bash
+kai bisect start snap.v1.0 snap.v1.5   # Start bisecting
+kai bisect next                         # Get next snapshot to test
+# ... test your code ...
+kai bisect good                         # Mark as good
+kai bisect next                         # Get next snapshot
+# ... test your code ...
+kai bisect bad                          # Mark as bad
+# ... repeat until regression found ...
+kai bisect reset                        # Clean up
+```
+
+---
+
 ### `kai ref list`
 
 List all named references.
@@ -1449,6 +1641,122 @@ kai ref del <name>
 ```bash
 kai ref del snap.old_backup
 ```
+
+---
+
+### `kai tag`
+
+Manage tag refs that point to snapshots.
+
+#### `kai tag create`
+
+Create or update a tag ref.
+
+```bash
+kai tag create <name> <target>
+```
+
+**Arguments:**
+- `<name>` - Tag name (e.g., `v1.0`, `release-2024`)
+- `<target>` - Snapshot ID, ref name, or selector
+
+**Examples:**
+```bash
+kai tag create v1.0 @snap:last
+kai tag create release-2024 snap.main
+```
+
+#### `kai tag list`
+
+List all tag refs.
+
+```bash
+kai tag list
+```
+
+#### `kai tag delete`
+
+Delete a tag ref.
+
+```bash
+kai tag delete <name>
+```
+
+**Example:**
+```bash
+kai tag delete v1.0-beta
+```
+
+---
+
+### `kai modules`
+
+Manage module definitions for your codebase. Modules group related files together, enabling semantic diffs at module level, targeted test selection, and import graph analysis.
+
+#### `kai modules init`
+
+Initialize module configuration by auto-detecting modules from your codebase.
+
+```bash
+kai modules init [flags]
+```
+
+**Flags:**
+- `--infer` - Auto-detect modules from source structure
+- `--write` - Save configuration to `.kai/rules/modules.yaml`
+- `--by <strategy>` - Grouping strategy: `dirs` (default), `packages`
+- `--tests <glob>` - Test file pattern (e.g., `"tests/**"`)
+
+**Examples:**
+```bash
+# Preview inferred modules
+kai modules init --infer
+
+# Save inferred modules
+kai modules init --infer --write
+
+# Group by top-level directories
+kai modules init --infer --by dirs
+
+# Also detect test modules
+kai modules init --infer --tests "tests/**"
+```
+
+#### `kai modules add`
+
+Add a module definition.
+
+```bash
+kai modules add <name> <glob>
+```
+
+**Arguments:**
+- `<name>` - Module name (e.g., `Auth`, `API`)
+- `<glob>` - Glob pattern for files (e.g., `auth/**`)
+
+**Example:**
+```bash
+kai modules add Auth "src/auth/**"
+kai modules add Tests "**/*.test.ts"
+```
+
+#### `kai modules list`
+
+List all defined modules.
+
+```bash
+kai modules list
+```
+
+#### `kai modules preview`
+
+Preview file-to-module mapping without saving.
+
+```bash
+kai modules preview
+```
+
+Shows which files match each module definition.
 
 ---
 
@@ -1596,6 +1904,37 @@ Kai addresses this with **progressive hardening** through three safety modes:
 3. **Strict Mode** - Full selective after building confidence
 
 This allows teams to start safely, build confidence, and gradually increase selectivity.
+
+---
+
+### `kai test affected`
+
+List test files affected by changes between two snapshots.
+
+```bash
+kai test affected <base-snap> <head-snap>
+```
+
+**Arguments:**
+- `<base-snap>` - Base snapshot ID, ref, or selector
+- `<head-snap>` - Head snapshot ID, ref, or selector
+
+**Examples:**
+```bash
+# Find affected tests between two snapshots
+kai test affected @snap:prev @snap:last
+
+# Using explicit snapshot refs
+kai test affected snap.main snap.feature
+```
+
+**Prerequisites:**
+This command requires running `kai analyze calls` first to build the call graph.
+
+**How it works:**
+1. Analyzes the call graph to find which source files changed
+2. Identifies test files that import or call changed files
+3. Returns the list of test files that should be run
 
 ---
 
@@ -3513,6 +3852,74 @@ kai fetch origin snap:main
 1. Fetches ref metadata from remote
 2. For changesets: downloads the changeset + its base/head snapshots
 3. For snapshots: downloads the snapshot + file objects
+
+---
+
+#### `kai clone`
+
+Clone a repository from a remote Kailab server.
+
+```bash
+kai clone <org/repo | url> [directory]
+```
+
+**Arguments:**
+- `<org/repo | url>` - Repository path or full URL
+- `[directory]` - Target directory (optional, defaults to repo name)
+
+**URL formats:**
+- `org/repo` - Shorthand (uses default server: kailayer.com)
+- `http://server/tenant/repo` - Full URL with server
+
+**Examples:**
+```bash
+# Clone from default server
+kai clone 1m/myrepo
+
+# Clone into specific directory
+kai clone 1m/myrepo myproject
+
+# Clone with full URL
+kai clone https://kailayer.com/myorg/myrepo
+
+# Clone from local development server
+kai clone http://localhost:8080/myorg/myrepo
+
+# Clone with explicit tenant/repo
+kai clone http://localhost:8080 --tenant myorg --repo myrepo
+```
+
+**What happens:**
+1. Creates a new directory
+2. Initializes Kai
+3. Sets up the remote
+4. Fetches all refs
+
+The default server can be overridden with the `KAI_SERVER` environment variable.
+
+---
+
+#### `kai update`
+
+Update kai CLI to the latest version.
+
+```bash
+kai update [flags]
+```
+
+**Flags:**
+- `--check` - Check for updates without installing
+
+**Examples:**
+```bash
+# Download and install latest version
+kai update
+
+# Check for updates only
+kai update --check
+```
+
+Downloads and installs the latest kai binary from GitHub releases.
 
 ---
 

@@ -806,18 +806,18 @@ func (h *Handler) TriggerCI(w http.ResponseWriter, r *http.Request) {
 
 // ClaimJobRequest is sent by runners to claim a job.
 type ClaimJobRequest struct {
-	Labels []string `json:"labels"`
+	RunnerID string   `json:"runner_id"`
+	Labels   []string `json:"labels"`
 }
 
 // ClaimJob allows a runner to claim the next available job.
 func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
-	runnerID := r.PathValue("runner_id")
-
 	var req ClaimJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	runnerID := req.RunnerID
 
 	// Update runner status
 	h.db.UpdateRunnerStatus(runnerID, model.RunnerStatusOnline)
@@ -882,18 +882,18 @@ func stepsToModels(steps []*model.Step) []model.Step {
 
 // StartJobRequest marks a job as started.
 type StartJobRequest struct {
+	JobID      string `json:"job_id"`
 	RunnerName string `json:"runner_name"`
 }
 
 // StartJob marks a job as started by a runner.
 func (h *Handler) StartJob(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-
 	var req StartJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	jobID := req.JobID
 
 	if err := h.db.StartJob(jobID, req.RunnerName); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start job", err)
@@ -914,19 +914,19 @@ func (h *Handler) StartJob(w http.ResponseWriter, r *http.Request) {
 
 // AppendLogsRequest appends logs to a job.
 type AppendLogsRequest struct {
+	JobID   string `json:"job_id"`
 	StepID  string `json:"step_id,omitempty"`
 	Content string `json:"content"`
 }
 
 // AppendLogs appends logs to a job.
 func (h *Handler) AppendLogs(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-
 	var req AppendLogsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	jobID := req.JobID
 
 	if err := h.db.AppendJobLog(jobID, req.StepID, req.Content); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to append logs", err)
@@ -938,19 +938,20 @@ func (h *Handler) AppendLogs(w http.ResponseWriter, r *http.Request) {
 
 // CompleteStepRequest marks a step as completed.
 type CompleteStepRequest struct {
+	JobID      string `json:"job_id"`
+	StepNumber int    `json:"step_number"`
 	Conclusion string `json:"conclusion"`
 }
 
 // CompleteStep marks a step as completed.
 func (h *Handler) CompleteStep(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-	stepNumber, _ := strconv.Atoi(r.PathValue("step_number"))
-
 	var req CompleteStepRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	jobID := req.JobID
+	stepNumber := req.StepNumber
 
 	step, err := h.db.GetStepByJobAndNumber(jobID, stepNumber)
 	if err != nil {
@@ -968,18 +969,18 @@ func (h *Handler) CompleteStep(w http.ResponseWriter, r *http.Request) {
 
 // CompleteJobRequest marks a job as completed.
 type CompleteJobRequest struct {
+	JobID      string `json:"job_id"`
 	Conclusion string `json:"conclusion"`
 }
 
 // CompleteJob marks a job as completed by a runner.
 func (h *Handler) CompleteJob(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
-
 	var req CompleteJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
 		return
 	}
+	jobID := req.JobID
 
 	if err := h.db.CompleteJob(jobID, req.Conclusion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to complete job", err)
