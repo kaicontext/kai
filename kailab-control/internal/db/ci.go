@@ -443,15 +443,18 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 	var query string
 	if db.driver == DriverPostgres {
 		// PostgreSQL uses jsonb_array_elements_text for JSON array expansion
+		// Check if needs is a valid array before trying to expand it
 		query = `
 			SELECT j.id FROM jobs j
 			WHERE j.status = $1
-			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = '' OR NOT EXISTS (
-				SELECT 1 FROM jobs dep
-				WHERE dep.workflow_run_id = j.workflow_run_id
-				AND dep.name IN (SELECT jsonb_array_elements_text(j.needs::jsonb))
-				AND dep.status != $2
-			))
+			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = ''
+				OR jsonb_typeof(j.needs::jsonb) != 'array'
+				OR NOT EXISTS (
+					SELECT 1 FROM jobs dep
+					WHERE dep.workflow_run_id = j.workflow_run_id
+					AND dep.name IN (SELECT jsonb_array_elements_text(j.needs::jsonb))
+					AND dep.status != $2
+				))
 			ORDER BY j.created_at
 			LIMIT 1
 		`
