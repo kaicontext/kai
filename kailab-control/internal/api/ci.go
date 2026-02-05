@@ -1026,7 +1026,7 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.JobClaimResponse{
 		Job:         job,
 		WorkflowRun: run,
-		Workflow:    wf,
+		Workflow:    model.WorkflowToRunnerFormat(wf),
 		Steps:       stepsToModels(steps),
 		Context:     context,
 	})

@@ -238,9 +238,42 @@ type JobClaimRequest struct {
 type JobClaimResponse struct {
 	Job         *Job                   `json:"job,omitempty"`
 	WorkflowRun *WorkflowRun           `json:"workflow_run,omitempty"`
-	Workflow    *Workflow              `json:"workflow,omitempty"`
+	Workflow    *WorkflowForRunner     `json:"workflow,omitempty"`
 	Steps       []Step                 `json:"steps,omitempty"`
 	Context     map[string]interface{} `json:"context,omitempty"` // Env vars, secrets
+}
+
+// WorkflowForRunner is a workflow struct that includes ParsedJSON for runner execution.
+type WorkflowForRunner struct {
+	ID          string    `json:"id"`
+	RepoID      string    `json:"repo_id"`
+	Path        string    `json:"path"`
+	Name        string    `json:"name"`
+	ContentHash string    `json:"content_hash"`
+	ParsedJSON  string    `json:"parsed_json"`
+	Triggers    []string  `json:"triggers"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// WorkflowToRunnerFormat converts a Workflow to WorkflowForRunner.
+func WorkflowToRunnerFormat(w *Workflow) *WorkflowForRunner {
+	if w == nil {
+		return nil
+	}
+	return &WorkflowForRunner{
+		ID:          w.ID,
+		RepoID:      w.RepoID,
+		Path:        w.Path,
+		Name:        w.Name,
+		ContentHash: w.ContentHash,
+		ParsedJSON:  w.ParsedJSON,
+		Triggers:    w.Triggers,
+		Active:      w.Active,
+		CreatedAt:   w.CreatedAt,
+		UpdatedAt:   w.UpdatedAt,
+	}
 }
 
 // JobStartRequest marks a job as started.
