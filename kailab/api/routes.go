@@ -170,6 +170,42 @@ func (h *Handler) notifyReviewCreated(rh *repo.Handle, refs []string) {
 	}
 }
 
+// notifyPushCI triggers CI workflows for push events on branch-like refs.
+func (h *Handler) notifyPushCI(rh *repo.Handle, refs []string) {
+	if h.webhookNotifier == nil || rh == nil || len(refs) == 0 {
+		return
+	}
+
+	repo := rh.Tenant + "/" + rh.Name
+
+	for _, refName := range refs {
+		// Trigger CI for snap.main, snap.master, or snap.<branch> refs
+		// These represent branch pushes in kai's model
+		if !strings.HasPrefix(refName, "snap.") {
+			continue
+		}
+
+		// Get the SHA for this ref
+		ref, err := store.GetRef(rh.DB, refName)
+		if err != nil {
+			continue
+		}
+		sha := fmt.Sprintf("%x", ref.Target)
+
+		// Convert snap.main to refs/heads/main format for workflow matching
+		branchName := strings.TrimPrefix(refName, "snap.")
+		gitRef := "refs/heads/" + branchName
+
+		go func(repo, gitRef, sha string, payload map[string]interface{}) {
+			if err := h.webhookNotifier.NotifyCI(repo, "push", gitRef, sha, payload); err != nil {
+				log.Printf("notify: CI trigger for push failed: %v", err)
+			}
+		}(repo, gitRef, sha, map[string]interface{}{
+			"ref": refName,
+		})
+	}
+}
+
 func (h *Handler) ensureSignedChangeSet(db *sql.DB, target []byte) error {
 	if h.cfg == nil || !h.cfg.RequireSignedChangeSets || len(target) == 0 {
 		return nil
@@ -745,6 +781,9 @@ func (h *Handler) BatchUpdateRefs(w http.ResponseWriter, r *http.Request) {
 
 	// Notify on new review refs (fire-and-forget)
 	h.notifyReviewCreated(rh, syncedRefs)
+
+	// Trigger CI for push events (fire-and-forget)
+	h.notifyPushCI(rh, syncedRefs)
 
 	writeJSON(w, http.StatusOK, proto.BatchRefUpdateResponse{
 		PushID:  pushID,
