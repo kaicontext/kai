@@ -273,19 +273,19 @@ func NewRouter(h *Handler) http.Handler {
 	))
 
 	// Internal endpoints (service-to-service)
-	// Use /_internal/ prefix to avoid conflict with /{org}/{repo}/v1/ proxy route
-	mux.HandleFunc("POST /_internal/ssh/verify", h.VerifySSHKey)
-	mux.HandleFunc("POST /_internal/webhooks/trigger", h.TriggerWebhooks)
-	mux.HandleFunc("POST /_internal/notify/comment", h.NotifyComment)
-	mux.HandleFunc("POST /_internal/notify/review", h.NotifyReview)
+	// Use /-/ prefix to avoid conflict with /{org}/{repo}/v1/ proxy route
+	mux.HandleFunc("POST /-/ssh/verify", h.VerifySSHKey)
+	mux.HandleFunc("POST /-/webhooks/trigger", h.TriggerWebhooks)
+	mux.HandleFunc("POST /-/notify/comment", h.NotifyComment)
+	mux.HandleFunc("POST /-/notify/review", h.NotifyReview)
 
 	// Internal CI endpoints (for runner)
-	mux.HandleFunc("POST /_internal/ci/trigger", h.TriggerCI)
-	mux.HandleFunc("POST /_internal/runners/{runner_id}/jobs/claim", h.ClaimJob)
-	mux.HandleFunc("POST /_internal/jobs/{job_id}/start", h.StartJob)
-	mux.HandleFunc("POST /_internal/jobs/{job_id}/logs", h.AppendLogs)
-	mux.HandleFunc("POST /_internal/jobs/{job_id}/steps/{step_number}/complete", h.CompleteStep)
-	mux.HandleFunc("POST /_internal/jobs/{job_id}/complete", h.CompleteJob)
+	mux.HandleFunc("POST /-/ci/trigger", h.TriggerCI)
+	mux.HandleFunc("POST /-/runners/{runner_id}/jobs/claim", h.ClaimJob)
+	mux.HandleFunc("POST /-/jobs/{job_id}/start", h.StartJob)
+	mux.HandleFunc("POST /-/jobs/{job_id}/logs", h.AppendLogs)
+	mux.HandleFunc("POST /-/jobs/{job_id}/steps/{step_number}/complete", h.CompleteStep)
+	mux.HandleFunc("POST /-/jobs/{job_id}/complete", h.CompleteJob)
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

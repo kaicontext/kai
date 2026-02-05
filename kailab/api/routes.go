@@ -2581,7 +2581,7 @@ func (h *Handler) notifyComment(org, repo, reviewID, reviewTitle, reviewAuthor, 
 		return
 	}
 
-	url := h.cfg.ControlPlaneURL + "/_internal/notify/comment"
+	url := h.cfg.ControlPlaneURL + "/-/notify/comment"
 	resp, err := http.Post(url, "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
 		log.Printf("notify: failed to call control plane: %v", err)

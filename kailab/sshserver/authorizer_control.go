@@ -62,7 +62,7 @@ func (a *ControlPlaneAuthorizer) Authorize(ctx context.Context, session ssh.Sess
 		return fmt.Errorf("access denied: internal error")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/_internal/ssh/verify", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/-/ssh/verify", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("access denied: internal error")
 	}
