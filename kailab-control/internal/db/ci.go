@@ -417,18 +417,37 @@ func (db *DB) ListWorkflowRunJobs(workflowRunID string) ([]*model.Job, error) {
 func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 	// Find the first queued job that has all dependencies completed successfully
 	// For now, we use a simple approach - more sophisticated label matching can be added later
-	row := db.queryRow(`
-		SELECT j.id FROM jobs j
-		WHERE j.status = ?
-		AND NOT EXISTS (
-			SELECT 1 FROM jobs dep
-			WHERE dep.workflow_run_id = j.workflow_run_id
-			AND dep.name IN (SELECT value FROM json_each(j.needs))
-			AND dep.status != ?
-		)
-		ORDER BY j.created_at
-		LIMIT 1
-	`, model.JobStatusQueued, model.JobStatusCompleted)
+	var query string
+	if db.driver == DriverPostgres {
+		// PostgreSQL uses jsonb_array_elements_text for JSON array expansion
+		query = `
+			SELECT j.id FROM jobs j
+			WHERE j.status = $1
+			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = '' OR NOT EXISTS (
+				SELECT 1 FROM jobs dep
+				WHERE dep.workflow_run_id = j.workflow_run_id
+				AND dep.name IN (SELECT jsonb_array_elements_text(j.needs::jsonb))
+				AND dep.status != $2
+			))
+			ORDER BY j.created_at
+			LIMIT 1
+		`
+	} else {
+		// SQLite uses json_each for JSON array expansion
+		query = `
+			SELECT j.id FROM jobs j
+			WHERE j.status = ?
+			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = '' OR NOT EXISTS (
+				SELECT 1 FROM jobs dep
+				WHERE dep.workflow_run_id = j.workflow_run_id
+				AND dep.name IN (SELECT value FROM json_each(j.needs))
+				AND dep.status != ?
+			))
+			ORDER BY j.created_at
+			LIMIT 1
+		`
+	}
+	row := db.queryRow(query, model.JobStatusQueued, model.JobStatusCompleted)
 
 	var jobID string
 	if err := row.Scan(&jobID); err == sql.ErrNoRows {
