@@ -90,7 +90,7 @@ jobs:
       - name: Push to Kailab
         run: |
           cd test-ci-project
-          git remote add origin git@git.kailayer.com:kailayer/ci-test.git
+          git remote add origin git@git.kailayer.com:kailayer/test.git
           git push -u origin main --force
           echo "Pushed to Kailab successfully"
 
@@ -104,5 +104,5 @@ jobs:
           echo "Checking CI run status..."
           # Use curl to check the workflow runs API
           # Note: This requires the control plane to be accessible
-          curl -s "https://kailayer.com/api/v1/orgs/kailayer/repos/ci-test/runs" \
+          curl -s "https://kailayer.com/api/v1/orgs/kailayer/repos/test/runs" \
             -H "Authorization: Bearer ${{ secrets.KAILAB_TOKEN }}" || echo "Could not check CI status (auth required)"
