@@ -78,10 +78,19 @@ jobs:
           cluster_name: ${{ secrets.GKE_CLUSTER }}
           location: ${{ secrets.GKE_ZONE }}
 
+      - name: Create image pull secret
+        run: |
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            -n kailab-ci \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Update image tag
         run: |
           cd kailab-control/deploy/kubernetes
-          kustomize edit set image ghcr.io/kailayerhq/kailab-runner=ghcr.io/kailayerhq/kailab-runner:${{ github.sha }}
+          kustomize edit set image ghcr.io/kailayerhq/kailab-runner=ghcr.io/kailayerhq/kailab-runner:${GITHUB_SHA::7}
 
       - name: Deploy to Kubernetes
         run: |

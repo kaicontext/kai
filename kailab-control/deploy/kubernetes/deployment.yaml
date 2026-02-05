@@ -49,3 +49,5 @@ spec:
             allowPrivilegeEscalation: false
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-pull-secret
