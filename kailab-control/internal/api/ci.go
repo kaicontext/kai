@@ -710,57 +710,61 @@ func (h *Handler) DeleteSecret(w http.ResponseWriter, r *http.Request) {
 // ----- Internal Endpoints (for runner and kailabd) -----
 
 // syncWorkflowsFromDataPlane fetches workflow files from the data plane and syncs them to the database.
+// This is a best-effort sync - if it fails, we continue with existing workflows.
 func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref string) error {
 	// Get the shard URL for this repo - use default shard
 	shardURL := h.shards.GetShardURL("default")
 	if shardURL == "" {
-		return fmt.Errorf("no shard configured")
+		return nil // No shard configured, skip sync
 	}
 
-	// First, try to get the head snapshot from cs.latest (latest changeset)
-	// This handles the case where snap.main points to a changeset instead of snapshot
-	csURL := fmt.Sprintf("%s/%s/%s/v1/changesets/cs.latest", shardURL, orgSlug, repoName)
-	csResp, err := http.Get(csURL)
-	if err != nil {
-		return fmt.Errorf("failed to fetch changeset: %w", err)
-	}
-	defer csResp.Body.Close()
+	// Try multiple approaches to get files
 
-	var headSnapshot string
-	if csResp.StatusCode == http.StatusOK {
-		var csData struct {
-			Head string `json:"head"`
-		}
-		if err := json.NewDecoder(csResp.Body).Decode(&csData); err == nil && csData.Head != "" {
-			headSnapshot = csData.Head
-		}
+	// Approach 1: Try snap.main directly
+	filesRef := "snap.main"
+	if strings.HasPrefix(ref, "refs/heads/") {
+		branchName := strings.TrimPrefix(ref, "refs/heads/")
+		filesRef = "snap." + branchName
 	}
 
-	// Use the head snapshot from changeset if available, otherwise try snap.main
-	var filesURL string
-	if headSnapshot != "" {
-		// Use the snapshot digest directly
-		filesURL = fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, headSnapshot)
-	} else {
-		// Fallback to snap.main
-		filesRef := ref
-		if strings.HasPrefix(filesRef, "refs/heads/") {
-			branchName := strings.TrimPrefix(filesRef, "refs/heads/")
-			filesRef = "snap." + branchName
-		} else if filesRef == "" {
-			filesRef = "snap.main"
-		}
-		filesURL = fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
-	}
-
+	filesURL := fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
 	resp, err := http.Get(filesURL)
 	if err != nil {
-		return fmt.Errorf("failed to fetch files: %w", err)
+		return nil // Network error, skip sync
 	}
 	defer resp.Body.Close()
 
+	// If that failed, try getting head snapshot from latest changeset
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch files: status %d", resp.StatusCode)
+		csURL := fmt.Sprintf("%s/%s/%s/v1/changesets/latest", shardURL, orgSlug, repoName)
+		csResp, err := http.Get(csURL)
+		if err != nil {
+			return nil // Can't get changeset, skip sync
+		}
+		defer csResp.Body.Close()
+
+		if csResp.StatusCode != http.StatusOK {
+			return nil // No changeset, skip sync
+		}
+
+		var csData struct {
+			Head string `json:"head"`
+		}
+		if err := json.NewDecoder(csResp.Body).Decode(&csData); err != nil || csData.Head == "" {
+			return nil // Can't parse changeset, skip sync
+		}
+
+		// Try with head snapshot
+		filesURL = fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, csData.Head)
+		resp, err = http.Get(filesURL)
+		if err != nil {
+			return nil
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil // Still can't get files, skip sync
+		}
 	}
 
 	var filesResp struct {
