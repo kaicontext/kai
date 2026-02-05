@@ -717,15 +717,42 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 		return fmt.Errorf("no shard configured")
 	}
 
-	// Fetch files from the data plane - convert refs/heads/main to snap.main
-	filesRef := ref
-	if strings.HasPrefix(filesRef, "refs/heads/") {
-		branchName := strings.TrimPrefix(filesRef, "refs/heads/")
-		filesRef = "snap." + branchName
-	} else if filesRef == "" {
-		filesRef = "snap.main" // Default to main branch
+	// First, try to get the head snapshot from cs.latest (latest changeset)
+	// This handles the case where snap.main points to a changeset instead of snapshot
+	csURL := fmt.Sprintf("%s/%s/%s/v1/changeset/cs.latest", shardURL, orgSlug, repoName)
+	csResp, err := http.Get(csURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch changeset: %w", err)
 	}
-	filesURL := fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
+	defer csResp.Body.Close()
+
+	var headSnapshot string
+	if csResp.StatusCode == http.StatusOK {
+		var csData struct {
+			Head string `json:"head"`
+		}
+		if err := json.NewDecoder(csResp.Body).Decode(&csData); err == nil && csData.Head != "" {
+			headSnapshot = csData.Head
+		}
+	}
+
+	// Use the head snapshot from changeset if available, otherwise try snap.main
+	var filesURL string
+	if headSnapshot != "" {
+		// Use the snapshot digest directly
+		filesURL = fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, headSnapshot)
+	} else {
+		// Fallback to snap.main
+		filesRef := ref
+		if strings.HasPrefix(filesRef, "refs/heads/") {
+			branchName := strings.TrimPrefix(filesRef, "refs/heads/")
+			filesRef = "snap." + branchName
+		} else if filesRef == "" {
+			filesRef = "snap.main"
+		}
+		filesURL = fmt.Sprintf("%s/%s/%s/v1/files/%s", shardURL, orgSlug, repoName, filesRef)
+	}
+
 	resp, err := http.Get(filesURL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch files: %w", err)
