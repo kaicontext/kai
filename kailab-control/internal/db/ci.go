@@ -16,9 +16,17 @@ func (db *DB) CreateWorkflow(repoID, path, name, contentHash, parsedJSON string,
 	now := time.Now().Unix()
 	triggersJSON, _ := json.Marshal(triggers)
 
+	// PostgreSQL expects boolean true, SQLite expects integer 1
+	var activeVal interface{}
+	if db.driver == DriverPostgres {
+		activeVal = true
+	} else {
+		activeVal = 1
+	}
+
 	_, err := db.exec(
 		"INSERT INTO workflows (id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id, repoID, path, name, contentHash, parsedJSON, string(triggersJSON), 1, now, now,
+		id, repoID, path, name, contentHash, parsedJSON, string(triggersJSON), activeVal, now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -30,7 +38,7 @@ func (db *DB) CreateWorkflow(repoID, path, name, contentHash, parsedJSON string,
 func (db *DB) GetWorkflowByID(id string) (*model.Workflow, error) {
 	var w model.Workflow
 	var triggersJSON string
-	var active int
+	var active bool
 	var createdAt, updatedAt int64
 
 	err := db.queryRow(
@@ -44,7 +52,7 @@ func (db *DB) GetWorkflowByID(id string) (*model.Workflow, error) {
 		return nil, err
 	}
 
-	w.Active = active == 1
+	w.Active = active
 	w.CreatedAt = time.Unix(createdAt, 0)
 	w.UpdatedAt = time.Unix(updatedAt, 0)
 	json.Unmarshal([]byte(triggersJSON), &w.Triggers)
@@ -55,7 +63,7 @@ func (db *DB) GetWorkflowByID(id string) (*model.Workflow, error) {
 func (db *DB) GetWorkflowByRepoAndPath(repoID, path string) (*model.Workflow, error) {
 	var w model.Workflow
 	var triggersJSON string
-	var active int
+	var active bool
 	var createdAt, updatedAt int64
 
 	err := db.queryRow(
@@ -69,7 +77,7 @@ func (db *DB) GetWorkflowByRepoAndPath(repoID, path string) (*model.Workflow, er
 		return nil, err
 	}
 
-	w.Active = active == 1
+	w.Active = active
 	w.CreatedAt = time.Unix(createdAt, 0)
 	w.UpdatedAt = time.Unix(updatedAt, 0)
 	json.Unmarshal([]byte(triggersJSON), &w.Triggers)
@@ -91,13 +99,13 @@ func (db *DB) ListRepoWorkflows(repoID string) ([]*model.Workflow, error) {
 	for rows.Next() {
 		var w model.Workflow
 		var triggersJSON string
-		var active int
+		var active bool
 		var createdAt, updatedAt int64
 
 		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Name, &w.ContentHash, &w.ParsedJSON, &triggersJSON, &active, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		w.Active = active == 1
+		w.Active = active
 		w.CreatedAt = time.Unix(createdAt, 0)
 		w.UpdatedAt = time.Unix(updatedAt, 0)
 		json.Unmarshal([]byte(triggersJSON), &w.Triggers)
@@ -109,8 +117,15 @@ func (db *DB) ListRepoWorkflows(repoID string) ([]*model.Workflow, error) {
 // ListActiveWorkflowsByTrigger lists active workflows that match a trigger type.
 func (db *DB) ListActiveWorkflowsByTrigger(repoID, trigger string) ([]*model.Workflow, error) {
 	// JSON array search - works for both SQLite and PostgreSQL
+	// Note: PostgreSQL uses BOOLEAN for active column, SQLite uses INTEGER
+	var query string
+	if db.driver == DriverPostgres {
+		query = "SELECT id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at FROM workflows WHERE repo_id = ? AND active = true AND triggers LIKE ?"
+	} else {
+		query = "SELECT id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at FROM workflows WHERE repo_id = ? AND active = 1 AND triggers LIKE ?"
+	}
 	rows, err := db.query(
-		"SELECT id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at FROM workflows WHERE repo_id = ? AND active = 1 AND triggers LIKE ?",
+		query,
 		repoID, "%\""+trigger+"\"%",
 	)
 	if err != nil {
@@ -122,13 +137,13 @@ func (db *DB) ListActiveWorkflowsByTrigger(repoID, trigger string) ([]*model.Wor
 	for rows.Next() {
 		var w model.Workflow
 		var triggersJSON string
-		var active int
+		var active bool
 		var createdAt, updatedAt int64
 
 		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Name, &w.ContentHash, &w.ParsedJSON, &triggersJSON, &active, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		w.Active = active == 1
+		w.Active = active
 		w.CreatedAt = time.Unix(createdAt, 0)
 		w.UpdatedAt = time.Unix(updatedAt, 0)
 		json.Unmarshal([]byte(triggersJSON), &w.Triggers)
@@ -141,14 +156,22 @@ func (db *DB) ListActiveWorkflowsByTrigger(repoID, trigger string) ([]*model.Wor
 func (db *DB) UpdateWorkflow(id, name, contentHash, parsedJSON string, triggers []string, active bool) error {
 	now := time.Now().Unix()
 	triggersJSON, _ := json.Marshal(triggers)
-	activeInt := 0
-	if active {
-		activeInt = 1
+
+	// PostgreSQL expects boolean, SQLite expects integer
+	var activeVal interface{}
+	if db.driver == DriverPostgres {
+		activeVal = active
+	} else {
+		activeInt := 0
+		if active {
+			activeInt = 1
+		}
+		activeVal = activeInt
 	}
 
 	_, err := db.exec(
 		"UPDATE workflows SET name = ?, content_hash = ?, parsed_json = ?, triggers = ?, active = ?, updated_at = ? WHERE id = ?",
-		name, contentHash, parsedJSON, string(triggersJSON), activeInt, now, id,
+		name, contentHash, parsedJSON, string(triggersJSON), activeVal, now, id,
 	)
 	return err
 }

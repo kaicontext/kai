@@ -38,7 +38,10 @@
       "Bash(git remote add:*)",
       "Bash(/Users/jacobschatz/projects/kai/kai-cli/kai push --help)",
       "Bash(/Users/jacobschatz/projects/kai/kai-cli/kai:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(ssh-keygen:*)",
+      "Bash(ssh-keyscan:*)",
+      "Bash(~/.ssh/known_hosts)"
     ],
     "deny": [],
     "ask": []
