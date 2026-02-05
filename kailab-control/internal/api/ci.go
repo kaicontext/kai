@@ -1,0 +1,1087 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"kailab-control/internal/db"
+	"kailab-control/internal/model"
+	"kailab-control/internal/workflow"
+)
+
+// ----- Workflow Types -----
+
+type WorkflowResponse struct {
+	ID          string   `json:"id"`
+	Path        string   `json:"path"`
+	Name        string   `json:"name"`
+	Triggers    []string `json:"triggers"`
+	Active      bool     `json:"active"`
+	ContentHash string   `json:"content_hash"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+type ListWorkflowsResponse struct {
+	Workflows []WorkflowResponse `json:"workflows"`
+}
+
+func workflowToResponse(w *model.Workflow) WorkflowResponse {
+	return WorkflowResponse{
+		ID:          w.ID,
+		Path:        w.Path,
+		Name:        w.Name,
+		Triggers:    w.Triggers,
+		Active:      w.Active,
+		ContentHash: w.ContentHash,
+		CreatedAt:   w.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   w.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+// ListWorkflows lists all workflows for a repository.
+func (h *Handler) ListWorkflows(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+
+	workflows, err := h.db.ListRepoWorkflows(repo.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workflows", err)
+		return
+	}
+
+	resp := ListWorkflowsResponse{Workflows: make([]WorkflowResponse, len(workflows))}
+	for i, wf := range workflows {
+		resp.Workflows[i] = workflowToResponse(wf)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// SyncWorkflowsRequest syncs workflows from the repository.
+type SyncWorkflowsRequest struct {
+	Files map[string]string `json:"files"` // path -> content
+}
+
+type SyncWorkflowsResponse struct {
+	Synced  []string `json:"synced"`
+	Errors  []string `json:"errors"`
+	Removed []string `json:"removed"`
+}
+
+// SyncWorkflows syncs workflow files from the repository.
+func (h *Handler) SyncWorkflows(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	user := UserFromContext(r.Context())
+
+	var req SyncWorkflowsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	resp := SyncWorkflowsResponse{
+		Synced:  []string{},
+		Errors:  []string{},
+		Removed: []string{},
+	}
+
+	// Get existing workflows
+	existing, err := h.db.ListRepoWorkflows(repo.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workflows", err)
+		return
+	}
+	existingByPath := make(map[string]*model.Workflow)
+	for _, wf := range existing {
+		existingByPath[wf.Path] = wf
+	}
+
+	// Process each file
+	processedPaths := make(map[string]bool)
+	for path, content := range req.Files {
+		processedPaths[path] = true
+
+		// Parse workflow
+		wf, err := workflow.Parse([]byte(content))
+		if err != nil {
+			resp.Errors = append(resp.Errors, path+": "+err.Error())
+			continue
+		}
+
+		contentHash := workflow.ContentHash([]byte(content))
+		parsedJSON, _ := wf.ToJSON()
+		triggers := wf.GetTriggerTypes()
+
+		// Check if workflow exists
+		if existing, ok := existingByPath[path]; ok {
+			// Update if content changed
+			if existing.ContentHash != contentHash {
+				if err := h.db.UpdateWorkflow(existing.ID, wf.Name, contentHash, parsedJSON, triggers, true); err != nil {
+					resp.Errors = append(resp.Errors, path+": "+err.Error())
+					continue
+				}
+			}
+		} else {
+			// Create new workflow
+			_, err := h.db.CreateWorkflow(repo.ID, path, wf.Name, contentHash, parsedJSON, triggers)
+			if err != nil {
+				resp.Errors = append(resp.Errors, path+": "+err.Error())
+				continue
+			}
+		}
+		resp.Synced = append(resp.Synced, path)
+	}
+
+	// Mark workflows not in the sync as inactive (soft delete)
+	for path, wf := range existingByPath {
+		if !processedPaths[path] {
+			if err := h.db.UpdateWorkflow(wf.ID, wf.Name, wf.ContentHash, wf.ParsedJSON, wf.Triggers, false); err == nil {
+				resp.Removed = append(resp.Removed, path)
+			}
+		}
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "workflow.sync", "repo", repo.ID, map[string]string{
+		"synced_count": strconv.Itoa(len(resp.Synced)),
+	})
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ----- Workflow Runs -----
+
+type WorkflowRunResponse struct {
+	ID           string `json:"id"`
+	WorkflowID   string `json:"workflow_id"`
+	WorkflowName string `json:"workflow_name,omitempty"`
+	WorkflowPath string `json:"workflow_path,omitempty"`
+	RunNumber    int    `json:"run_number"`
+	TriggerEvent string `json:"trigger_event"`
+	TriggerRef   string `json:"trigger_ref,omitempty"`
+	TriggerSHA   string `json:"trigger_sha,omitempty"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion,omitempty"`
+	StartedAt    string `json:"started_at,omitempty"`
+	CompletedAt  string `json:"completed_at,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	CreatedBy    string `json:"created_by,omitempty"`
+}
+
+type ListWorkflowRunsResponse struct {
+	Runs []WorkflowRunResponse `json:"runs"`
+}
+
+func workflowRunToResponse(r *model.WorkflowRunWithDetails) WorkflowRunResponse {
+	resp := WorkflowRunResponse{
+		ID:           r.ID,
+		WorkflowID:   r.WorkflowID,
+		WorkflowName: r.WorkflowName,
+		WorkflowPath: r.WorkflowPath,
+		RunNumber:    r.RunNumber,
+		TriggerEvent: r.TriggerEvent,
+		TriggerRef:   r.TriggerRef,
+		TriggerSHA:   r.TriggerSHA,
+		Status:       r.Status,
+		Conclusion:   r.Conclusion,
+		CreatedAt:    r.CreatedAt.Format(time.RFC3339),
+		CreatedBy:    r.CreatedBy,
+	}
+	if !r.StartedAt.IsZero() {
+		resp.StartedAt = r.StartedAt.Format(time.RFC3339)
+	}
+	if !r.CompletedAt.IsZero() {
+		resp.CompletedAt = r.CompletedAt.Format(time.RFC3339)
+	}
+	return resp
+}
+
+// ListWorkflowRuns lists workflow runs for a repository.
+func (h *Handler) ListWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	runs, err := h.db.ListRepoWorkflowRuns(repo.ID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list runs", err)
+		return
+	}
+
+	resp := ListWorkflowRunsResponse{Runs: make([]WorkflowRunResponse, len(runs))}
+	for i, run := range runs {
+		resp.Runs[i] = workflowRunToResponse(run)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// GetWorkflowRun gets a workflow run by ID.
+func (h *Handler) GetWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+
+	run, err := h.db.GetWorkflowRunByID(runID)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "run not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get run", err)
+		return
+	}
+
+	// Get workflow details
+	wf, _ := h.db.GetWorkflowByID(run.WorkflowID)
+	details := &model.WorkflowRunWithDetails{WorkflowRun: *run}
+	if wf != nil {
+		details.WorkflowName = wf.Name
+		details.WorkflowPath = wf.Path
+	}
+
+	writeJSON(w, http.StatusOK, workflowRunToResponse(details))
+}
+
+// DispatchWorkflowRequest triggers a workflow manually.
+type DispatchWorkflowRequest struct {
+	Ref    string            `json:"ref"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+}
+
+// DispatchWorkflow triggers a workflow manually.
+func (h *Handler) DispatchWorkflow(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	user := UserFromContext(r.Context())
+	workflowID := r.PathValue("workflow_id")
+
+	var req DispatchWorkflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	wf, err := h.db.GetWorkflowByID(workflowID)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "workflow not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get workflow", err)
+		return
+	}
+
+	// Check workflow belongs to this repo
+	if wf.RepoID != repo.ID {
+		writeError(w, http.StatusNotFound, "workflow not found", nil)
+		return
+	}
+
+	// Check workflow has workflow_dispatch trigger
+	hasDispatch := false
+	for _, t := range wf.Triggers {
+		if t == "workflow_dispatch" {
+			hasDispatch = true
+			break
+		}
+	}
+	if !hasDispatch {
+		writeError(w, http.StatusBadRequest, "workflow does not support manual dispatch", nil)
+		return
+	}
+
+	// Create payload
+	payload := map[string]interface{}{
+		"inputs": req.Inputs,
+	}
+	payloadJSON, _ := json.Marshal(payload)
+
+	// Create workflow run
+	run, err := h.db.CreateWorkflowRun(wf.ID, repo.ID, model.TriggerWorkflowDispatch, req.Ref, "", string(payloadJSON), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create run", err)
+		return
+	}
+
+	// Create jobs from workflow
+	if err := h.createJobsFromWorkflow(wf, run); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create jobs", err)
+		return
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "workflow.dispatch", "workflow_run", run.ID, map[string]string{
+		"workflow_id": wf.ID,
+		"ref":         req.Ref,
+	})
+
+	details := &model.WorkflowRunWithDetails{WorkflowRun: *run, WorkflowName: wf.Name, WorkflowPath: wf.Path}
+	writeJSON(w, http.StatusCreated, workflowRunToResponse(details))
+}
+
+// CancelWorkflowRun cancels a running workflow.
+func (h *Handler) CancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+	user := UserFromContext(r.Context())
+
+	run, err := h.db.GetWorkflowRunByID(runID)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "run not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get run", err)
+		return
+	}
+
+	if run.Status == model.RunStatusCompleted {
+		writeError(w, http.StatusBadRequest, "run already completed", nil)
+		return
+	}
+
+	if err := h.db.CompleteWorkflowRun(runID, model.ConclusionCancelled); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to cancel run", err)
+		return
+	}
+
+	// Cancel all pending/in-progress jobs
+	jobs, _ := h.db.ListWorkflowRunJobs(runID)
+	for _, job := range jobs {
+		if job.Status != model.JobStatusCompleted {
+			h.db.CompleteJob(job.ID, model.ConclusionCancelled)
+		}
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "workflow.cancel", "workflow_run", runID, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// RerunWorkflowRun re-runs a workflow.
+func (h *Handler) RerunWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	user := UserFromContext(r.Context())
+	runID := r.PathValue("run_id")
+
+	run, err := h.db.GetWorkflowRunByID(runID)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "run not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get run", err)
+		return
+	}
+
+	wf, err := h.db.GetWorkflowByID(run.WorkflowID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get workflow", err)
+		return
+	}
+
+	// Create new run with same trigger info
+	newRun, err := h.db.CreateWorkflowRun(wf.ID, repo.ID, run.TriggerEvent, run.TriggerRef, run.TriggerSHA, run.TriggerPayload, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create run", err)
+		return
+	}
+
+	// Create jobs from workflow
+	if err := h.createJobsFromWorkflow(wf, newRun); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create jobs", err)
+		return
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "workflow.rerun", "workflow_run", newRun.ID, map[string]string{
+		"original_run_id": runID,
+	})
+
+	details := &model.WorkflowRunWithDetails{WorkflowRun: *newRun, WorkflowName: wf.Name, WorkflowPath: wf.Path}
+	writeJSON(w, http.StatusCreated, workflowRunToResponse(details))
+}
+
+// ----- Jobs -----
+
+type JobResponse struct {
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Status       string         `json:"status"`
+	Conclusion   string         `json:"conclusion,omitempty"`
+	RunnerName   string         `json:"runner_name,omitempty"`
+	MatrixValues map[string]any `json:"matrix_values,omitempty"`
+	StartedAt    string         `json:"started_at,omitempty"`
+	CompletedAt  string         `json:"completed_at,omitempty"`
+	CreatedAt    string         `json:"created_at"`
+	Steps        []StepResponse `json:"steps,omitempty"`
+}
+
+type StepResponse struct {
+	Number      int    `json:"number"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+type ListJobsResponse struct {
+	Jobs []JobResponse `json:"jobs"`
+}
+
+func jobToResponse(j *model.Job, steps []*model.Step) JobResponse {
+	resp := JobResponse{
+		ID:         j.ID,
+		Name:       j.Name,
+		Status:     j.Status,
+		Conclusion: j.Conclusion,
+		RunnerName: j.RunnerName,
+		CreatedAt:  j.CreatedAt.Format(time.RFC3339),
+	}
+	if !j.StartedAt.IsZero() {
+		resp.StartedAt = j.StartedAt.Format(time.RFC3339)
+	}
+	if !j.CompletedAt.IsZero() {
+		resp.CompletedAt = j.CompletedAt.Format(time.RFC3339)
+	}
+	if j.MatrixValues != "" {
+		json.Unmarshal([]byte(j.MatrixValues), &resp.MatrixValues)
+	}
+
+	if steps != nil {
+		resp.Steps = make([]StepResponse, len(steps))
+		for i, s := range steps {
+			resp.Steps[i] = StepResponse{
+				Number:     s.Number,
+				Name:       s.Name,
+				Status:     s.Status,
+				Conclusion: s.Conclusion,
+			}
+			if !s.StartedAt.IsZero() {
+				resp.Steps[i].StartedAt = s.StartedAt.Format(time.RFC3339)
+			}
+			if !s.CompletedAt.IsZero() {
+				resp.Steps[i].CompletedAt = s.CompletedAt.Format(time.RFC3339)
+			}
+		}
+	}
+
+	return resp
+}
+
+// ListJobs lists jobs for a workflow run.
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+
+	jobs, err := h.db.ListWorkflowRunJobs(runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list jobs", err)
+		return
+	}
+
+	resp := ListJobsResponse{Jobs: make([]JobResponse, len(jobs))}
+	for i, job := range jobs {
+		steps, _ := h.db.ListJobSteps(job.ID)
+		resp.Jobs[i] = jobToResponse(job, steps)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// GetJobLogs gets logs for a job.
+func (h *Handler) GetJobLogs(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	// Support streaming via ?after=N
+	afterSeq := -1
+	if after := r.URL.Query().Get("after"); after != "" {
+		if parsed, err := strconv.Atoi(after); err == nil {
+			afterSeq = parsed
+		}
+	}
+
+	var logs []*model.JobLog
+	var err error
+	if afterSeq >= 0 {
+		logs, err = h.db.GetJobLogsSince(jobID, afterSeq)
+	} else {
+		logs, err = h.db.GetJobLogs(jobID)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get logs", err)
+		return
+	}
+
+	// Return logs as JSON array
+	type LogEntry struct {
+		ChunkSeq  int    `json:"chunk_seq"`
+		StepID    string `json:"step_id,omitempty"`
+		Content   string `json:"content"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	entries := make([]LogEntry, len(logs))
+	for i, log := range logs {
+		entries[i] = LogEntry{
+			ChunkSeq:  log.ChunkSeq,
+			StepID:    log.StepID,
+			Content:   log.Content,
+			Timestamp: log.Timestamp.Format(time.RFC3339),
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs": entries,
+	})
+}
+
+// ----- Artifacts -----
+
+type ArtifactResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	JobID     string `json:"job_id"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+type ListArtifactsResponse struct {
+	Artifacts []ArtifactResponse `json:"artifacts"`
+}
+
+// ListArtifacts lists artifacts for a workflow run.
+func (h *Handler) ListArtifacts(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("run_id")
+
+	artifacts, err := h.db.ListWorkflowRunArtifacts(runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list artifacts", err)
+		return
+	}
+
+	resp := ListArtifactsResponse{Artifacts: make([]ArtifactResponse, len(artifacts))}
+	for i, a := range artifacts {
+		resp.Artifacts[i] = ArtifactResponse{
+			ID:        a.ID,
+			Name:      a.Name,
+			Size:      a.Size,
+			JobID:     a.JobID,
+			CreatedAt: a.CreatedAt.Format(time.RFC3339),
+		}
+		if !a.ExpiresAt.IsZero() {
+			resp.Artifacts[i].ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ----- Secrets -----
+
+type SecretResponse struct {
+	Name      string `json:"name"`
+	Scope     string `json:"scope"` // "repo" or "org"
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type ListSecretsResponse struct {
+	Secrets []SecretResponse `json:"secrets"`
+}
+
+// ListSecrets lists secrets for a repository.
+func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	org := OrgFromContext(r.Context())
+
+	secrets, err := h.db.ListRepoSecrets(repo.ID, org.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list secrets", err)
+		return
+	}
+
+	resp := ListSecretsResponse{Secrets: make([]SecretResponse, len(secrets))}
+	for i, s := range secrets {
+		scope := "repo"
+		if s.RepoID == "" {
+			scope = "org"
+		}
+		resp.Secrets[i] = SecretResponse{
+			Name:      s.Name,
+			Scope:     scope,
+			CreatedAt: s.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type SetSecretRequest struct {
+	Value string `json:"value"`
+}
+
+// SetSecret creates or updates a secret.
+func (h *Handler) SetSecret(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	user := UserFromContext(r.Context())
+	secretName := r.PathValue("secret_name")
+
+	var req SetSecretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if secretName == "" || len(req.Value) == 0 {
+		writeError(w, http.StatusBadRequest, "name and value are required", nil)
+		return
+	}
+
+	// TODO: Encrypt the secret value properly
+	// For now, we'll store it as-is (in production, use proper encryption)
+	encrypted := []byte(req.Value)
+
+	// Check if secret exists
+	existing, err := h.db.GetWorkflowSecretByName(repo.ID, "", secretName)
+	if err == nil {
+		// Update existing
+		if err := h.db.UpdateWorkflowSecret(existing.ID, encrypted); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update secret", err)
+			return
+		}
+	} else if err == db.ErrNotFound {
+		// Create new
+		_, err := h.db.CreateWorkflowSecret(repo.ID, "", secretName, encrypted, user.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create secret", err)
+			return
+		}
+	} else {
+		writeError(w, http.StatusInternalServerError, "failed to check secret", err)
+		return
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "secret.set", "repo", repo.ID, map[string]string{
+		"name": secretName,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// DeleteSecret deletes a secret.
+func (h *Handler) DeleteSecret(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	user := UserFromContext(r.Context())
+	secretName := r.PathValue("secret_name")
+
+	secret, err := h.db.GetWorkflowSecretByName(repo.ID, "", secretName)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "secret not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get secret", err)
+		return
+	}
+
+	if err := h.db.DeleteWorkflowSecret(secret.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete secret", err)
+		return
+	}
+
+	org := OrgFromContext(r.Context())
+	h.db.WriteAudit(&org.ID, &user.ID, "secret.delete", "repo", repo.ID, map[string]string{
+		"name": secretName,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ----- Internal Endpoints (for runner and kailabd) -----
+
+// TriggerCIRequest is sent by kailabd to trigger CI workflows.
+type TriggerCIRequest struct {
+	Repo    string                 `json:"repo"`    // org/repo format
+	Event   string                 `json:"event"`   // push, review_created, etc.
+	Ref     string                 `json:"ref"`     // refs/heads/main
+	SHA     string                 `json:"sha"`     // Commit SHA
+	Payload map[string]interface{} `json:"payload"` // Event-specific data
+}
+
+type TriggerCIResponse struct {
+	Runs []string `json:"runs"` // Created run IDs
+}
+
+// TriggerCI handles CI trigger requests from kailabd.
+func (h *Handler) TriggerCI(w http.ResponseWriter, r *http.Request) {
+	var req TriggerCIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Parse org/repo
+	parts := strings.SplitN(req.Repo, "/", 2)
+	if len(parts) != 2 {
+		writeError(w, http.StatusBadRequest, "invalid repo format", nil)
+		return
+	}
+	orgSlug, repoName := parts[0], parts[1]
+
+	// Get org and repo
+	org, err := h.db.GetOrgBySlug(orgSlug)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "org not found", nil)
+		return
+	}
+
+	repo, err := h.db.GetRepoByOrgAndName(org.ID, repoName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "repo not found", nil)
+		return
+	}
+
+	// Find matching workflows
+	var triggerType string
+	switch req.Event {
+	case "push":
+		triggerType = "push"
+	case "review_created":
+		triggerType = "review"
+	case "review_updated":
+		triggerType = "review"
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported event type", nil)
+		return
+	}
+
+	workflows, err := h.db.ListActiveWorkflowsByTrigger(repo.ID, triggerType)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workflows", err)
+		return
+	}
+
+	// Filter workflows by trigger rules
+	payloadJSON, _ := json.Marshal(req.Payload)
+	triggerEvent := &workflow.TriggerEvent{
+		Type:    req.Event,
+		Ref:     req.Ref,
+		SHA:     req.SHA,
+		Payload: req.Payload,
+	}
+
+	var runIDs []string
+	for _, wf := range workflows {
+		// Parse workflow to check trigger rules
+		parsedWF, err := workflow.FromJSON(wf.ParsedJSON)
+		if err != nil {
+			continue
+		}
+
+		if !parsedWF.MatchTrigger(triggerEvent) {
+			continue
+		}
+
+		// Create workflow run
+		run, err := h.db.CreateWorkflowRun(wf.ID, repo.ID, req.Event, req.Ref, req.SHA, string(payloadJSON), "")
+		if err != nil {
+			continue
+		}
+
+		// Create jobs from workflow
+		if err := h.createJobsFromWorkflow(wf, run); err != nil {
+			continue
+		}
+
+		runIDs = append(runIDs, run.ID)
+	}
+
+	writeJSON(w, http.StatusOK, TriggerCIResponse{Runs: runIDs})
+}
+
+// ClaimJobRequest is sent by runners to claim a job.
+type ClaimJobRequest struct {
+	Labels []string `json:"labels"`
+}
+
+// ClaimJob allows a runner to claim the next available job.
+func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
+	runnerID := r.PathValue("runner_id")
+
+	var req ClaimJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Update runner status
+	h.db.UpdateRunnerStatus(runnerID, model.RunnerStatusOnline)
+
+	// Try to claim a job
+	job, err := h.db.ClaimJob(runnerID, req.Labels)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to claim job", err)
+		return
+	}
+
+	if job == nil {
+		// No jobs available
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"job": nil,
+		})
+		return
+	}
+
+	// Get full context for the job
+	run, _ := h.db.GetWorkflowRunByID(job.WorkflowRunID)
+	wf, _ := h.db.GetWorkflowByID(run.WorkflowID)
+	steps, _ := h.db.ListJobSteps(job.ID)
+
+	// Get secrets
+	repo, _ := h.db.GetRepoByID(run.RepoID)
+	org, _ := h.db.GetOrgByID(repo.OrgID)
+	secrets, _ := h.db.ListRepoSecrets(repo.ID, org.ID)
+
+	// Build context
+	context := map[string]interface{}{
+		"repo":   org.Slug + "/" + repo.Name,
+		"ref":    run.TriggerRef,
+		"sha":    run.TriggerSHA,
+		"event":  run.TriggerEvent,
+		"run_id": run.ID,
+	}
+
+	// Add secrets (decrypted - TODO: proper decryption)
+	secretsMap := make(map[string]string)
+	for _, s := range secrets {
+		secretsMap[s.Name] = string(s.Encrypted)
+	}
+	context["secrets"] = secretsMap
+
+	writeJSON(w, http.StatusOK, model.JobClaimResponse{
+		Job:         job,
+		WorkflowRun: run,
+		Workflow:    wf,
+		Steps:       stepsToModels(steps),
+		Context:     context,
+	})
+}
+
+func stepsToModels(steps []*model.Step) []model.Step {
+	result := make([]model.Step, len(steps))
+	for i, s := range steps {
+		result[i] = *s
+	}
+	return result
+}
+
+// StartJobRequest marks a job as started.
+type StartJobRequest struct {
+	RunnerName string `json:"runner_name"`
+}
+
+// StartJob marks a job as started by a runner.
+func (h *Handler) StartJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	var req StartJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if err := h.db.StartJob(jobID, req.RunnerName); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start job", err)
+		return
+	}
+
+	// Also mark the workflow run as in progress if it's queued
+	job, _ := h.db.GetJobByID(jobID)
+	if job != nil {
+		run, _ := h.db.GetWorkflowRunByID(job.WorkflowRunID)
+		if run != nil && run.Status == model.RunStatusQueued {
+			h.db.UpdateWorkflowRunStatus(run.ID, model.RunStatusInProgress)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// AppendLogsRequest appends logs to a job.
+type AppendLogsRequest struct {
+	StepID  string `json:"step_id,omitempty"`
+	Content string `json:"content"`
+}
+
+// AppendLogs appends logs to a job.
+func (h *Handler) AppendLogs(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	var req AppendLogsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if err := h.db.AppendJobLog(jobID, req.StepID, req.Content); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to append logs", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// CompleteStepRequest marks a step as completed.
+type CompleteStepRequest struct {
+	Conclusion string `json:"conclusion"`
+}
+
+// CompleteStep marks a step as completed.
+func (h *Handler) CompleteStep(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+	stepNumber, _ := strconv.Atoi(r.PathValue("step_number"))
+
+	var req CompleteStepRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	step, err := h.db.GetStepByJobAndNumber(jobID, stepNumber)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "step not found", nil)
+		return
+	}
+
+	if err := h.db.CompleteStep(step.ID, req.Conclusion); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to complete step", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// CompleteJobRequest marks a job as completed.
+type CompleteJobRequest struct {
+	Conclusion string `json:"conclusion"`
+}
+
+// CompleteJob marks a job as completed by a runner.
+func (h *Handler) CompleteJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	var req CompleteJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if err := h.db.CompleteJob(jobID, req.Conclusion); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to complete job", err)
+		return
+	}
+
+	// Check if all jobs are complete and update workflow run
+	job, _ := h.db.GetJobByID(jobID)
+	if job != nil {
+		h.checkAndCompleteWorkflowRun(job.WorkflowRunID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ----- Helper Functions -----
+
+// createJobsFromWorkflow creates jobs and steps from a workflow definition.
+func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.WorkflowRun) error {
+	parsedWF, err := workflow.FromJSON(wf.ParsedJSON)
+	if err != nil {
+		return err
+	}
+
+	// Expand jobs with matrix
+	expandedJobs, err := workflow.ExpandJobsWithMatrix(parsedWF)
+	if err != nil {
+		return err
+	}
+
+	// Get job order
+	jobOrder, err := workflow.GetJobOrder(parsedWF)
+	if err != nil {
+		return err
+	}
+
+	// Create jobs in order
+	for _, jobKey := range jobOrder {
+		jobs := expandedJobs[jobKey]
+		for _, ej := range jobs {
+			// Create job
+			matrixJSON := ""
+			if len(ej.MatrixValues) > 0 {
+				b, _ := json.Marshal(ej.MatrixValues)
+				matrixJSON = string(b)
+			}
+
+			job, err := h.db.CreateJob(run.ID, ej.Name, []string(ej.Job.Needs), matrixJSON)
+			if err != nil {
+				return err
+			}
+
+			// Create steps
+			for i, step := range ej.Job.Steps {
+				name := step.GetDisplayName(i)
+				_, err := h.db.CreateStep(job.ID, i, name)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkAndCompleteWorkflowRun checks if all jobs are complete and updates the run.
+func (h *Handler) checkAndCompleteWorkflowRun(runID string) {
+	jobs, err := h.db.ListWorkflowRunJobs(runID)
+	if err != nil {
+		return
+	}
+
+	allComplete := true
+	anyFailed := false
+	anyCancelled := false
+
+	for _, job := range jobs {
+		if job.Status != model.JobStatusCompleted {
+			allComplete = false
+			break
+		}
+		if job.Conclusion == model.ConclusionFailure {
+			anyFailed = true
+		}
+		if job.Conclusion == model.ConclusionCancelled {
+			anyCancelled = true
+		}
+	}
+
+	if !allComplete {
+		return
+	}
+
+	var conclusion string
+	if anyFailed {
+		conclusion = model.ConclusionFailure
+	} else if anyCancelled {
+		conclusion = model.ConclusionCancelled
+	} else {
+		conclusion = model.ConclusionSuccess
+	}
+
+	h.db.CompleteWorkflowRun(runID, conclusion)
+}

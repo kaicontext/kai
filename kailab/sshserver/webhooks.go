@@ -99,6 +99,46 @@ func splitOrgRepo(repo string) []string {
 	return []string{repo}
 }
 
+// ciTriggerRequest is the request to trigger CI workflows.
+type ciTriggerRequest struct {
+	Repo    string                 `json:"repo"`
+	Event   string                 `json:"event"`
+	Ref     string                 `json:"ref"`
+	SHA     string                 `json:"sha"`
+	Payload map[string]interface{} `json:"payload"`
+}
+
+// NotifyCI notifies the control plane to trigger CI workflows.
+func (n *WebhookNotifier) NotifyCI(repo, event, ref, sha string, payload map[string]interface{}) error {
+	reqBody := ciTriggerRequest{
+		Repo:    repo,
+		Event:   event,
+		Ref:     ref,
+		SHA:     sha,
+		Payload: payload,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", n.baseURL+"/internal/ci/trigger", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// CI triggers are fire-and-forget from kailab's perspective
+	return nil
+}
+
 // trigger sends a webhook trigger request to the control plane.
 func (n *WebhookNotifier) trigger(repo, event string, payload map[string]interface{}) error {
 	reqBody := webhookTriggerRequest{

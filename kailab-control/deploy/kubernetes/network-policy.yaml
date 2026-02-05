@@ -1,0 +1,79 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kailab-runner-policy
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kailab-runner
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []  # Runner doesn't need inbound traffic
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow communication with Kubernetes API
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Allow communication with control plane
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: kailab
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kailab-ci-job-policy
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-ci
+    app.kubernetes.io/part-of: kailab
+spec:
+  podSelector:
+    matchLabels:
+      app: kailab-ci
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow outbound HTTPS (for fetching dependencies)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

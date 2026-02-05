@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kailab-runner
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kailab-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kailab-runner
+        app.kubernetes.io/part-of: kailab
+    spec:
+      serviceAccountName: kailab-runner
+      containers:
+        - name: runner
+          image: ghcr.io/kailayerhq/kailab-runner:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: kailab-runner-config
+            - secretRef:
+                name: kailab-runner-secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "pgrep kailab-runner"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

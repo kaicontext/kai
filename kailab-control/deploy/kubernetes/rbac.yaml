@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kailab-runner
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kailab-runner
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+rules:
+  # Manage pods for CI job execution
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # Stream logs from job pods
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Check pod status
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  # Manage secrets for pulling images (optional)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Manage configmaps for job configuration (optional)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "delete"]
+  # Manage persistent volume claims for caching (optional)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kailab-runner
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+subjects:
+  - kind: ServiceAccount
+    name: kailab-runner
+    namespace: kailab-ci
+roleRef:
+  kind: Role
+  name: kailab-runner
+  apiGroup: rbac.authorization.k8s.io

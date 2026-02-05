@@ -180,6 +180,14 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 	// Trigger webhooks asynchronously
 	if h.webhookNotifier != nil && len(updatedRefs) > 0 {
 		go h.webhookNotifier.NotifyPush(tenant+"/"+name, updatedRefs)
+		// Trigger CI for each updated ref
+		for _, ref := range updatedRefs {
+			// Get the SHA for this ref
+			sha := getRefSHA(handle.DB, ref)
+			go h.webhookNotifier.NotifyCI(tenant+"/"+name, "push", ref, sha, map[string]interface{}{
+				"refs": updatedRefs,
+			})
+		}
 	}
 	return nil
 }
@@ -198,6 +206,19 @@ func splitRepo(repoPath string) (tenant string, name string, err error) {
 		return "", "", fmt.Errorf("repo path must be tenant/repo")
 	}
 	return tenant, name, nil
+}
+
+// getRefSHA gets the SHA for a ref, returning empty string if not found.
+func getRefSHA(db *sql.DB, refName string) string {
+	if db == nil {
+		return ""
+	}
+	ref, err := store.GetRef(db, refName)
+	if err != nil {
+		return ""
+	}
+	// Target is []byte, convert to hex string
+	return fmt.Sprintf("%x", ref.Target)
 }
 
 func handleUploadPack(db *sql.DB, store ObjectStore, r io.Reader, w io.Writer) error {

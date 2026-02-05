@@ -171,11 +171,120 @@ func NewRouter(h *Handler) http.Handler {
 		h.WithAuth,
 	))
 
+	// CI Workflows (authenticated + org maintainer)
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/workflows", Chain(
+		http.HandlerFunc(h.ListWorkflows),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/workflows/sync", Chain(
+		http.HandlerFunc(h.SyncWorkflows),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/workflows/{workflow_id}/dispatch", Chain(
+		http.HandlerFunc(h.DispatchWorkflow),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("developer"),
+		h.WithRepo,
+	))
+
+	// CI Workflow Runs
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/runs", Chain(
+		http.HandlerFunc(h.ListWorkflowRuns),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}", Chain(
+		http.HandlerFunc(h.GetWorkflowRun),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}/cancel", Chain(
+		http.HandlerFunc(h.CancelWorkflowRun),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("developer"),
+		h.WithRepo,
+	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}/rerun", Chain(
+		http.HandlerFunc(h.RerunWorkflowRun),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("developer"),
+		h.WithRepo,
+	))
+
+	// CI Jobs
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}/jobs", Chain(
+		http.HandlerFunc(h.ListJobs),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}/jobs/{job_id}/logs", Chain(
+		http.HandlerFunc(h.GetJobLogs),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+
+	// CI Artifacts
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/runs/{run_id}/artifacts", Chain(
+		http.HandlerFunc(h.ListArtifacts),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+
+	// CI Secrets
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/secrets", Chain(
+		http.HandlerFunc(h.ListSecrets),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+	mux.Handle("PUT /api/v1/orgs/{org}/repos/{repo}/secrets/{secret_name}", Chain(
+		http.HandlerFunc(h.SetSecret),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+	mux.Handle("DELETE /api/v1/orgs/{org}/repos/{repo}/secrets/{secret_name}", Chain(
+		http.HandlerFunc(h.DeleteSecret),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+
 	// Internal endpoints (service-to-service)
 	mux.HandleFunc("POST /internal/ssh/verify", h.VerifySSHKey)
 	mux.HandleFunc("POST /internal/webhooks/trigger", h.TriggerWebhooks)
 	mux.HandleFunc("POST /internal/notify/comment", h.NotifyComment)
 	mux.HandleFunc("POST /internal/notify/review", h.NotifyReview)
+
+	// Internal CI endpoints (for runner)
+	mux.HandleFunc("POST /internal/ci/trigger", h.TriggerCI)
+	mux.HandleFunc("POST /internal/runners/{runner_id}/jobs/claim", h.ClaimJob)
+	mux.HandleFunc("POST /internal/jobs/{job_id}/start", h.StartJob)
+	mux.HandleFunc("POST /internal/jobs/{job_id}/logs", h.AppendLogs)
+	mux.HandleFunc("POST /internal/jobs/{job_id}/steps/{step_number}/complete", h.CompleteStep)
+	mux.HandleFunc("POST /internal/jobs/{job_id}/complete", h.CompleteJob)
 
 	// Wrap mux with web console fallback
 	return webConsoleFallback(mux)

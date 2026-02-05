@@ -153,11 +153,20 @@ func (h *Handler) notifyReviewCreated(rh *repo.Handle, refs []string) {
 		}
 
 		// Send notification asynchronously
-		go func(repo, reviewID, title, author string, reviewers []string) {
+		go func(repo, reviewID, title, author string, reviewers []string, refDigest string) {
 			if err := h.webhookNotifier.NotifyReviewCreated(repo, reviewID, title, author, reviewers); err != nil {
 				log.Printf("notify: review created notification failed: %v", err)
 			}
-		}(rh.Tenant+"/"+rh.Name, reviewID, payload.Title, payload.Author, payload.Reviewers)
+			// Trigger CI for review
+			if err := h.webhookNotifier.NotifyCI(repo, "review_created", refName, refDigest, map[string]interface{}{
+				"review_id": reviewID,
+				"title":     title,
+				"author":    author,
+				"state":     payload.State,
+			}); err != nil {
+				log.Printf("notify: CI trigger for review failed: %v", err)
+			}
+		}(rh.Tenant+"/"+rh.Name, reviewID, payload.Title, payload.Author, payload.Reviewers, fmt.Sprintf("%x", ref.Target))
 	}
 }
 
@@ -1772,7 +1781,7 @@ func computeUnifiedDiff(oldText, newText string) []DiffHunk {
 
 		for _, op := range group {
 			switch op.Tag {
-			case "equal":
+			case 'e': // "equal"
 				for i := 0; i < op.I2-op.I1; i++ {
 					oldIdx := op.I1 + i
 					newIdx := op.J1 + i
@@ -1785,7 +1794,7 @@ func computeUnifiedDiff(oldText, newText string) []DiffHunk {
 					hunk.OldLines++
 					hunk.NewLines++
 				}
-			case "delete":
+			case 'd': // "delete"
 				for i := op.I1; i < op.I2; i++ {
 					hunk.Lines = append(hunk.Lines, DiffLine{
 						Type:    "delete",
@@ -1794,7 +1803,7 @@ func computeUnifiedDiff(oldText, newText string) []DiffHunk {
 					})
 					hunk.OldLines++
 				}
-			case "insert":
+			case 'i': // "insert"
 				for j := op.J1; j < op.J2; j++ {
 					hunk.Lines = append(hunk.Lines, DiffLine{
 						Type:    "add",
@@ -1803,7 +1812,7 @@ func computeUnifiedDiff(oldText, newText string) []DiffHunk {
 					})
 					hunk.NewLines++
 				}
-			case "replace":
+			case 'r': // "replace"
 				for i := op.I1; i < op.I2; i++ {
 					hunk.Lines = append(hunk.Lines, DiffLine{
 						Type:    "delete",

@@ -1,0 +1,88 @@
+name: Deploy CI Runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/kailab-runner/**'
+      - 'internal/runner/**'
+      - 'deploy/kubernetes/**'
+      - '.github/workflows/deploy-runner.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: kailayerhq/kailab-runner
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/kubernetes/Dockerfile.runner
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Update image tag
+        run: |
+          cd deploy/kubernetes
+          kustomize edit set image ghcr.io/kailayerhq/kailab-runner=ghcr.io/kailayerhq/kailab-runner:${{ github.sha }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -k deploy/kubernetes/
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n kailab-ci rollout status deployment/kailab-runner --timeout=120s
+
+      - name: Verify deployment
+        run: |
+          kubectl -n kailab-ci get pods -l app.kubernetes.io/name=kailab-runner

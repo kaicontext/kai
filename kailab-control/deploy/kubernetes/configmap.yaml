@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kailab-runner-config
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-runner
+    app.kubernetes.io/part-of: kailab
+data:
+  # Runner configuration
+  KR_NAMESPACE: "kailab-ci"
+  KR_POLL_INTERVAL: "5s"
+  KR_LABELS: "linux,amd64"

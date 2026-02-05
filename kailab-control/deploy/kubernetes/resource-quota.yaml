@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kailab-ci-quota
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-ci
+    app.kubernetes.io/part-of: kailab
+spec:
+  hard:
+    # Limit total pods (runner + job pods)
+    pods: "20"
+    # Limit total CPU
+    requests.cpu: "10"
+    limits.cpu: "20"
+    # Limit total memory
+    requests.memory: "10Gi"
+    limits.memory: "20Gi"
+    # Limit persistent volume claims
+    persistentvolumeclaims: "10"
+    requests.storage: "50Gi"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: kailab-ci-limits
+  namespace: kailab-ci
+  labels:
+    app.kubernetes.io/name: kailab-ci
+    app.kubernetes.io/part-of: kailab
+spec:
+  limits:
+    # Default limits for job pods
+    - type: Container
+      default:
+        cpu: "1"
+        memory: "1Gi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "256Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+    # Limit pod count per job
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: "8Gi"

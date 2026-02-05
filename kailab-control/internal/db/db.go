@@ -38,6 +38,12 @@ var sqliteWebhooksSchema string
 //go:embed schema/0003_webhooks_pg.sql
 var postgresWebhooksSchema string
 
+//go:embed schema/0004_ci.sql
+var sqliteCISchema string
+
+//go:embed schema/0004_ci_pg.sql
+var postgresCISchema string
+
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -123,6 +129,10 @@ func (db *DB) initSQLite() error {
 	if _, err := db.DB.Exec(sqliteWebhooksSchema); err != nil {
 		return fmt.Errorf("running SQLite webhooks migrations: %w", err)
 	}
+	// Run CI schema
+	if _, err := db.DB.Exec(sqliteCISchema); err != nil {
+		return fmt.Errorf("running SQLite CI migrations: %w", err)
+	}
 	return nil
 }
 
@@ -139,6 +149,10 @@ func (db *DB) initPostgres() error {
 	// Run webhooks schema
 	if _, err := db.DB.Exec(postgresWebhooksSchema); err != nil {
 		return fmt.Errorf("running PostgreSQL webhooks migrations: %w", err)
+	}
+	// Run CI schema
+	if _, err := db.DB.Exec(postgresCISchema); err != nil {
+		return fmt.Errorf("running PostgreSQL CI migrations: %w", err)
 	}
 	return nil
 }
