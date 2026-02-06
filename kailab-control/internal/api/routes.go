@@ -278,6 +278,9 @@ func NewRouter(h *Handler) http.Handler {
 	mux.HandleFunc("POST /-/webhooks/trigger", h.TriggerWebhooks)
 	mux.HandleFunc("POST /-/notify/comment", h.NotifyComment)
 	mux.HandleFunc("POST /-/notify/review", h.NotifyReview)
+	mux.HandleFunc("POST /-/notify/pipeline", h.NotifyPipeline)
+	mux.HandleFunc("POST /-/notify/request-changes", h.NotifyRequestChanges)
+	mux.HandleFunc("POST /-/notify/review-state", h.NotifyReviewState)
 
 	// Internal CI endpoints (for runner)
 	// Note: Using fixed paths (no wildcards) to avoid conflict with /{org}/{repo}/v1/ pattern

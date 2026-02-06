@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,13 +11,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
-// Executor runs steps in Kubernetes pods.
+// Executor runs jobs in Kubernetes pods.
 type Executor struct {
 	client    *kubernetes.Clientset
+	config    *rest.Config
 	namespace string
 }
 
@@ -27,10 +30,8 @@ func NewExecutor(namespace, kubeconfig string) (*Executor, error) {
 	var err error
 
 	if kubeconfig != "" {
-		// Out-of-cluster config
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	} else {
-		// In-cluster config
 		config, err = rest.InClusterConfig()
 	}
 	if err != nil {
@@ -44,297 +45,327 @@ func NewExecutor(namespace, kubeconfig string) (*Executor, error) {
 
 	return &Executor{
 		client:    client,
+		config:    config,
 		namespace: namespace,
 	}, nil
 }
 
-// ExecutionRequest describes what to execute.
-type ExecutionRequest struct {
-	JobID     string
-	StepID    string
-	StepDef   *StepDefinition
-	Context   map[string]interface{}
-	LogWriter io.Writer
+// JobPod represents a running job pod.
+type JobPod struct {
+	Name      string
+	Namespace string
+	executor  *Executor
 }
 
-// ExecutionResult contains the result of an execution.
-type ExecutionResult struct {
-	ExitCode int
-	Output   string
-}
-
-// Execute runs a step in a Kubernetes pod.
-func (e *Executor) Execute(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
-	// Handle actions (uses:) vs run commands
-	if req.StepDef.Uses != "" {
-		return e.executeAction(ctx, req)
-	}
-
-	if req.StepDef.Run != "" {
-		return e.executeRun(ctx, req)
-	}
-
-	return &ExecutionResult{ExitCode: 0}, nil
-}
-
-// executeAction handles "uses:" steps.
-func (e *Executor) executeAction(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
-	action := req.StepDef.Uses
-
-	// Built-in actions
-	switch {
-	case strings.HasPrefix(action, "actions/checkout"):
-		return e.actionCheckout(ctx, req)
-	case strings.HasPrefix(action, "actions/setup-go"):
-		return e.actionSetupGo(ctx, req)
-	case strings.HasPrefix(action, "actions/setup-node"):
-		return e.actionSetupNode(ctx, req)
-	case strings.HasPrefix(action, "actions/cache"):
-		return e.actionCache(ctx, req)
-	default:
-		// Unknown action - log and skip
-		fmt.Fprintf(req.LogWriter, "Unknown action: %s (skipping)\n", action)
-		return &ExecutionResult{ExitCode: 0}, nil
-	}
-}
-
-// executeRun handles "run:" steps.
-func (e *Executor) executeRun(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
-	// Build environment variables
-	env := buildEnvVars(req.Context, req.StepDef.Env)
-
-	// Determine shell
-	shell := req.StepDef.Shell
-	if shell == "" {
-		shell = "bash"
-	}
-
-	// Create pod spec
-	podName := fmt.Sprintf("ci-%s-%s", sanitizeName(req.JobID), sanitizeName(req.StepID))
+// CreateJobPod creates a pod for executing a job's steps.
+func (e *Executor) CreateJobPod(ctx context.Context, jobID, jobName string, jobContext map[string]interface{}) (*JobPod, error) {
+	podName := fmt.Sprintf("ci-job-%s", sanitizeName(jobID))
 	if len(podName) > 63 {
 		podName = podName[:63]
 	}
 
 	// Get image from context or default
 	image := "ubuntu:22.04"
-	if img, ok := req.Context["image"].(string); ok && img != "" {
+	if img, ok := jobContext["image"].(string); ok && img != "" {
 		image = img
 	}
 
-	// Build the command
-	command := []string{shell, "-c", req.StepDef.Run}
+	// Build environment variables
+	env := buildEnvVars(jobContext, nil)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
 			Namespace: e.namespace,
 			Labels: map[string]string{
-				"app":    "kailab-ci",
-				"job-id": req.JobID,
+				"app":      "kailab-ci",
+				"job-id":   jobID,
+				"job-name": sanitizeName(jobName),
 			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
-					Name:            "step",
-					Image:           image,
-					Command:         command,
+					Name:  "job",
+					Image: image,
+					// Keep the container running so we can exec into it
+					Command:         []string{"sleep", "infinity"},
 					Env:             env,
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					WorkingDir:      req.StepDef.WorkingDir,
+					WorkingDir:      "/workspace",
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "workspace",
+							MountPath: "/workspace",
+						},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "workspace",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
 				},
 			},
 		},
 	}
 
 	// Create the pod
-	fmt.Fprintf(req.LogWriter, "Creating pod %s...\n", podName)
 	_, err := e.client.CoreV1().Pods(e.namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pod: %w", err)
+		return nil, fmt.Errorf("failed to create job pod: %w", err)
 	}
 
-	// Ensure pod is cleaned up
-	defer func() {
-		deletePolicy := metav1.DeletePropagationForeground
-		e.client.CoreV1().Pods(e.namespace).Delete(context.Background(), podName, metav1.DeleteOptions{
-			PropagationPolicy: &deletePolicy,
-		})
-	}()
-
-	// Wait for pod to complete
-	result, err := e.waitForPod(ctx, podName, req.LogWriter, req.StepDef.TimeoutMinutes)
-	if err != nil {
-		return nil, err
+	// Wait for pod to be running
+	if err := e.waitForPodRunning(ctx, podName); err != nil {
+		// Clean up on failure
+		e.deletePod(podName)
+		return nil, fmt.Errorf("pod failed to start: %w", err)
 	}
 
-	return result, nil
+	return &JobPod{
+		Name:      podName,
+		Namespace: e.namespace,
+		executor:  e,
+	}, nil
 }
 
-// waitForPod waits for a pod to complete and streams its logs.
-func (e *Executor) waitForPod(ctx context.Context, podName string, logWriter io.Writer, timeoutMinutes int) (*ExecutionResult, error) {
-	timeout := 60 * time.Minute
-	if timeoutMinutes > 0 {
-		timeout = time.Duration(timeoutMinutes) * time.Minute
-	}
-
+// waitForPodRunning waits for a pod to be in Running state.
+func (e *Executor) waitForPodRunning(ctx context.Context, podName string) error {
+	timeout := 5 * time.Minute
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Wait for pod to be running or completed
 	for {
 		pod, err := e.client.CoreV1().Pods(e.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get pod: %w", err)
+			return fmt.Errorf("failed to get pod: %w", err)
 		}
 
 		switch pod.Status.Phase {
-		case corev1.PodSucceeded:
-			// Stream logs
-			e.streamLogs(ctx, podName, logWriter)
-			return &ExecutionResult{ExitCode: 0}, nil
-
+		case corev1.PodRunning:
+			return nil
 		case corev1.PodFailed:
-			// Stream logs
-			e.streamLogs(ctx, podName, logWriter)
-			exitCode := 1
-			if len(pod.Status.ContainerStatuses) > 0 {
-				if term := pod.Status.ContainerStatuses[0].State.Terminated; term != nil {
-					exitCode = int(term.ExitCode)
+			return fmt.Errorf("pod failed to start")
+		case corev1.PodSucceeded:
+			return fmt.Errorf("pod exited unexpectedly")
+		case corev1.PodPending:
+			// Check for container errors
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.State.Waiting != nil && cs.State.Waiting.Reason == "ImagePullBackOff" {
+					return fmt.Errorf("failed to pull image: %s", cs.State.Waiting.Message)
 				}
 			}
-			return &ExecutionResult{ExitCode: exitCode}, nil
-
-		case corev1.PodRunning:
-			// Start streaming logs
-			go e.streamLogs(ctx, podName, logWriter)
-
-			// Continue waiting for completion
-			time.Sleep(time.Second)
-
-		case corev1.PodPending:
-			// Wait for pod to start
-			time.Sleep(time.Second)
-
-		default:
-			time.Sleep(time.Second)
 		}
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+			return ctx.Err()
+		case <-time.After(time.Second):
 		}
 	}
 }
 
-// streamLogs streams pod logs to the writer.
-func (e *Executor) streamLogs(ctx context.Context, podName string, logWriter io.Writer) {
-	req := e.client.CoreV1().Pods(e.namespace).GetLogs(podName, &corev1.PodLogOptions{
-		Follow: true,
+// ExecuteStep runs a step in the job pod.
+func (jp *JobPod) ExecuteStep(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
+	// Handle actions (uses:) vs run commands
+	if stepDef.Uses != "" {
+		return jp.executeAction(ctx, stepDef, jobContext, logWriter)
+	}
+
+	if stepDef.Run != "" {
+		return jp.executeCommand(ctx, stepDef.Run, stepDef.Shell, stepDef.Env, stepDef.WorkingDir, logWriter)
+	}
+
+	return &ExecutionResult{ExitCode: 0}, nil
+}
+
+// executeCommand runs a command in the job pod.
+func (jp *JobPod) executeCommand(ctx context.Context, script, shell string, env map[string]string, workingDir string, logWriter io.Writer) (*ExecutionResult, error) {
+	if shell == "" {
+		shell = "bash"
+	}
+
+	// Build the command with environment variables
+	var cmdBuilder strings.Builder
+	for name, value := range env {
+		cmdBuilder.WriteString(fmt.Sprintf("export %s=%q\n", name, value))
+	}
+	if workingDir != "" {
+		cmdBuilder.WriteString(fmt.Sprintf("cd %s\n", workingDir))
+	}
+	cmdBuilder.WriteString(script)
+
+	cmd := []string{shell, "-e", "-c", cmdBuilder.String()}
+
+	req := jp.executor.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(jp.Name).
+		Namespace(jp.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "job",
+			Command:   cmd,
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(jp.executor.config, "POST", req.URL())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create executor: %w", err)
+	}
+
+	// Capture output
+	var stdout, stderr bytes.Buffer
+	multiOut := io.MultiWriter(&stdout, logWriter)
+	multiErr := io.MultiWriter(&stderr, logWriter)
+
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: multiOut,
+		Stderr: multiErr,
 	})
 
-	stream, err := req.Stream(ctx)
+	exitCode := 0
 	if err != nil {
-		fmt.Fprintf(logWriter, "Failed to stream logs: %v\n", err)
-		return
+		// Try to extract exit code from error
+		if exitErr, ok := err.(interface{ ExitStatus() int }); ok {
+			exitCode = exitErr.ExitStatus()
+		} else {
+			// Non-zero exit or other error
+			exitCode = 1
+		}
 	}
-	defer stream.Close()
 
-	scanner := bufio.NewScanner(stream)
-	for scanner.Scan() {
-		fmt.Fprintln(logWriter, scanner.Text())
+	return &ExecutionResult{
+		ExitCode: exitCode,
+		Output:   stdout.String(),
+	}, nil
+}
+
+// executeAction handles "uses:" steps.
+func (jp *JobPod) executeAction(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
+	action := stepDef.Uses
+
+	switch {
+	case strings.HasPrefix(action, "actions/checkout"):
+		return jp.actionCheckout(ctx, stepDef, jobContext, logWriter)
+	case strings.HasPrefix(action, "actions/setup-go"):
+		return jp.actionSetupGo(ctx, stepDef, logWriter)
+	case strings.HasPrefix(action, "actions/setup-node"):
+		return jp.actionSetupNode(ctx, stepDef, logWriter)
+	case strings.HasPrefix(action, "actions/cache"):
+		return jp.actionCache(ctx, stepDef, logWriter)
+	default:
+		fmt.Fprintf(logWriter, "Unknown action: %s (skipping)\n", action)
+		return &ExecutionResult{ExitCode: 0}, nil
 	}
 }
 
 // Built-in action implementations
 
-func (e *Executor) actionCheckout(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
-	repo, _ := req.Context["repo"].(string)
-	ref, _ := req.Context["ref"].(string)
-	sha, _ := req.Context["sha"].(string)
+func (jp *JobPod) actionCheckout(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
+	repo, _ := jobContext["repo"].(string)
+	ref, _ := jobContext["ref"].(string)
+	sha, _ := jobContext["sha"].(string)
 
-	// For now, just log what we would do
-	// In production, this would clone from the kailab repo
-	fmt.Fprintf(req.LogWriter, "Checkout: %s @ %s (%s)\n", repo, ref, sha)
+	fmt.Fprintf(logWriter, "Checking out %s @ %s\n", repo, sha)
 
-	// Create a run step that does the checkout
-	checkoutStep := &StepDefinition{
-		Run: fmt.Sprintf(`
-echo "Checking out %s @ %s"
-# In production, this would use the kailab CLI or git clone
-# git clone --depth 1 --branch %s <repo-url> .
+	// For now, create a placeholder checkout
+	// In production, this would clone from kailab via SSH or HTTP
+	script := fmt.Sprintf(`
+echo "==> Checkout: %s @ %s"
+echo "Ref: %s"
+echo "Note: Full git checkout not yet implemented"
+echo "Creating workspace placeholder..."
+mkdir -p /workspace
+echo "%s" > /workspace/.git-sha
 echo "Checkout complete"
-`, repo, sha, strings.TrimPrefix(ref, "refs/heads/")),
-	}
+`, repo, sha, ref, sha)
 
-	newReq := *req
-	newReq.StepDef = checkoutStep
-	return e.executeRun(ctx, &newReq)
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
 }
 
-func (e *Executor) actionSetupGo(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
+func (jp *JobPod) actionSetupGo(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
 	goVersion := "1.22"
-	if v, ok := req.StepDef.With["go-version"]; ok {
+	if v, ok := stepDef.With["go-version"]; ok {
 		goVersion = v
 	}
 
-	fmt.Fprintf(req.LogWriter, "Setting up Go %s\n", goVersion)
+	fmt.Fprintf(logWriter, "Setting up Go %s\n", goVersion)
 
-	setupStep := &StepDefinition{
-		Run: fmt.Sprintf(`
-# Install Go %s
-if ! command -v go &> /dev/null; then
-    apt-get update && apt-get install -y wget
+	script := fmt.Sprintf(`
+if command -v go &> /dev/null; then
+    echo "Go already installed: $(go version)"
+else
+    echo "Installing Go %s..."
+    apt-get update -qq && apt-get install -y -qq wget ca-certificates > /dev/null
     wget -q https://go.dev/dl/go%s.linux-amd64.tar.gz
     tar -C /usr/local -xzf go%s.linux-amd64.tar.gz
     rm go%s.linux-amd64.tar.gz
+    echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
 fi
 export PATH=$PATH:/usr/local/go/bin
 go version
-`, goVersion, goVersion, goVersion, goVersion),
-	}
+`, goVersion, goVersion, goVersion, goVersion)
 
-	newReq := *req
-	newReq.StepDef = setupStep
-	return e.executeRun(ctx, &newReq)
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
 }
 
-func (e *Executor) actionSetupNode(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
+func (jp *JobPod) actionSetupNode(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
 	nodeVersion := "20"
-	if v, ok := req.StepDef.With["node-version"]; ok {
+	if v, ok := stepDef.With["node-version"]; ok {
 		nodeVersion = v
 	}
 
-	fmt.Fprintf(req.LogWriter, "Setting up Node.js %s\n", nodeVersion)
+	fmt.Fprintf(logWriter, "Setting up Node.js %s\n", nodeVersion)
 
-	setupStep := &StepDefinition{
-		Run: fmt.Sprintf(`
-# Install Node.js %s
-if ! command -v node &> /dev/null; then
-    apt-get update && apt-get install -y curl
-    curl -fsSL https://deb.nodesource.com/setup_%s.x | bash -
-    apt-get install -y nodejs
+	script := fmt.Sprintf(`
+if command -v node &> /dev/null; then
+    echo "Node.js already installed: $(node --version)"
+else
+    echo "Installing Node.js %s..."
+    apt-get update -qq && apt-get install -y -qq curl ca-certificates > /dev/null
+    curl -fsSL https://deb.nodesource.com/setup_%s.x | bash - > /dev/null 2>&1
+    apt-get install -y -qq nodejs > /dev/null
 fi
 node --version
 npm --version
-`, nodeVersion, nodeVersion),
-	}
+`, nodeVersion, nodeVersion)
 
-	newReq := *req
-	newReq.StepDef = setupStep
-	return e.executeRun(ctx, &newReq)
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
 }
 
-func (e *Executor) actionCache(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
-	path, _ := req.StepDef.With["path"]
-	key, _ := req.StepDef.With["key"]
+func (jp *JobPod) actionCache(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
+	path, _ := stepDef.With["path"]
+	key, _ := stepDef.With["key"]
 
-	fmt.Fprintf(req.LogWriter, "Cache: path=%s, key=%s\n", path, key)
-	fmt.Fprintf(req.LogWriter, "Cache not implemented yet, skipping\n")
+	fmt.Fprintf(logWriter, "Cache: path=%s, key=%s\n", path, key)
+	fmt.Fprintf(logWriter, "Cache not implemented yet, skipping\n")
 
 	return &ExecutionResult{ExitCode: 0}, nil
+}
+
+// Cleanup deletes the job pod.
+func (jp *JobPod) Cleanup(ctx context.Context) error {
+	return jp.executor.deletePod(jp.Name)
+}
+
+func (e *Executor) deletePod(podName string) error {
+	deletePolicy := metav1.DeletePropagationForeground
+	return e.client.CoreV1().Pods(e.namespace).Delete(context.Background(), podName, metav1.DeleteOptions{
+		PropagationPolicy: &deletePolicy,
+	})
+}
+
+// ExecutionResult contains the result of an execution.
+type ExecutionResult struct {
+	ExitCode int
+	Output   string
 }
 
 // Helper functions
@@ -345,15 +376,19 @@ func buildEnvVars(context map[string]interface{}, stepEnv map[string]string) []c
 	// Add context variables
 	if repo, ok := context["repo"].(string); ok {
 		env = append(env, corev1.EnvVar{Name: "GITHUB_REPOSITORY", Value: repo})
+		env = append(env, corev1.EnvVar{Name: "KAILAB_REPOSITORY", Value: repo})
 	}
 	if ref, ok := context["ref"].(string); ok {
 		env = append(env, corev1.EnvVar{Name: "GITHUB_REF", Value: ref})
+		env = append(env, corev1.EnvVar{Name: "KAILAB_REF", Value: ref})
 	}
 	if sha, ok := context["sha"].(string); ok {
 		env = append(env, corev1.EnvVar{Name: "GITHUB_SHA", Value: sha})
+		env = append(env, corev1.EnvVar{Name: "KAILAB_SHA", Value: sha})
 	}
 	if event, ok := context["event"].(string); ok {
 		env = append(env, corev1.EnvVar{Name: "GITHUB_EVENT_NAME", Value: event})
+		env = append(env, corev1.EnvVar{Name: "KAILAB_EVENT", Value: event})
 	}
 
 	// Add secrets as environment variables
@@ -371,12 +406,13 @@ func buildEnvVars(context map[string]interface{}, stepEnv map[string]string) []c
 	// Standard CI environment variables
 	env = append(env, corev1.EnvVar{Name: "CI", Value: "true"})
 	env = append(env, corev1.EnvVar{Name: "KAILAB_CI", Value: "true"})
+	env = append(env, corev1.EnvVar{Name: "HOME", Value: "/root"})
+	env = append(env, corev1.EnvVar{Name: "WORKSPACE", Value: "/workspace"})
 
 	return env
 }
 
 func sanitizeName(s string) string {
-	// Kubernetes names must be lowercase alphanumeric with hyphens
 	result := strings.ToLower(s)
 	var sanitized []byte
 	for i := 0; i < len(result); i++ {
@@ -387,7 +423,6 @@ func sanitizeName(s string) string {
 			sanitized = append(sanitized, '-')
 		}
 	}
-	// Remove leading/trailing hyphens
 	result = string(sanitized)
 	for len(result) > 0 && result[0] == '-' {
 		result = result[1:]
@@ -396,4 +431,27 @@ func sanitizeName(s string) string {
 		result = result[:len(result)-1]
 	}
 	return result
+}
+
+// Legacy types for compatibility with runner.go
+
+type ExecutionRequest struct {
+	JobID     string
+	StepID    string
+	StepDef   *StepDefinition
+	Context   map[string]interface{}
+	LogWriter io.Writer
+}
+
+// Execute is kept for compatibility but now delegates to the new job pod model.
+// Deprecated: Use CreateJobPod and JobPod.ExecuteStep instead.
+func (e *Executor) Execute(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
+	// Create a temporary pod for this single step (legacy behavior)
+	jp, err := e.CreateJobPod(ctx, req.JobID, "legacy", req.Context)
+	if err != nil {
+		return nil, err
+	}
+	defer jp.Cleanup(ctx)
+
+	return jp.ExecuteStep(ctx, req.StepDef, req.Context, req.LogWriter)
 }

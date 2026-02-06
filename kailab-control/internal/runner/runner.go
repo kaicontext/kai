@@ -126,7 +126,7 @@ func (r *Runner) claimJob(ctx context.Context) (*model.JobClaimResponse, error) 
 	return &claim, nil
 }
 
-// executeJob runs a job to completion.
+// executeJob runs a job to completion using one pod for all steps.
 func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) error {
 	job := claim.Job
 
@@ -152,7 +152,6 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 
 	// If we couldn't match by display name, try to match by key
 	if jobDef == nil {
-		// The job.Name might include matrix suffix, try to find the base job
 		for key, jd := range parsedWF.Jobs {
 			if job.Name == key || containsPrefix(job.Name, key) {
 				jdCopy := jd
@@ -166,11 +165,27 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		return fmt.Errorf("job definition not found")
 	}
 
-	// Execute steps
+	// Create a single pod for the entire job
+	jobLog := &logWriter{runner: r, ctx: ctx, jobID: job.ID, stepID: ""}
+	fmt.Fprintf(jobLog, "=== Creating job pod ===\n")
+
+	jobPod, err := r.executor.CreateJobPod(ctx, job.ID, job.Name, claim.Context)
+	if err != nil {
+		return fmt.Errorf("create job pod: %w", err)
+	}
+	defer func() {
+		fmt.Fprintf(jobLog, "\n=== Cleaning up job pod ===\n")
+		jobPod.Cleanup(ctx)
+	}()
+
+	fmt.Fprintf(jobLog, "Pod %s ready\n\n", jobPod.Name)
+
+	// Execute steps sequentially in the same pod
 	allSuccess := true
 	for i, step := range claim.Steps {
-		// Start step
-		r.appendLogs(ctx, job.ID, step.ID, fmt.Sprintf("=== Step %d: %s ===\n", i+1, step.Name))
+		stepLog := &logWriter{runner: r, ctx: ctx, jobID: job.ID, stepID: step.ID}
+
+		fmt.Fprintf(stepLog, "=== Step %d: %s ===\n", i+1, step.Name)
 
 		// Get step definition
 		var stepDef *StepDefinition
@@ -178,15 +193,27 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 			stepDef = &jobDef.Steps[i]
 		}
 
-		// Execute step
-		conclusion, err := r.executeStep(ctx, job, &step, stepDef, claim.Context)
+		if stepDef == nil {
+			fmt.Fprintf(stepLog, "No step definition found, skipping\n")
+			r.completeStep(ctx, job.ID, i, model.ConclusionSkipped)
+			continue
+		}
+
+		// Execute step in the job pod
+		result, err := jobPod.ExecuteStep(ctx, stepDef, claim.Context, stepLog)
+
+		conclusion := model.ConclusionSuccess
 		if err != nil {
-			r.appendLogs(ctx, job.ID, step.ID, fmt.Sprintf("Error: %v\n", err))
+			fmt.Fprintf(stepLog, "Error: %v\n", err)
+			conclusion = model.ConclusionFailure
+		} else if result.ExitCode != 0 {
+			fmt.Fprintf(stepLog, "Exit code: %d\n", result.ExitCode)
 			conclusion = model.ConclusionFailure
 		}
 
 		// Complete step
 		r.completeStep(ctx, job.ID, i, conclusion)
+		fmt.Fprintf(stepLog, "Step completed: %s\n\n", conclusion)
 
 		if conclusion == model.ConclusionFailure {
 			allSuccess = false
@@ -195,8 +222,6 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 				break
 			}
 		}
-
-		r.appendLogs(ctx, job.ID, step.ID, fmt.Sprintf("Step completed: %s\n\n", conclusion))
 	}
 
 	// Complete job
@@ -205,34 +230,6 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		conclusion = model.ConclusionFailure
 	}
 	return r.completeJob(ctx, job.ID, conclusion)
-}
-
-// executeStep runs a single step.
-func (r *Runner) executeStep(ctx context.Context, job *model.Job, step *model.Step, stepDef *StepDefinition, jobContext map[string]interface{}) (string, error) {
-	if stepDef == nil {
-		return model.ConclusionSkipped, nil
-	}
-
-	// Build execution request
-	execReq := &ExecutionRequest{
-		JobID:     job.ID,
-		StepID:    step.ID,
-		StepDef:   stepDef,
-		Context:   jobContext,
-		LogWriter: &logWriter{runner: r, ctx: ctx, jobID: job.ID, stepID: step.ID},
-	}
-
-	// Execute in Kubernetes
-	result, err := r.executor.Execute(ctx, execReq)
-	if err != nil {
-		return model.ConclusionFailure, err
-	}
-
-	if result.ExitCode != 0 {
-		return model.ConclusionFailure, nil
-	}
-
-	return model.ConclusionSuccess, nil
 }
 
 // startJob marks a job as started.

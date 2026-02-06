@@ -1245,6 +1245,77 @@ func (h *Handler) checkAndCompleteWorkflowRun(runID string) {
 	}
 
 	h.db.CompleteWorkflowRun(runID, conclusion)
+
+	// Send pipeline notification
+	h.sendPipelineNotification(runID, conclusion)
+}
+
+// sendPipelineNotification sends an email notification for completed pipelines.
+func (h *Handler) sendPipelineNotification(runID, conclusion string) {
+	if h.email == nil {
+		return
+	}
+
+	// Get the workflow run
+	run, err := h.db.GetWorkflowRunByID(runID)
+	if err != nil || run == nil {
+		log.Printf("notify: failed to get workflow run %s: %v", runID, err)
+		return
+	}
+
+	// Get the workflow
+	wf, err := h.db.GetWorkflowByID(run.WorkflowID)
+	if err != nil || wf == nil {
+		log.Printf("notify: failed to get workflow %s: %v", run.WorkflowID, err)
+		return
+	}
+
+	// Get the repo
+	repo, err := h.db.GetRepoByID(run.RepoID)
+	if err != nil || repo == nil {
+		log.Printf("notify: failed to get repo %s: %v", run.RepoID, err)
+		return
+	}
+
+	// Get the org
+	org, err := h.db.GetOrgByID(repo.OrgID)
+	if err != nil || org == nil {
+		log.Printf("notify: failed to get org %s: %v", repo.OrgID, err)
+		return
+	}
+
+	// Get the author
+	if run.CreatedBy == "" {
+		return
+	}
+
+	user, err := h.db.GetUserByID(run.CreatedBy)
+	if err != nil {
+		user, err = h.db.GetUserByEmail(run.CreatedBy)
+	}
+	if err != nil || user == nil {
+		return
+	}
+
+	// Build run URL
+	runURL := h.cfg.BaseURL + "/orgs/" + org.Slug + "/" + repo.Name + "/workflows/runs/" + runID
+
+	// Send the notification
+	err = h.email.SendPipelineResult(
+		user.Email,
+		org.Slug,
+		repo.Name,
+		wf.Name,
+		conclusion,
+		runURL,
+		run.TriggerRef,
+		run.TriggerSHA,
+	)
+	if err != nil {
+		log.Printf("notify: failed to send pipeline email to %s: %v", user.Email, err)
+	} else {
+		log.Printf("notify: sent pipeline %s notification to %s for %s/%s", conclusion, user.Email, org.Slug, repo.Name)
+	}
 }
 
 // BootstrapWorkflowRequest creates a test workflow for a repo.

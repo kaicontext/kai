@@ -317,6 +317,310 @@ If you believe this was a mistake, please contact the organization administrator
 	return c.Send(to, subject, htmlBody, textBody)
 }
 
+// SendPipelineResult sends a notification when a CI pipeline completes.
+func (c *Client) SendPipelineResult(to, org, repo, workflowName, conclusion, runURL, triggerRef, triggerSHA string) error {
+	var statusEmoji, statusText, statusColor string
+	if conclusion == "success" {
+		statusEmoji = "✓"
+		statusText = "passed"
+		statusColor = "#22c55e"
+	} else {
+		statusEmoji = "✕"
+		statusText = "failed"
+		statusColor = "#ef4444"
+	}
+
+	subject := fmt.Sprintf("[%s/%s] %s %s: %s", org, repo, workflowName, statusText, triggerRef)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 560px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: %s; color: #fff; font-size: 20px; font-weight: bold;">%s</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Pipeline %s</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <div style="margin: 24px 0; padding: 16px; background: #f9f9f9; border-radius: 8px;">
+      <p style="margin: 0 0 8px; color: #666; font-size: 13px;">Workflow</p>
+      <p style="margin: 0; font-weight: 500; color: #111;">%s</p>
+    </div>
+    <div style="display: flex; gap: 24px; margin: 16px 0;">
+      <div>
+        <p style="margin: 0 0 4px; color: #666; font-size: 13px;">Branch</p>
+        <p style="margin: 0; font-weight: 500; color: #111;">%s</p>
+      </div>
+      <div>
+        <p style="margin: 0 0 4px; color: #666; font-size: 13px;">Commit</p>
+        <code style="font-family: monospace; font-size: 13px; color: #111;">%s</code>
+      </div>
+    </div>
+    <a href="%s" style="display: inline-block; margin-top: 24px; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Pipeline
+    </a>
+  </div>
+</body>
+</html>`, statusColor, statusEmoji, statusText, org, repo, workflowName, triggerRef, triggerSHA[:7], runURL)
+
+	textBody := fmt.Sprintf(`Pipeline %s: %s/%s
+
+Workflow: %s
+Branch: %s
+Commit: %s
+
+View pipeline: %s`, statusText, org, repo, workflowName, triggerRef, triggerSHA[:7], runURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
+// Comment represents a single code comment for email grouping.
+type Comment struct {
+	FilePath string
+	Line     int
+	Body     string
+}
+
+// SendRequestChanges sends a notification when a reviewer requests changes with grouped comments.
+func (c *Client) SendRequestChanges(to, reviewerName, reviewTitle, reviewURL, org, repo string, comments []Comment) error {
+	subject := fmt.Sprintf("[%s/%s] %s requested changes on: %s", org, repo, reviewerName, reviewTitle)
+
+	// Build comments HTML
+	var commentsHTML string
+	for _, comment := range comments {
+		commentsHTML += fmt.Sprintf(`
+      <div style="margin: 16px 0; padding: 16px; background: #f9f9f9; border-left: 3px solid #f59e0b; border-radius: 4px;">
+        <p style="margin: 0 0 8px; color: #666; font-size: 12px; font-family: monospace;">%s:%d</p>
+        <p style="margin: 0; color: #333; line-height: 1.6; white-space: pre-wrap;">%s</p>
+      </div>`, comment.FilePath, comment.Line, comment.Body)
+	}
+
+	// Build comments text
+	var commentsText string
+	for _, comment := range comments {
+		commentsText += fmt.Sprintf("\n%s:%d\n%s\n---\n", comment.FilePath, comment.Line, comment.Body)
+	}
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 560px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: #f59e0b; color: #fff; font-size: 20px;">⟲</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Changes Requested</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> requested changes on <strong>%s</strong>
+    </p>
+    <div style="margin: 24px 0;">
+      <h3 style="margin: 0 0 12px; font-size: 14px; color: #666; text-transform: uppercase; letter-spacing: 0.5px;">Comments (%d)</h3>
+      %s
+    </div>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+  </div>
+</body>
+</html>`, org, repo, reviewerName, reviewTitle, len(comments), commentsHTML, reviewURL)
+
+	textBody := fmt.Sprintf(`Changes Requested
+
+%s requested changes on %s in %s/%s
+
+Comments (%d):
+%s
+
+View review: %s`, reviewerName, reviewTitle, org, repo, len(comments), commentsText, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
+// SendReviewMerged sends a notification when a review is merged.
+func (c *Client) SendReviewMerged(to, mergerName, reviewTitle, reviewURL, org, repo, targetBranch string) error {
+	subject := fmt.Sprintf("[%s/%s] Merged: %s", org, repo, reviewTitle)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: #8b5cf6; color: #fff; font-size: 20px;">⎇</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Review Merged</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> merged <strong>%s</strong> into <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">%s</code>
+    </p>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+  </div>
+</body>
+</html>`, org, repo, mergerName, reviewTitle, targetBranch, reviewURL)
+
+	textBody := fmt.Sprintf(`Review Merged
+
+%s merged %s into %s in %s/%s
+
+View review: %s`, mergerName, reviewTitle, targetBranch, org, repo, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
+// SendReviewAbandoned sends a notification when a review is abandoned.
+func (c *Client) SendReviewAbandoned(to, abandonerName, reviewTitle, reviewURL, org, repo, reason string) error {
+	subject := fmt.Sprintf("[%s/%s] Abandoned: %s", org, repo, reviewTitle)
+
+	reasonHTML := ""
+	reasonText := ""
+	if reason != "" {
+		reasonHTML = fmt.Sprintf(`
+    <div style="margin: 16px 0; padding: 16px; background: #f9f9f9; border-radius: 8px;">
+      <p style="margin: 0; color: #666; font-style: italic;">"%s"</p>
+    </div>`, reason)
+		reasonText = fmt.Sprintf("\nReason: %s\n", reason)
+	}
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: #6b7280; color: #fff; font-size: 20px;">⊘</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Review Abandoned</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> abandoned <strong>%s</strong>
+    </p>
+    %s
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+  </div>
+</body>
+</html>`, org, repo, abandonerName, reviewTitle, reasonHTML, reviewURL)
+
+	textBody := fmt.Sprintf(`Review Abandoned
+
+%s abandoned %s in %s/%s
+%s
+View review: %s`, abandonerName, reviewTitle, org, repo, reasonText, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
+// SendReviewApproved sends a notification when a review is approved.
+func (c *Client) SendReviewApproved(to, approverName, reviewTitle, reviewURL, org, repo string) error {
+	subject := fmt.Sprintf("[%s/%s] Approved: %s", org, repo, reviewTitle)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: #22c55e; color: #fff; font-size: 20px;">✓</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Review Approved</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> approved <strong>%s</strong>
+    </p>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+  </div>
+</body>
+</html>`, org, repo, approverName, reviewTitle, reviewURL)
+
+	textBody := fmt.Sprintf(`Review Approved
+
+%s approved %s in %s/%s
+
+View review: %s`, approverName, reviewTitle, org, repo, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
+// SendReviewReady sends a notification when a review is marked ready for review.
+func (c *Client) SendReviewReady(to, authorName, reviewTitle, reviewURL, org, repo string) error {
+	subject := fmt.Sprintf("[%s/%s] Ready for review: %s", org, repo, reviewTitle)
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px 20px; background: #f5f5f5;">
+  <div style="max-width: 480px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+    <div style="display: flex; align-items: center; margin-bottom: 24px;">
+      <span style="display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%%; background: #3b82f6; color: #fff; font-size: 20px;">◉</span>
+      <div style="margin-left: 16px;">
+        <h1 style="margin: 0; font-size: 20px; color: #111;">Ready for Review</h1>
+        <p style="margin: 4px 0 0; color: #666; font-size: 14px;">%s/%s</p>
+      </div>
+    </div>
+    <p style="margin: 0 0 16px; color: #555; line-height: 1.5;">
+      <strong>%s</strong> marked <strong>%s</strong> as ready for review
+    </p>
+    <a href="%s" style="display: inline-block; background: #111; color: #fff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 500;">
+      View Review
+    </a>
+    <p style="margin: 24px 0 0; color: #999; font-size: 13px;">
+      You're receiving this because you're a reviewer on this review.
+    </p>
+  </div>
+</body>
+</html>`, org, repo, authorName, reviewTitle, reviewURL)
+
+	textBody := fmt.Sprintf(`Ready for Review
+
+%s marked %s as ready for review in %s/%s
+
+View review: %s
+
+You're receiving this because you're a reviewer on this review.`, authorName, reviewTitle, org, repo, reviewURL)
+
+	return c.Send(to, subject, htmlBody, textBody)
+}
+
 // SendMentionNotification sends a notification when someone is @mentioned.
 func (c *Client) SendMentionNotification(to, commenterName, reviewTitle, commentBody, reviewURL string) error {
 	subject := fmt.Sprintf("%s mentioned you in a comment", commenterName)
