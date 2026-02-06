@@ -2064,6 +2064,11 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 		State   string `json:"state"`
 		Summary string `json:"summary,omitempty"` // Optional summary for changes_requested
 		Actor   string `json:"actor,omitempty"`   // Who made this state change
+		Comments []struct {
+			FilePath string `json:"filePath"`
+			Line     int    `json:"line"`
+			Body     string `json:"body"`
+		} `json:"comments,omitempty"` // Comments for changes_requested
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err)
@@ -2204,6 +2209,53 @@ func (h *Handler) UpdateReviewState(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit", err)
 		return
+	}
+
+	// Send review state notification
+	if h.webhookNotifier != nil {
+		// Extract review details for notification (capture before goroutine)
+		reviewTitle, _ := payload["title"].(string)
+		reviewAuthor, _ := payload["author"].(string)
+		var reviewers []string
+		if assignees, ok := payload["assignees"].([]interface{}); ok {
+			for _, a := range assignees {
+				if s, ok := a.(string); ok {
+					reviewers = append(reviewers, s)
+				}
+			}
+		}
+		targetBranch, _ := payload["targetBranch"].(string)
+		repo := rh.Tenant + "/" + rh.Name
+
+		// Copy comments for goroutine
+		comments := make([]struct {
+			FilePath string
+			Line     int
+			Body     string
+		}, len(req.Comments))
+		for i, c := range req.Comments {
+			comments[i] = struct {
+				FilePath string
+				Line     int
+				Body     string
+			}{c.FilePath, c.Line, c.Body}
+		}
+		state := req.State
+		actor := req.Actor
+
+		go func() {
+			// Only notify for actionable states
+			switch state {
+			case "merged", "abandoned", "approved":
+				h.webhookNotifier.NotifyReviewState(repo, reviewID, reviewTitle, reviewAuthor, actor, state, targetBranch, "", reviewers)
+			case "open":
+				// "open" from "draft" means "ready for review"
+				h.webhookNotifier.NotifyReviewState(repo, reviewID, reviewTitle, reviewAuthor, actor, "ready", targetBranch, "", reviewers)
+			case "changes_requested":
+				// Send request changes notification with comments
+				h.webhookNotifier.NotifyRequestChanges(repo, reviewID, reviewTitle, reviewAuthor, actor, comments)
+			}
+		}()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

@@ -139,6 +139,132 @@ func (n *WebhookNotifier) NotifyCI(repo, event, ref, sha string, payload map[str
 	return nil
 }
 
+// NotifyReviewState notifies the control plane of a review state change.
+func (n *WebhookNotifier) NotifyReviewState(repo, reviewID, title, author, actorName, state, targetBranch, reason string, reviewers []string) error {
+	parts := splitOrgRepo(repo)
+	if len(parts) != 2 {
+		return nil
+	}
+
+	reqBody := struct {
+		Org          string   `json:"org"`
+		Repo         string   `json:"repo"`
+		ReviewID     string   `json:"reviewId"`
+		ReviewTitle  string   `json:"reviewTitle"`
+		ReviewAuthor string   `json:"reviewAuthor"`
+		ActorName    string   `json:"actorName"`
+		State        string   `json:"state"`
+		TargetBranch string   `json:"targetBranch,omitempty"`
+		Reason       string   `json:"reason,omitempty"`
+		Reviewers    []string `json:"reviewers,omitempty"`
+	}{
+		Org:          parts[0],
+		Repo:         parts[1],
+		ReviewID:     reviewID,
+		ReviewTitle:  title,
+		ReviewAuthor: author,
+		ActorName:    actorName,
+		State:        state,
+		TargetBranch: targetBranch,
+		Reason:       reason,
+		Reviewers:    reviewers,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", n.baseURL+"/-/notify/review-state", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+// NotifyRequestChanges notifies the control plane of a request changes action.
+func (n *WebhookNotifier) NotifyRequestChanges(repo, reviewID, title, author, reviewerName string, comments []struct {
+	FilePath string
+	Line     int
+	Body     string
+}) error {
+	parts := splitOrgRepo(repo)
+	if len(parts) != 2 {
+		return nil
+	}
+
+	reqBody := struct {
+		Org          string `json:"org"`
+		Repo         string `json:"repo"`
+		ReviewID     string `json:"reviewId"`
+		ReviewTitle  string `json:"reviewTitle"`
+		ReviewAuthor string `json:"reviewAuthor"`
+		ReviewerName string `json:"reviewerName"`
+		Comments     []struct {
+			FilePath string `json:"filePath"`
+			Line     int    `json:"line"`
+			Body     string `json:"body"`
+		} `json:"comments"`
+	}{
+		Org:          parts[0],
+		Repo:         parts[1],
+		ReviewID:     reviewID,
+		ReviewTitle:  title,
+		ReviewAuthor: author,
+		ReviewerName: reviewerName,
+		Comments: func() []struct {
+			FilePath string `json:"filePath"`
+			Line     int    `json:"line"`
+			Body     string `json:"body"`
+		} {
+			result := make([]struct {
+				FilePath string `json:"filePath"`
+				Line     int    `json:"line"`
+				Body     string `json:"body"`
+			}, len(comments))
+			for i, c := range comments {
+				result[i] = struct {
+					FilePath string `json:"filePath"`
+					Line     int    `json:"line"`
+					Body     string `json:"body"`
+				}{
+					FilePath: c.FilePath,
+					Line:     c.Line,
+					Body:     c.Body,
+				}
+			}
+			return result
+		}(),
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", n.baseURL+"/-/notify/request-changes", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
 // trigger sends a webhook trigger request to the control plane.
 func (n *WebhookNotifier) trigger(repo, event string, payload map[string]interface{}) error {
 	reqBody := webhookTriggerRequest{
