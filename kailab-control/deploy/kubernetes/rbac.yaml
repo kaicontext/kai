@@ -20,6 +20,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "delete", "get", "list", "watch"]
+  # Execute commands in job pods
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
   # Stream logs from job pods
   - apiGroups: [""]
     resources: ["pods/log"]
