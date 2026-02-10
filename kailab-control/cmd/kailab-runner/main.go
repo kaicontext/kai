@@ -23,6 +23,9 @@ func main() {
 		pollInterval = flag.Duration("poll-interval", getDurationEnv("KR_POLL_INTERVAL", 5*time.Second), "Job poll interval")
 		labels       = flag.String("labels", getEnv("KR_LABELS", ""), "Comma-separated runner labels")
 		kubeconfig   = flag.String("kubeconfig", getEnv("KUBECONFIG", ""), "Path to kubeconfig (uses in-cluster config if empty)")
+		gcsBucket    = flag.String("gcs-bucket", getEnv("KR_GCS_BUCKET", ""), "GCS bucket for CI caches/artifacts (uses local store if empty)")
+		gcsPrefix    = flag.String("gcs-prefix", getEnv("KR_GCS_PREFIX", "ci"), "GCS key prefix")
+		storePath    = flag.String("store-path", getEnv("KR_STORE_PATH", "/tmp/kailab-ci-store"), "Local store path (used when GCS is not configured)")
 	)
 	flag.Parse()
 
@@ -35,6 +38,9 @@ func main() {
 		PollInterval:    *pollInterval,
 		Labels:          parseLabels(*labels),
 		Kubeconfig:      *kubeconfig,
+		GCSBucket:       *gcsBucket,
+		GCSPrefix:       *gcsPrefix,
+		StorePath:       *storePath,
 	}
 
 	// Create runner

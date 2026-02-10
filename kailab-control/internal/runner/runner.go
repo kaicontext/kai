@@ -27,6 +27,8 @@ type Config struct {
 	Labels          []string
 	Kubeconfig      string
 	StorePath       string // Local store path for caches/artifacts (default: /tmp/kailab-ci-store)
+	GCSBucket       string // GCS bucket for caches/artifacts (if set, uses GCS instead of local)
+	GCSPrefix       string // GCS key prefix (default: "ci")
 }
 
 // Runner executes CI jobs.
@@ -38,13 +40,30 @@ type Runner struct {
 
 // New creates a new runner.
 func New(cfg *Config) (*Runner, error) {
-	storePath := cfg.StorePath
-	if storePath == "" {
-		storePath = "/tmp/kailab-ci-store"
-	}
-	ciStore, err := store.NewLocalStore(storePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ci store: %w", err)
+	var ciStore store.Store
+
+	if cfg.GCSBucket != "" {
+		prefix := cfg.GCSPrefix
+		if prefix == "" {
+			prefix = "ci"
+		}
+		gcsStore, err := store.NewGCSStore(context.Background(), cfg.GCSBucket, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gcs store: %w", err)
+		}
+		ciStore = gcsStore
+		log.Printf("Using GCS store: gs://%s/%s", cfg.GCSBucket, prefix)
+	} else {
+		storePath := cfg.StorePath
+		if storePath == "" {
+			storePath = "/tmp/kailab-ci-store"
+		}
+		localStore, err := store.NewLocalStore(storePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ci store: %w", err)
+		}
+		ciStore = localStore
+		log.Printf("Using local store: %s", storePath)
 	}
 
 	executor, err := NewExecutor(cfg.Namespace, cfg.Kubeconfig, ciStore)

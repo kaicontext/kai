@@ -11,3 +11,6 @@ data:
   KR_NAMESPACE: "kailab-ci"
   KR_POLL_INTERVAL: "5s"
   KR_LABELS: "linux,amd64"
+  # CI store (GCS)
+  KR_GCS_BUCKET: "kailab-ci-store"
+  KR_GCS_PREFIX: "ci"
