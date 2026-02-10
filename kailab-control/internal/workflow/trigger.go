@@ -19,7 +19,7 @@ func (w *Workflow) MatchTrigger(event *TriggerEvent) bool {
 	case "push":
 		return w.matchPushTrigger(event)
 	case "review_created", "review_updated":
-		return w.matchReviewTrigger(event)
+		return w.matchReviewTrigger(event) || w.matchPullRequestTrigger(event)
 	case "workflow_dispatch":
 		return w.On.WorkflowDispatch != nil
 	default:
@@ -131,6 +131,71 @@ func (w *Workflow) matchReviewTrigger(event *TriggerEvent) bool {
 	}
 
 	return false
+}
+
+// matchPullRequestTrigger checks if a review event matches a pull_request trigger.
+// This provides GitHub Actions compatibility by mapping pull_request triggers to Kai review events.
+func (w *Workflow) matchPullRequestTrigger(event *TriggerEvent) bool {
+	if w.On.PullRequest == nil {
+		return false
+	}
+
+	pr := w.On.PullRequest
+
+	// Map Kai event type to pull_request action
+	var action string
+	switch event.Type {
+	case "review_created":
+		action = "opened"
+	case "review_updated":
+		action = "synchronize"
+	default:
+		return false
+	}
+
+	// If types are specified, check if action matches
+	if len(pr.Types) > 0 {
+		matched := false
+		for _, t := range pr.Types {
+			if t == action {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	// Check branch filters against the target branch
+	if targetBranch, ok := event.Payload["target_branch"].(string); ok && targetBranch != "" {
+		if len(pr.Branches) > 0 {
+			if !matchPatterns(targetBranch, pr.Branches) {
+				return false
+			}
+		}
+		if len(pr.BranchesIgnore) > 0 {
+			if matchPatterns(targetBranch, pr.BranchesIgnore) {
+				return false
+			}
+		}
+	}
+
+	// Check path filters
+	if paths, ok := event.Payload["changed_files"].([]string); ok {
+		if len(pr.Paths) > 0 {
+			if !matchAnyPath(paths, pr.Paths) {
+				return false
+			}
+		}
+		if len(pr.PathsIgnore) > 0 {
+			if matchAllPaths(paths, pr.PathsIgnore) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // matchPatterns checks if a name matches any of the glob patterns.

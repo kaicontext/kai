@@ -19,12 +19,36 @@ type Workflow struct {
 	Jobs        map[string]Job    `yaml:"jobs" json:"jobs"`
 	Defaults    *Defaults         `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 	Concurrency *Concurrency      `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	Permissions Permissions       `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+}
+
+// Permissions represents GitHub Actions permissions for the GITHUB_TOKEN.
+// Can be a map of scope→access or a single string ("read-all", "write-all").
+type Permissions map[string]string
+
+// UnmarshalYAML implements yaml.Unmarshaler for Permissions.
+func (p *Permissions) UnmarshalYAML(value *yaml.Node) error {
+	// Try as a string first ("read-all" or "write-all")
+	var single string
+	if err := value.Decode(&single); err == nil {
+		*p = Permissions{"_all": single}
+		return nil
+	}
+
+	// Try as map
+	var m map[string]string
+	if err := value.Decode(&m); err != nil {
+		return err
+	}
+	*p = Permissions(m)
+	return nil
 }
 
 // WorkflowTrigger represents workflow trigger configuration.
 // Supports both simple form (on: push) and complex form (on: push: branches: [main]).
 type WorkflowTrigger struct {
 	Push             *PushTrigger             `yaml:"push,omitempty" json:"push,omitempty"`
+	PullRequest      *PullRequestTrigger      `yaml:"pull_request,omitempty" json:"pull_request,omitempty"`
 	Review           *ReviewTrigger           `yaml:"review,omitempty" json:"review,omitempty"`
 	WorkflowDispatch *WorkflowDispatchTrigger `yaml:"workflow_dispatch,omitempty" json:"workflow_dispatch,omitempty"`
 	Schedule         []ScheduleTrigger        `yaml:"schedule,omitempty" json:"schedule,omitempty"`
@@ -38,6 +62,16 @@ type PushTrigger struct {
 	TagsIgnore     []string `yaml:"tags-ignore,omitempty" json:"tags_ignore,omitempty"`
 	Paths          []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 	PathsIgnore    []string `yaml:"paths-ignore,omitempty" json:"paths_ignore,omitempty"`
+}
+
+// PullRequestTrigger configures pull_request event triggers (GitHub Actions compatible).
+// Mapped internally to review events.
+type PullRequestTrigger struct {
+	Branches       []string `yaml:"branches,omitempty" json:"branches,omitempty"`
+	BranchesIgnore []string `yaml:"branches-ignore,omitempty" json:"branches_ignore,omitempty"`
+	Paths          []string `yaml:"paths,omitempty" json:"paths,omitempty"`
+	PathsIgnore    []string `yaml:"paths-ignore,omitempty" json:"paths_ignore,omitempty"`
+	Types          []string `yaml:"types,omitempty" json:"types,omitempty"` // opened, synchronize, closed, etc.
 }
 
 // ReviewTrigger configures review event triggers.
@@ -79,6 +113,7 @@ type Job struct {
 	Concurrency *Concurrency       `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
 	Timeout     int                `yaml:"timeout-minutes,omitempty" json:"timeout_minutes,omitempty"`
 	ContinueOn  *ContinueOnError   `yaml:"continue-on-error,omitempty" json:"continue_on_error,omitempty"`
+	Permissions Permissions        `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 }
 
 // Step represents a step in a job.
@@ -231,6 +266,8 @@ func (t *WorkflowTrigger) parseSimple(events []string) error {
 		switch event {
 		case "push":
 			t.Push = &PushTrigger{}
+		case "pull_request":
+			t.PullRequest = &PullRequestTrigger{}
 		case "review":
 			t.Review = &ReviewTrigger{}
 		case "workflow_dispatch":
@@ -443,6 +480,9 @@ func (w *Workflow) GetTriggerTypes() []string {
 	var triggers []string
 	if w.On.Push != nil {
 		triggers = append(triggers, "push")
+	}
+	if w.On.PullRequest != nil {
+		triggers = append(triggers, "pull_request")
 	}
 	if w.On.Review != nil {
 		triggers = append(triggers, "review")

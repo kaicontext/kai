@@ -85,6 +85,7 @@ type Job struct {
 	ID            string    `json:"id"`
 	WorkflowRunID string    `json:"workflow_run_id"`
 	Name          string    `json:"name"`
+	RunsOn        []string  `json:"runs_on,omitempty"`
 	RunnerID      string    `json:"runner_id,omitempty"`
 	Status        string    `json:"status"`
 	Conclusion    string    `json:"conclusion,omitempty"`
@@ -94,6 +95,12 @@ type Job struct {
 	StartedAt     time.Time `json:"started_at,omitempty"`
 	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// RunsOnJSON returns runs_on labels as a JSON string.
+func (j *Job) RunsOnJSON() string {
+	b, _ := json.Marshal(j.RunsOn)
+	return string(b)
 }
 
 // MatrixValuesMap returns matrix values as a map.
@@ -289,6 +296,16 @@ type JobCompleteRequest struct {
 // StepCompleteRequest marks a step as completed.
 type StepCompleteRequest struct {
 	Conclusion string `json:"conclusion"`
+}
+
+// ConcurrencyLock represents an active concurrency lock.
+type ConcurrencyLock struct {
+	ID            string    `json:"id"`
+	GroupKey      string    `json:"group_key"`
+	WorkflowRunID string    `json:"workflow_run_id"`
+	JobID         string    `json:"job_id,omitempty"`
+	RepoID        string    `json:"repo_id"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // LogAppendRequest appends logs to a job.

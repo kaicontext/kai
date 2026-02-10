@@ -325,10 +325,11 @@ func (db *DB) CompleteWorkflowRun(id, conclusion string) error {
 // ----- Jobs -----
 
 // CreateJob creates a new job.
-func (db *DB) CreateJob(workflowRunID, name string, needs []string, matrixValues string) (*model.Job, error) {
+func (db *DB) CreateJob(workflowRunID, name string, needs []string, matrixValues string, runsOn []string) (*model.Job, error) {
 	id := newUUID()
 	now := time.Now().Unix()
 	needsJSON, _ := json.Marshal(needs)
+	runsOnJSON, _ := json.Marshal(runsOn)
 
 	var matrixPtr interface{}
 	if matrixValues != "" {
@@ -336,8 +337,8 @@ func (db *DB) CreateJob(workflowRunID, name string, needs []string, matrixValues
 	}
 
 	_, err := db.exec(
-		"INSERT INTO jobs (id, workflow_run_id, name, status, needs, matrix_values, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id, workflowRunID, name, model.JobStatusQueued, string(needsJSON), matrixPtr, now,
+		"INSERT INTO jobs (id, workflow_run_id, name, status, needs, matrix_values, runs_on, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		id, workflowRunID, name, model.JobStatusQueued, string(needsJSON), matrixPtr, string(runsOnJSON), now,
 	)
 	if err != nil {
 		return nil, err
@@ -350,12 +351,12 @@ func (db *DB) GetJobByID(id string) (*model.Job, error) {
 	var j model.Job
 	var startedAt, completedAt sql.NullInt64
 	var createdAt int64
-	var conclusion, runnerID, runnerName, matrixValues, needsJSON sql.NullString
+	var conclusion, runnerID, runnerName, matrixValues, needsJSON, runsOnJSON sql.NullString
 
 	err := db.queryRow(
-		"SELECT id, workflow_run_id, name, runner_id, status, conclusion, matrix_values, needs, runner_name, started_at, completed_at, created_at FROM jobs WHERE id = ?",
+		"SELECT id, workflow_run_id, name, runner_id, status, conclusion, matrix_values, needs, runner_name, started_at, completed_at, created_at, runs_on FROM jobs WHERE id = ?",
 		id,
-	).Scan(&j.ID, &j.WorkflowRunID, &j.Name, &runnerID, &j.Status, &conclusion, &matrixValues, &needsJSON, &runnerName, &startedAt, &completedAt, &createdAt)
+	).Scan(&j.ID, &j.WorkflowRunID, &j.Name, &runnerID, &j.Status, &conclusion, &matrixValues, &needsJSON, &runnerName, &startedAt, &completedAt, &createdAt, &runsOnJSON)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -385,13 +386,16 @@ func (db *DB) GetJobByID(id string) (*model.Job, error) {
 	if needsJSON.Valid {
 		json.Unmarshal([]byte(needsJSON.String), &j.Needs)
 	}
+	if runsOnJSON.Valid {
+		json.Unmarshal([]byte(runsOnJSON.String), &j.RunsOn)
+	}
 	return &j, nil
 }
 
 // ListWorkflowRunJobs lists all jobs for a workflow run.
 func (db *DB) ListWorkflowRunJobs(workflowRunID string) ([]*model.Job, error) {
 	rows, err := db.query(
-		"SELECT id, workflow_run_id, name, runner_id, status, conclusion, matrix_values, needs, runner_name, started_at, completed_at, created_at FROM jobs WHERE workflow_run_id = ? ORDER BY created_at",
+		"SELECT id, workflow_run_id, name, runner_id, status, conclusion, matrix_values, needs, runner_name, started_at, completed_at, created_at, runs_on FROM jobs WHERE workflow_run_id = ? ORDER BY created_at",
 		workflowRunID,
 	)
 	if err != nil {
@@ -404,9 +408,9 @@ func (db *DB) ListWorkflowRunJobs(workflowRunID string) ([]*model.Job, error) {
 		var j model.Job
 		var startedAt, completedAt sql.NullInt64
 		var createdAt int64
-		var conclusion, runnerID, runnerName, matrixValues, needsJSON sql.NullString
+		var conclusion, runnerID, runnerName, matrixValues, needsJSON, runsOnJSON sql.NullString
 
-		if err := rows.Scan(&j.ID, &j.WorkflowRunID, &j.Name, &runnerID, &j.Status, &conclusion, &matrixValues, &needsJSON, &runnerName, &startedAt, &completedAt, &createdAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.WorkflowRunID, &j.Name, &runnerID, &j.Status, &conclusion, &matrixValues, &needsJSON, &runnerName, &startedAt, &completedAt, &createdAt, &runsOnJSON); err != nil {
 			return nil, err
 		}
 		j.CreatedAt = time.Unix(createdAt, 0)
@@ -431,6 +435,9 @@ func (db *DB) ListWorkflowRunJobs(workflowRunID string) ([]*model.Job, error) {
 		if needsJSON.Valid {
 			json.Unmarshal([]byte(needsJSON.String), &j.Needs)
 		}
+		if runsOnJSON.Valid {
+			json.Unmarshal([]byte(runsOnJSON.String), &j.RunsOn)
+		}
 		jobs = append(jobs, &j)
 	}
 	return jobs, rows.Err()
@@ -438,12 +445,13 @@ func (db *DB) ListWorkflowRunJobs(workflowRunID string) ([]*model.Job, error) {
 
 // ClaimJob assigns a job to a runner. Returns nil if no jobs are available.
 func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
-	// Find the first queued job that has all dependencies completed successfully
-	// For now, we use a simple approach - more sophisticated label matching can be added later
+	// Find the first queued job that:
+	// 1. Has all dependencies completed successfully
+	// 2. Matches the runner's labels (all job runs_on labels must be in runner labels)
+	labelsJSON, _ := json.Marshal(labels)
+
 	var query string
 	if db.driver == DriverPostgres {
-		// PostgreSQL uses jsonb_array_elements_text for JSON array expansion
-		// Check if needs is a valid array before trying to expand it
 		query = `
 			SELECT j.id FROM jobs j
 			WHERE j.status = $1
@@ -455,11 +463,15 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 					AND dep.name IN (SELECT jsonb_array_elements_text(j.needs::jsonb))
 					AND dep.status != $2
 				))
+			AND (j.runs_on IS NULL OR j.runs_on = '[]' OR j.runs_on = ''
+				OR NOT EXISTS (
+					SELECT 1 FROM jsonb_array_elements_text(j.runs_on::jsonb) AS required_label
+					WHERE required_label NOT IN (SELECT jsonb_array_elements_text($3::jsonb))
+				))
 			ORDER BY j.created_at
 			LIMIT 1
 		`
 	} else {
-		// SQLite uses json_each for JSON array expansion
 		query = `
 			SELECT j.id FROM jobs j
 			WHERE j.status = ?
@@ -469,11 +481,15 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 				AND dep.name IN (SELECT value FROM json_each(j.needs))
 				AND dep.status != ?
 			))
+			AND (j.runs_on IS NULL OR j.runs_on = '[]' OR j.runs_on = '' OR NOT EXISTS (
+				SELECT 1 FROM json_each(j.runs_on) AS required
+				WHERE required.value NOT IN (SELECT value FROM json_each(?))
+			))
 			ORDER BY j.created_at
 			LIMIT 1
 		`
 	}
-	row := db.queryRow(query, model.JobStatusQueued, model.JobStatusCompleted)
+	row := db.queryRow(query, model.JobStatusQueued, model.JobStatusCompleted, string(labelsJSON))
 
 	var jobID string
 	if err := row.Scan(&jobID); err == sql.ErrNoRows {
@@ -1038,4 +1054,258 @@ func (db *DB) ListRunners(orgID string) ([]*model.Runner, error) {
 		runners = append(runners, &r)
 	}
 	return runners, rows.Err()
+}
+
+// ----- Workflow Cache -----
+
+// GetCache looks up a cache entry by repo and key.
+func (db *DB) GetCache(repoID, cacheKey string) (*model.WorkflowCache, error) {
+	var c model.WorkflowCache
+	var createdAt, lastUsed int64
+
+	err := db.queryRow(
+		"SELECT id, repo_id, cache_key, path, size, created_at, last_used FROM workflow_cache WHERE repo_id = ? AND cache_key = ?",
+		repoID, cacheKey,
+	).Scan(&c.ID, &c.RepoID, &c.CacheKey, &c.Path, &c.Size, &createdAt, &lastUsed)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.CreatedAt = time.Unix(createdAt, 0)
+	c.LastUsed = time.Unix(lastUsed, 0)
+	return &c, nil
+}
+
+// GetCacheByPrefix looks up the most recent cache entry matching a key prefix.
+func (db *DB) GetCacheByPrefix(repoID, keyPrefix string) (*model.WorkflowCache, error) {
+	var c model.WorkflowCache
+	var createdAt, lastUsed int64
+
+	err := db.queryRow(
+		"SELECT id, repo_id, cache_key, path, size, created_at, last_used FROM workflow_cache WHERE repo_id = ? AND cache_key LIKE ? ORDER BY last_used DESC LIMIT 1",
+		repoID, keyPrefix+"%",
+	).Scan(&c.ID, &c.RepoID, &c.CacheKey, &c.Path, &c.Size, &createdAt, &lastUsed)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.CreatedAt = time.Unix(createdAt, 0)
+	c.LastUsed = time.Unix(lastUsed, 0)
+	return &c, nil
+}
+
+// CreateCache creates or updates a cache entry.
+func (db *DB) CreateCache(repoID, cacheKey, path string, size int64) (*model.WorkflowCache, error) {
+	id := newUUID()
+	now := time.Now().Unix()
+
+	// Upsert: replace if key already exists for this repo
+	_, err := db.exec(
+		"INSERT INTO workflow_cache (id, repo_id, cache_key, path, size, created_at, last_used) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (repo_id, cache_key) DO UPDATE SET path = ?, size = ?, last_used = ?",
+		id, repoID, cacheKey, path, size, now, now, path, size, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetCache(repoID, cacheKey)
+}
+
+// TouchCache updates the last_used timestamp for a cache entry.
+func (db *DB) TouchCache(id string) error {
+	now := time.Now().Unix()
+	_, err := db.exec("UPDATE workflow_cache SET last_used = ? WHERE id = ?", now, id)
+	return err
+}
+
+// DeleteCache deletes a cache entry by ID.
+func (db *DB) DeleteCache(id string) error {
+	_, err := db.exec("DELETE FROM workflow_cache WHERE id = ?", id)
+	return err
+}
+
+// DeleteExpiredCaches deletes cache entries not used since the given time.
+func (db *DB) DeleteExpiredCaches(notUsedSince time.Time) ([]model.WorkflowCache, error) {
+	threshold := notUsedSince.Unix()
+	rows, err := db.query(
+		"SELECT id, repo_id, cache_key, path, size, created_at, last_used FROM workflow_cache WHERE last_used < ?",
+		threshold,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var expired []model.WorkflowCache
+	for rows.Next() {
+		var c model.WorkflowCache
+		var createdAt, lastUsed int64
+		if err := rows.Scan(&c.ID, &c.RepoID, &c.CacheKey, &c.Path, &c.Size, &createdAt, &lastUsed); err != nil {
+			return nil, err
+		}
+		c.CreatedAt = time.Unix(createdAt, 0)
+		c.LastUsed = time.Unix(lastUsed, 0)
+		expired = append(expired, c)
+	}
+
+	if len(expired) > 0 {
+		_, err = db.exec("DELETE FROM workflow_cache WHERE last_used < ?", threshold)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return expired, rows.Err()
+}
+
+// DeleteArtifact deletes an artifact by ID.
+func (db *DB) DeleteArtifact(id string) error {
+	_, err := db.exec("DELETE FROM artifacts WHERE id = ?", id)
+	return err
+}
+
+// DeleteExpiredArtifacts deletes artifacts past their expiration time. Returns deleted artifacts for storage cleanup.
+func (db *DB) DeleteExpiredArtifacts() ([]model.Artifact, error) {
+	now := time.Now().Unix()
+	rows, err := db.query(
+		"SELECT id, workflow_run_id, job_id, name, path, size, expires_at, created_at FROM artifacts WHERE expires_at IS NOT NULL AND expires_at < ?",
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var expired []model.Artifact
+	for rows.Next() {
+		var a model.Artifact
+		var createdAt int64
+		var expiresAt sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.WorkflowRunID, &a.JobID, &a.Name, &a.Path, &a.Size, &expiresAt, &createdAt); err != nil {
+			return nil, err
+		}
+		a.CreatedAt = time.Unix(createdAt, 0)
+		if expiresAt.Valid {
+			a.ExpiresAt = time.Unix(expiresAt.Int64, 0)
+		}
+		expired = append(expired, a)
+	}
+
+	if len(expired) > 0 {
+		_, err = db.exec("DELETE FROM artifacts WHERE expires_at IS NOT NULL AND expires_at < ?", now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return expired, rows.Err()
+}
+
+// GetArtifactByName retrieves an artifact by workflow run ID and name.
+func (db *DB) GetArtifactByName(workflowRunID, name string) (*model.Artifact, error) {
+	var a model.Artifact
+	var createdAt int64
+	var expiresAt sql.NullInt64
+
+	err := db.queryRow(
+		"SELECT id, workflow_run_id, job_id, name, path, size, expires_at, created_at FROM artifacts WHERE workflow_run_id = ? AND name = ?",
+		workflowRunID, name,
+	).Scan(&a.ID, &a.WorkflowRunID, &a.JobID, &a.Name, &a.Path, &a.Size, &expiresAt, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.CreatedAt = time.Unix(createdAt, 0)
+	if expiresAt.Valid {
+		a.ExpiresAt = time.Unix(expiresAt.Int64, 0)
+	}
+	return &a, nil
+}
+
+// ----- Concurrency Locks -----
+
+// AcquireConcurrencyLock tries to acquire a lock for a concurrency group.
+// Returns the lock if acquired, or the existing lock if the group is already locked.
+func (db *DB) AcquireConcurrencyLock(groupKey, workflowRunID, repoID string, jobID string) (*model.ConcurrencyLock, bool, error) {
+	id := newUUID()
+	now := time.Now().Unix()
+
+	var jobPtr interface{}
+	if jobID != "" {
+		jobPtr = jobID
+	}
+
+	_, err := db.exec(
+		"INSERT INTO concurrency_locks (id, group_key, workflow_run_id, job_id, repo_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		id, groupKey, workflowRunID, jobPtr, repoID, now,
+	)
+	if err != nil {
+		// Likely unique constraint violation — group already locked
+		existing, getErr := db.GetConcurrencyLock(groupKey)
+		if getErr != nil {
+			return nil, false, err
+		}
+		return existing, false, nil
+	}
+
+	lock := &model.ConcurrencyLock{
+		ID:            id,
+		GroupKey:      groupKey,
+		WorkflowRunID: workflowRunID,
+		JobID:         jobID,
+		RepoID:        repoID,
+		CreatedAt:     time.Unix(now, 0),
+	}
+	return lock, true, nil
+}
+
+// GetConcurrencyLock retrieves the active lock for a concurrency group.
+func (db *DB) GetConcurrencyLock(groupKey string) (*model.ConcurrencyLock, error) {
+	var l model.ConcurrencyLock
+	var createdAt int64
+	var jobID sql.NullString
+
+	err := db.queryRow(
+		"SELECT id, group_key, workflow_run_id, job_id, repo_id, created_at FROM concurrency_locks WHERE group_key = ?",
+		groupKey,
+	).Scan(&l.ID, &l.GroupKey, &l.WorkflowRunID, &jobID, &l.RepoID, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	l.CreatedAt = time.Unix(createdAt, 0)
+	if jobID.Valid {
+		l.JobID = jobID.String
+	}
+	return &l, nil
+}
+
+// ReleaseConcurrencyLock releases a lock by workflow run ID.
+func (db *DB) ReleaseConcurrencyLock(workflowRunID string) error {
+	_, err := db.exec("DELETE FROM concurrency_locks WHERE workflow_run_id = ?", workflowRunID)
+	return err
+}
+
+// ReleaseConcurrencyLockByGroup releases a lock by group key.
+func (db *DB) ReleaseConcurrencyLockByGroup(groupKey string) error {
+	_, err := db.exec("DELETE FROM concurrency_locks WHERE group_key = ?", groupKey)
+	return err
+}
+
+// ReleaseStaleLocksForRepo releases locks for runs that are already completed.
+func (db *DB) ReleaseStaleLocksForRepo(repoID string) (int64, error) {
+	result, err := db.exec(
+		"DELETE FROM concurrency_locks WHERE repo_id = ? AND workflow_run_id IN (SELECT id FROM workflow_runs WHERE status = ?)",
+		repoID, model.RunStatusCompleted,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
 }

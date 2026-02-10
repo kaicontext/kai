@@ -9,9 +9,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"kailab-control/internal/model"
+	"kailab-control/internal/store"
+	"kailab-control/internal/workflow"
 )
 
 // Config holds runner configuration.
@@ -23,6 +26,7 @@ type Config struct {
 	PollInterval    time.Duration
 	Labels          []string
 	Kubeconfig      string
+	StorePath       string // Local store path for caches/artifacts (default: /tmp/kailab-ci-store)
 }
 
 // Runner executes CI jobs.
@@ -34,7 +38,16 @@ type Runner struct {
 
 // New creates a new runner.
 func New(cfg *Config) (*Runner, error) {
-	executor, err := NewExecutor(cfg.Namespace, cfg.Kubeconfig)
+	storePath := cfg.StorePath
+	if storePath == "" {
+		storePath = "/tmp/kailab-ci-store"
+	}
+	ciStore, err := store.NewLocalStore(storePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ci store: %w", err)
+	}
+
+	executor, err := NewExecutor(cfg.Namespace, cfg.Kubeconfig, ciStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create executor: %w", err)
 	}
@@ -126,6 +139,79 @@ func (r *Runner) claimJob(ctx context.Context) (*model.JobClaimResponse, error) 
 	return &claim, nil
 }
 
+// buildExprContext creates an expression context from the job claim.
+func buildExprContext(claim *model.JobClaimResponse) *workflow.ExprContext {
+	ec := workflow.NewExprContext()
+
+	// Populate github.* context
+	if repo, ok := claim.Context["repo"].(string); ok {
+		ec.GitHub["repository"] = repo
+	}
+	if ref, ok := claim.Context["ref"].(string); ok {
+		ec.GitHub["ref"] = ref
+		// Derive ref_name
+		name := ref
+		name = strings.TrimPrefix(name, "refs/heads/")
+		name = strings.TrimPrefix(name, "refs/tags/")
+		ec.GitHub["ref_name"] = name
+	}
+	if sha, ok := claim.Context["sha"].(string); ok {
+		ec.GitHub["sha"] = sha
+	}
+	if event, ok := claim.Context["event"].(string); ok {
+		ec.GitHub["event_name"] = event
+	}
+	if runID, ok := claim.Context["run_id"].(string); ok {
+		ec.GitHub["run_id"] = runID
+	}
+	// Nested event data (for workflow_dispatch inputs, etc.)
+	if eventData, ok := claim.Context["event_data"].(map[string]interface{}); ok {
+		ec.GitHub["event"] = eventData
+	}
+
+	// Populate secrets
+	if secrets, ok := claim.Context["secrets"].(map[string]string); ok {
+		ec.Secrets = secrets
+	}
+
+	// Populate matrix values
+	if matrixJSON, ok := claim.Context["matrix"].(string); ok && matrixJSON != "" {
+		var matrix map[string]interface{}
+		if err := json.Unmarshal([]byte(matrixJSON), &matrix); err == nil {
+			ec.Matrix = matrix
+		}
+	}
+	if matrix, ok := claim.Context["matrix"].(map[string]interface{}); ok {
+		ec.Matrix = matrix
+	}
+
+	// Populate runner context
+	ec.Runner["os"] = "Linux"
+	ec.Runner["arch"] = "X64"
+	ec.Runner["name"] = "kailab-runner"
+
+	// Populate inputs (workflow_dispatch)
+	if inputs, ok := claim.Context["inputs"].(map[string]string); ok {
+		ec.Inputs = inputs
+	}
+
+	// Default job status to success
+	ec.GitHub["job_status"] = "success"
+
+	return ec
+}
+
+// interpolateStep applies expression interpolation to a step definition.
+func interpolateStep(step *StepDefinition, ec *workflow.ExprContext) {
+	step.Run = workflow.Interpolate(step.Run, ec)
+	step.Uses = workflow.Interpolate(step.Uses, ec)
+	step.Name = workflow.Interpolate(step.Name, ec)
+	step.Shell = workflow.Interpolate(step.Shell, ec)
+	step.WorkingDir = workflow.Interpolate(step.WorkingDir, ec)
+	step.With = workflow.InterpolateMap(step.With, ec)
+	step.Env = workflow.InterpolateMap(step.Env, ec)
+}
+
 // executeJob runs a job to completion using one pod for all steps.
 func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) error {
 	job := claim.Job
@@ -165,6 +251,29 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		return fmt.Errorf("job definition not found")
 	}
 
+	// Build expression context from claim data
+	exprCtx := buildExprContext(claim)
+
+	// If job specifies a container image, pass it to the pod
+	if jobDef.Container != nil && jobDef.Container.Image != "" {
+		claim.Context["image"] = workflow.Interpolate(jobDef.Container.Image, exprCtx)
+	}
+
+	// Pass runs-on to the pod for image selection
+	if len(jobDef.RunsOn) > 0 {
+		claim.Context["runs_on"] = jobDef.RunsOn[0]
+	}
+
+	// Pass services to the pod for sidecar creation
+	if len(jobDef.Services) > 0 {
+		claim.Context["services"] = jobDef.Services
+	}
+
+	// Add job-level env vars to expression context
+	for k, v := range jobDef.Env {
+		exprCtx.Env[k] = workflow.Interpolate(v, exprCtx)
+	}
+
 	// Create a single pod for the entire job
 	jobLog := &logWriter{runner: r, ctx: ctx, jobID: job.ID, stepID: ""}
 	fmt.Fprintf(jobLog, "=== Creating job pod ===\n")
@@ -190,7 +299,8 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		// Get step definition
 		var stepDef *StepDefinition
 		if i < len(jobDef.Steps) {
-			stepDef = &jobDef.Steps[i]
+			sd := jobDef.Steps[i] // copy to avoid mutating original
+			stepDef = &sd
 		}
 
 		if stepDef == nil {
@@ -198,6 +308,18 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 			r.completeStep(ctx, job.ID, i, model.ConclusionSkipped)
 			continue
 		}
+
+		// Evaluate if: conditional
+		if stepDef.If != "" {
+			if !workflow.EvalExprBool(stepDef.If, exprCtx) {
+				fmt.Fprintf(stepLog, "Skipped (if: %s evaluated to false)\n\n", stepDef.If)
+				r.completeStep(ctx, job.ID, i, model.ConclusionSkipped)
+				continue
+			}
+		}
+
+		// Interpolate expressions in step fields
+		interpolateStep(stepDef, exprCtx)
 
 		// Execute step in the job pod
 		result, err := jobPod.ExecuteStep(ctx, stepDef, claim.Context, stepLog)
@@ -211,12 +333,43 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 			conclusion = model.ConclusionFailure
 		}
 
+		// Capture step outputs from GITHUB_OUTPUT file
+		stepOutputs := make(map[string]string)
+		if stepDef.ID != "" {
+			outputResult, outputErr := jobPod.ExecuteStep(ctx, &StepDefinition{
+				Run:   "cat /tmp/github_output 2>/dev/null || true",
+				Shell: "bash",
+			}, claim.Context, io.Discard)
+			if outputErr == nil && outputResult.Output != "" {
+				stepOutputs = parseEnvFile(outputResult.Output)
+			}
+			// Clear the output file for the next step
+			jobPod.ExecuteStep(ctx, &StepDefinition{
+				Run:   "truncate -s 0 /tmp/github_output 2>/dev/null || true",
+				Shell: "bash",
+			}, claim.Context, io.Discard)
+		}
+
+		// Record step result for steps.* context
+		stepOutcome := "success"
+		if conclusion == model.ConclusionFailure {
+			stepOutcome = "failure"
+		}
+		if stepDef.ID != "" {
+			exprCtx.Steps[stepDef.ID] = workflow.StepResult{
+				Outputs:    stepOutputs,
+				Outcome:    stepOutcome,
+				Conclusion: stepOutcome,
+			}
+		}
+
 		// Complete step
 		r.completeStep(ctx, job.ID, i, conclusion)
 		fmt.Fprintf(stepLog, "Step completed: %s\n\n", conclusion)
 
 		if conclusion == model.ConclusionFailure {
 			allSuccess = false
+			exprCtx.GitHub["job_status"] = "failure"
 			// Check if we should continue on error
 			if stepDef != nil && !stepDef.ContinueOnError {
 				break
@@ -355,8 +508,28 @@ type ParsedWorkflow struct {
 }
 
 type JobDefinition struct {
-	Name  string           `json:"name"`
-	Steps []StepDefinition `json:"steps"`
+	Name      string                     `json:"name"`
+	RunsOn    []string                   `json:"runs_on"`
+	Container *ContainerDef              `json:"container,omitempty"`
+	Services  map[string]ServiceDef      `json:"services,omitempty"`
+	Steps     []StepDefinition           `json:"steps"`
+	Env       map[string]string          `json:"env,omitempty"`
+}
+
+type ServiceDef struct {
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Ports   []string          `json:"ports,omitempty"`
+	Volumes []string          `json:"volumes,omitempty"`
+	Options string            `json:"options,omitempty"`
+}
+
+type ContainerDef struct {
+	Image       string            `json:"image"`
+	Env         map[string]string `json:"env,omitempty"`
+	Ports       []string          `json:"ports,omitempty"`
+	Volumes     []string          `json:"volumes,omitempty"`
+	Options     string            `json:"options,omitempty"`
 }
 
 type StepDefinition struct {
@@ -390,4 +563,48 @@ func getJobDisplayName(j *JobDefinition, key string) string {
 
 func containsPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+// parseEnvFile parses a GITHUB_OUTPUT/GITHUB_ENV style file.
+// Format: KEY=VALUE (one per line) or KEY<<DELIMITER\nVALUE\nDELIMITER for multiline.
+func parseEnvFile(content string) map[string]string {
+	result := make(map[string]string)
+	lines := strings.Split(content, "\n")
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			i++
+			continue
+		}
+		eqIdx := strings.Index(line, "=")
+		if eqIdx == -1 {
+			i++
+			continue
+		}
+		key := line[:eqIdx]
+		value := line[eqIdx+1:]
+
+		// Check for multiline value: KEY<<DELIMITER
+		if strings.HasPrefix(value, "<<") {
+			delimiter := strings.TrimPrefix(value, "<<")
+			var multiline strings.Builder
+			i++
+			for i < len(lines) {
+				if strings.TrimSpace(lines[i]) == delimiter {
+					break
+				}
+				if multiline.Len() > 0 {
+					multiline.WriteString("\n")
+				}
+				multiline.WriteString(lines[i])
+				i++
+			}
+			result[key] = multiline.String()
+		} else {
+			result[key] = value
+		}
+		i++
+	}
+	return result
 }

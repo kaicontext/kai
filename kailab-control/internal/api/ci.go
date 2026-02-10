@@ -947,10 +947,41 @@ func (h *Handler) TriggerCI(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Check concurrency controls
+		var concurrencyGroup string
+		if parsedWF.Concurrency != nil && parsedWF.Concurrency.Group != "" {
+			ec := workflow.NewExprContext()
+			ec.GitHub["repository"] = orgSlug + "/" + repoName
+			ec.GitHub["ref"] = req.Ref
+			ec.GitHub["ref_name"] = strings.TrimPrefix(strings.TrimPrefix(req.Ref, "refs/heads/"), "refs/tags/")
+			ec.GitHub["sha"] = req.SHA
+			ec.GitHub["event_name"] = req.Event
+			ec.GitHub["workflow"] = wf.Name
+			concurrencyGroup = workflow.Interpolate(parsedWF.Concurrency.Group, ec)
+
+			existing, err := h.db.GetConcurrencyLock(concurrencyGroup)
+			if err == nil && existing != nil {
+				// Another run holds the lock
+				if parsedWF.Concurrency.CancelInProgress {
+					// Cancel the in-progress run and take the lock
+					h.db.CompleteWorkflowRun(existing.WorkflowRunID, model.ConclusionCancelled)
+					h.db.ReleaseConcurrencyLock(existing.WorkflowRunID)
+				} else {
+					// Skip this trigger - group is busy
+					continue
+				}
+			}
+		}
+
 		// Create workflow run
 		run, err := h.db.CreateWorkflowRun(wf.ID, repo.ID, req.Event, req.Ref, req.SHA, string(payloadJSON), "")
 		if err != nil {
 			continue
+		}
+
+		// Acquire concurrency lock with the run ID
+		if concurrencyGroup != "" {
+			h.db.AcquireConcurrencyLock(concurrencyGroup, run.ID, repo.ID, "")
 		}
 
 		// Create jobs from workflow
@@ -1007,13 +1038,23 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 	org, _ := h.db.GetOrgByID(repo.OrgID)
 	secrets, _ := h.db.ListRepoSecrets(repo.ID, org.ID)
 
+	// Build clone URL from shard
+	shardURL := h.cfg.Shards["default"]
+	if repo.ShardHint != "" {
+		if u, ok := h.cfg.Shards[repo.ShardHint]; ok {
+			shardURL = u
+		}
+	}
+	cloneURL := fmt.Sprintf("%s/%s/%s", shardURL, org.Slug, repo.Name)
+
 	// Build context
 	context := map[string]interface{}{
-		"repo":   org.Slug + "/" + repo.Name,
-		"ref":    run.TriggerRef,
-		"sha":    run.TriggerSHA,
-		"event":  run.TriggerEvent,
-		"run_id": run.ID,
+		"repo":      org.Slug + "/" + repo.Name,
+		"ref":       run.TriggerRef,
+		"sha":       run.TriggerSHA,
+		"event":     run.TriggerEvent,
+		"run_id":    run.ID,
+		"clone_url": cloneURL,
 	}
 
 	// Add secrets (decrypted - TODO: proper decryption)
@@ -1188,7 +1229,7 @@ func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.Workflow
 				matrixJSON = string(b)
 			}
 
-			job, err := h.db.CreateJob(run.ID, ej.Name, []string(ej.Job.Needs), matrixJSON)
+			job, err := h.db.CreateJob(run.ID, ej.Name, []string(ej.Job.Needs), matrixJSON, []string(ej.Job.RunsOn))
 			if err != nil {
 				return err
 			}
@@ -1245,6 +1286,9 @@ func (h *Handler) checkAndCompleteWorkflowRun(runID string) {
 	}
 
 	h.db.CompleteWorkflowRun(runID, conclusion)
+
+	// Release any concurrency locks held by this run
+	h.db.ReleaseConcurrencyLock(runID)
 
 	// Send pipeline notification
 	h.sendPipelineNotification(runID, conclusion)

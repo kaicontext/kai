@@ -44,6 +44,12 @@ var sqliteCISchema string
 //go:embed schema/0004_ci_pg.sql
 var postgresCISchema string
 
+//go:embed schema/0005_ci_enhancements.sql
+var sqliteCIEnhancementsSchema string
+
+//go:embed schema/0005_ci_enhancements_pg.sql
+var postgresCIEnhancementsSchema string
+
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -133,6 +139,10 @@ func (db *DB) initSQLite() error {
 	if _, err := db.DB.Exec(sqliteCISchema); err != nil {
 		return fmt.Errorf("running SQLite CI migrations: %w", err)
 	}
+	// Run CI enhancements schema
+	if _, err := db.DB.Exec(sqliteCIEnhancementsSchema); err != nil {
+		return fmt.Errorf("running SQLite CI enhancements migrations: %w", err)
+	}
 	return nil
 }
 
@@ -153,6 +163,10 @@ func (db *DB) initPostgres() error {
 	// Run CI schema
 	if _, err := db.DB.Exec(postgresCISchema); err != nil {
 		return fmt.Errorf("running PostgreSQL CI migrations: %w", err)
+	}
+	// Run CI enhancements schema
+	if _, err := db.DB.Exec(postgresCIEnhancementsSchema); err != nil {
+		return fmt.Errorf("running PostgreSQL CI enhancements migrations: %w", err)
 	}
 	return nil
 }
