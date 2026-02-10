@@ -25,22 +25,24 @@ func main() {
 		kubeconfig   = flag.String("kubeconfig", getEnv("KUBECONFIG", ""), "Path to kubeconfig (uses in-cluster config if empty)")
 		gcsBucket    = flag.String("gcs-bucket", getEnv("KR_GCS_BUCKET", ""), "GCS bucket for CI caches/artifacts (uses local store if empty)")
 		gcsPrefix    = flag.String("gcs-prefix", getEnv("KR_GCS_PREFIX", "ci"), "GCS key prefix")
-		storePath    = flag.String("store-path", getEnv("KR_STORE_PATH", "/tmp/kailab-ci-store"), "Local store path (used when GCS is not configured)")
+		storePath      = flag.String("store-path", getEnv("KR_STORE_PATH", "/tmp/kailab-ci-store"), "Local store path (used when GCS is not configured)")
+		serviceAccount = flag.String("service-account", getEnv("KR_SERVICE_ACCOUNT", "kailab-runner"), "Kubernetes service account for job pods")
 	)
 	flag.Parse()
 
 	// Build config
 	cfg := &runner.Config{
-		ControlPlaneURL: *controlPlane,
-		RunnerName:      *runnerName,
-		RunnerID:        *runnerID,
-		Namespace:       *namespace,
-		PollInterval:    *pollInterval,
-		Labels:          parseLabels(*labels),
-		Kubeconfig:      *kubeconfig,
-		GCSBucket:       *gcsBucket,
-		GCSPrefix:       *gcsPrefix,
-		StorePath:       *storePath,
+		ControlPlaneURL:    *controlPlane,
+		RunnerName:         *runnerName,
+		RunnerID:           *runnerID,
+		Namespace:          *namespace,
+		PollInterval:       *pollInterval,
+		Labels:             parseLabels(*labels),
+		Kubeconfig:         *kubeconfig,
+		GCSBucket:          *gcsBucket,
+		GCSPrefix:          *gcsPrefix,
+		StorePath:          *storePath,
+		ServiceAccountName: *serviceAccount,
 	}
 
 	// Create runner

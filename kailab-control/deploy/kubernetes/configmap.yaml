@@ -14,3 +14,5 @@ data:
   # CI store (GCS)
   KR_GCS_BUCKET: "kailab-ci-store"
   KR_GCS_PREFIX: "ci"
+  # Kubernetes service account for job pods (Workload Identity)
+  KR_SERVICE_ACCOUNT: "kailab-runner"

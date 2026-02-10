@@ -26,9 +26,10 @@ type Config struct {
 	PollInterval    time.Duration
 	Labels          []string
 	Kubeconfig      string
-	StorePath       string // Local store path for caches/artifacts (default: /tmp/kailab-ci-store)
-	GCSBucket       string // GCS bucket for caches/artifacts (if set, uses GCS instead of local)
-	GCSPrefix       string // GCS key prefix (default: "ci")
+	StorePath          string // Local store path for caches/artifacts (default: /tmp/kailab-ci-store)
+	GCSBucket          string // GCS bucket for caches/artifacts (if set, uses GCS instead of local)
+	GCSPrefix          string // GCS key prefix (default: "ci")
+	ServiceAccountName string // Kubernetes service account for job pods (default: "kailab-runner")
 }
 
 // Runner executes CI jobs.
@@ -66,7 +67,12 @@ func New(cfg *Config) (*Runner, error) {
 		log.Printf("Using local store: %s", storePath)
 	}
 
-	executor, err := NewExecutor(cfg.Namespace, cfg.Kubeconfig, ciStore)
+	saName := cfg.ServiceAccountName
+	if saName == "" {
+		saName = "kailab-runner"
+	}
+
+	executor, err := NewExecutor(cfg.Namespace, cfg.Kubeconfig, saName, ciStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create executor: %w", err)
 	}

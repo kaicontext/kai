@@ -21,14 +21,15 @@ import (
 
 // Executor runs jobs in Kubernetes pods.
 type Executor struct {
-	client    *kubernetes.Clientset
-	config    *rest.Config
-	namespace string
-	store     store.Store
+	client             *kubernetes.Clientset
+	config             *rest.Config
+	namespace          string
+	store              store.Store
+	serviceAccountName string
 }
 
 // NewExecutor creates a new Kubernetes executor.
-func NewExecutor(namespace, kubeconfig string, ciStore store.Store) (*Executor, error) {
+func NewExecutor(namespace, kubeconfig, serviceAccountName string, ciStore store.Store) (*Executor, error) {
 	var config *rest.Config
 	var err error
 
@@ -47,10 +48,11 @@ func NewExecutor(namespace, kubeconfig string, ciStore store.Store) (*Executor, 
 	}
 
 	return &Executor{
-		client:    client,
-		config:    config,
-		namespace: namespace,
-		store:     ciStore,
+		client:             client,
+		config:             config,
+		namespace:          namespace,
+		store:              ciStore,
+		serviceAccountName: serviceAccountName,
 	}, nil
 }
 
@@ -142,8 +144,9 @@ func (e *Executor) CreateJobPod(ctx context.Context, jobID, jobName string, jobC
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers:    containers,
+			RestartPolicy:      corev1.RestartPolicyNever,
+			ServiceAccountName: e.serviceAccountName,
+			Containers:         containers,
 			Volumes: []corev1.Volume{
 				{
 					Name: "workspace",
@@ -322,6 +325,16 @@ func (jp *JobPod) executeAction(ctx context.Context, stepDef *StepDefinition, jo
 		return jp.actionUploadArtifact(ctx, stepDef, jobContext, logWriter)
 	case strings.HasPrefix(action, "actions/download-artifact"):
 		return jp.actionDownloadArtifact(ctx, stepDef, jobContext, logWriter)
+	case strings.HasPrefix(action, "docker/setup-qemu-action"):
+		return jp.actionDockerSetupQemu(ctx, stepDef, logWriter)
+	case strings.HasPrefix(action, "docker/setup-buildx-action"):
+		return jp.actionDockerSetupBuildx(ctx, stepDef, logWriter)
+	case strings.HasPrefix(action, "docker/login-action"):
+		return jp.actionDockerLogin(ctx, stepDef, logWriter)
+	case strings.HasPrefix(action, "docker/metadata-action"):
+		return jp.actionDockerMetadata(ctx, stepDef, jobContext, logWriter)
+	case strings.HasPrefix(action, "docker/build-push-action"):
+		return jp.actionDockerBuildPush(ctx, stepDef, logWriter)
 	default:
 		// Try to run as a generic action (clone and execute action.yml)
 		return jp.actionGeneric(ctx, stepDef, jobContext, logWriter)
@@ -777,6 +790,477 @@ func (jp *JobPod) actionDownloadArtifact(ctx context.Context, stepDef *StepDefin
 	}
 
 	return &ExecutionResult{ExitCode: 0}, nil
+}
+
+// Docker action handlers
+
+func (jp *JobPod) actionDockerSetupQemu(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
+	fmt.Fprintf(logWriter, "Setting up QEMU (multi-arch support)\n")
+
+	script := `
+set -e
+echo "==> docker/setup-qemu-action"
+if command -v qemu-aarch64-static &> /dev/null; then
+    echo "QEMU already installed"
+else
+    echo "Installing qemu-user-static..."
+    apt-get update -qq && apt-get install -y -qq qemu-user-static binfmt-support > /dev/null 2>&1 || {
+        echo "Warning: could not install QEMU (may need privileged mode). Continuing without multi-arch support."
+    }
+fi
+echo "QEMU setup complete"
+`
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+}
+
+func (jp *JobPod) actionDockerSetupBuildx(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
+	fmt.Fprintf(logWriter, "Setting up Buildah (Buildx equivalent)\n")
+
+	script := `
+set -e
+echo "==> docker/setup-buildx-action (using Buildah)"
+
+if command -v buildah &> /dev/null; then
+    echo "Buildah already installed: $(buildah --version)"
+else
+    echo "Installing Buildah..."
+    apt-get update -qq && apt-get install -y -qq buildah fuse-overlayfs > /dev/null 2>&1 || {
+        # Fallback: try adding the Kubic repo for newer Ubuntu
+        . /etc/os-release
+        echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID}/ /" > /etc/apt/sources.list.d/devel:kubic.list 2>/dev/null || true
+        apt-get update -qq 2>/dev/null
+        apt-get install -y -qq buildah > /dev/null 2>&1
+    }
+fi
+
+# Configure Buildah for unprivileged operation with VFS storage driver
+mkdir -p /etc/containers
+cat > /etc/containers/storage.conf << 'STORAGEEOF'
+[storage]
+driver = "vfs"
+STORAGEEOF
+
+# Configure default policy to allow all images
+if [ ! -f /etc/containers/policy.json ]; then
+    cat > /etc/containers/policy.json << 'POLICYEOF'
+{"default":[{"type":"insecureAcceptAnything"}]}
+POLICYEOF
+fi
+
+# Configure registries
+if [ ! -f /etc/containers/registries.conf ]; then
+    cat > /etc/containers/registries.conf << 'REGEOF'
+[registries.search]
+registries = ['docker.io']
+REGEOF
+fi
+
+buildah --version
+echo "Buildah setup complete (VFS storage driver)"
+`
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+}
+
+func (jp *JobPod) actionDockerLogin(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
+	registry := stepDef.With["registry"]
+	username := stepDef.With["username"]
+	password := stepDef.With["password"]
+
+	if registry == "" {
+		registry = "docker.io"
+	}
+
+	fmt.Fprintf(logWriter, "Logging in to %s\n", registry)
+
+	// Detect GCP Artifact Registry and use Workload Identity
+	if strings.Contains(registry, "-docker.pkg.dev") && username == "" && password == "" {
+		script := fmt.Sprintf(`
+set -e
+echo "==> docker/login-action (Artifact Registry via Workload Identity)"
+
+# Install gcloud if not available
+if ! command -v gcloud &> /dev/null; then
+    echo "Installing gcloud CLI..."
+    apt-get update -qq && apt-get install -y -qq curl ca-certificates apt-transport-https gnupg > /dev/null 2>&1
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg 2>/dev/null
+    apt-get update -qq && apt-get install -y -qq google-cloud-cli > /dev/null 2>&1
+fi
+
+# Get access token via Workload Identity (metadata server)
+echo "Fetching Workload Identity token..."
+TOKEN=$(gcloud auth print-access-token 2>/dev/null) || {
+    echo "Warning: gcloud auth failed, trying metadata server directly..."
+    TOKEN=$(curl -s -H "Metadata-Flavor: Google" \
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" | \
+        python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])" 2>/dev/null) || {
+        # Last resort: try with jq
+        TOKEN=$(curl -s -H "Metadata-Flavor: Google" \
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" | \
+            grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+    }
+}
+
+if [ -z "$TOKEN" ]; then
+    echo "Error: could not obtain access token"
+    exit 1
+fi
+
+# Install buildah if not available (login-action may run before setup-buildx)
+if ! command -v buildah &> /dev/null; then
+    apt-get update -qq && apt-get install -y -qq buildah > /dev/null 2>&1
+fi
+
+echo "$TOKEN" | buildah login --storage-driver=vfs -u oauth2accesstoken --password-stdin %s
+echo "Login to %s successful"
+`, registry, registry)
+
+		return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+	}
+
+	// Explicit username/password login
+	if username == "" || password == "" {
+		fmt.Fprintf(logWriter, "Warning: no credentials provided for %s, skipping login\n", registry)
+		return &ExecutionResult{ExitCode: 0}, nil
+	}
+
+	script := fmt.Sprintf(`
+set -e
+echo "==> docker/login-action"
+
+# Install buildah if not available
+if ! command -v buildah &> /dev/null; then
+    apt-get update -qq && apt-get install -y -qq buildah > /dev/null 2>&1
+fi
+
+echo %q | buildah login --storage-driver=vfs -u %q --password-stdin %s
+echo "Login to %s successful"
+`, password, username, registry, registry)
+
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+}
+
+func (jp *JobPod) actionDockerMetadata(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
+	images := stepDef.With["images"]
+	tags := stepDef.With["tags"]
+
+	fmt.Fprintf(logWriter, "Generating Docker metadata\n")
+
+	ref, _ := jobContext["ref"].(string)
+	sha, _ := jobContext["sha"].(string)
+	defaultBranch, _ := jobContext["default_branch"].(string)
+
+	// Derive ref name
+	refName := ref
+	refName = strings.TrimPrefix(refName, "refs/heads/")
+	refName = strings.TrimPrefix(refName, "refs/tags/")
+
+	isTag := strings.HasPrefix(ref, "refs/tags/")
+	isDefaultBranch := refName == defaultBranch || (defaultBranch == "" && refName == "main")
+
+	// Parse image list
+	imageList := parseMultiline(images)
+	if len(imageList) == 0 {
+		fmt.Fprintf(logWriter, "Warning: no images specified\n")
+		return &ExecutionResult{ExitCode: 0}, nil
+	}
+
+	// Parse tag rules and generate tags
+	tagRules := parseMultiline(tags)
+	var generatedTags []string
+	var labels []string
+
+	for _, rule := range tagRules {
+		parsed := parseTagRule(rule)
+		tagType := parsed["type"]
+		enabled := parsed["enable"]
+
+		// Check enable conditions
+		if enabled != "" && !evaluateMetadataCondition(enabled, isDefaultBranch, isTag) {
+			continue
+		}
+
+		var tagValue string
+		switch tagType {
+		case "sha":
+			prefix := parsed["prefix"]
+			if prefix == "" {
+				prefix = "sha-"
+			}
+			tagValue = prefix + sha[:minInt(7, len(sha))]
+		case "ref":
+			if event := parsed["event"]; event == "branch" || event == "" {
+				tagValue = sanitizeDockerTag(refName)
+			} else if event == "tag" && isTag {
+				tagValue = refName
+			}
+		case "raw":
+			tagValue = parsed["value"]
+		case "semver":
+			if isTag {
+				pattern := parsed["pattern"]
+				tagValue = applySemverPattern(pattern, refName)
+			}
+		case "schedule":
+			tagValue = parsed["pattern"]
+			if tagValue == "" {
+				tagValue = "nightly"
+			}
+		default:
+			// Default: treat the whole rule as a raw tag if it doesn't look like type=
+			if !strings.Contains(rule, "type=") {
+				tagValue = strings.TrimSpace(rule)
+			}
+		}
+
+		if tagValue == "" {
+			continue
+		}
+
+		// Apply tag to all images
+		for _, img := range imageList {
+			generatedTags = append(generatedTags, img+":"+tagValue)
+		}
+	}
+
+	// If no tag rules produced anything, apply defaults
+	if len(generatedTags) == 0 {
+		tag := sanitizeDockerTag(refName)
+		if tag == "" {
+			tag = "latest"
+		}
+		for _, img := range imageList {
+			generatedTags = append(generatedTags, img+":"+tag)
+		}
+	}
+
+	// Generate OCI labels
+	labels = append(labels,
+		fmt.Sprintf("org.opencontainers.image.revision=%s", sha),
+		fmt.Sprintf("org.opencontainers.image.source=%s", ref),
+	)
+
+	// Write to GITHUB_OUTPUT
+	tagsOutput := strings.Join(generatedTags, "\n")
+	labelsOutput := strings.Join(labels, "\n")
+
+	script := fmt.Sprintf(`
+echo "==> docker/metadata-action"
+cat >> /tmp/github_output << 'METAEOF'
+tags<<TAGDELIM
+%s
+TAGDELIM
+labels<<LABELDELIM
+%s
+LABELDELIM
+METAEOF
+
+echo "Generated tags:"
+echo %q
+echo "Generated labels:"
+echo %q
+`, tagsOutput, labelsOutput, tagsOutput, labelsOutput)
+
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+}
+
+func (jp *JobPod) actionDockerBuildPush(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
+	dockerContext := stepDef.With["context"]
+	dockerfile := stepDef.With["file"]
+	tagsRaw := stepDef.With["tags"]
+	labelsRaw := stepDef.With["labels"]
+	buildArgs := stepDef.With["build-args"]
+	target := stepDef.With["target"]
+	push := stepDef.With["push"]
+
+	if dockerContext == "" {
+		dockerContext = "."
+	}
+	if dockerfile == "" {
+		dockerfile = dockerContext + "/Dockerfile"
+	}
+
+	fmt.Fprintf(logWriter, "Building Docker image with Buildah\n")
+
+	// Build tag arguments
+	tags := parseMultiline(tagsRaw)
+	var tagArgs string
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tagArgs += fmt.Sprintf(" -t %q", t)
+		}
+	}
+
+	// Build label arguments
+	labels := parseMultiline(labelsRaw)
+	var labelArgs string
+	for _, l := range labels {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			labelArgs += fmt.Sprintf(" --label %q", l)
+		}
+	}
+
+	// Build build-arg arguments
+	args := parseMultiline(buildArgs)
+	var buildArgArgs string
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			buildArgArgs += fmt.Sprintf(" --build-arg %q", a)
+		}
+	}
+
+	// Target stage
+	var targetArg string
+	if target != "" {
+		targetArg = fmt.Sprintf(" --target %q", target)
+	}
+
+	script := fmt.Sprintf(`
+set -e
+echo "==> docker/build-push-action (using Buildah)"
+
+# Ensure buildah is available
+if ! command -v buildah &> /dev/null; then
+    echo "Error: buildah not installed. Add docker/setup-buildx-action step first."
+    exit 1
+fi
+
+echo "Building image..."
+echo "  Context: %s"
+echo "  Dockerfile: %s"
+
+buildah bud --storage-driver=vfs \
+    -f %q \
+    %s%s%s%s \
+    %s
+
+echo "Build complete"
+`, dockerContext, dockerfile, dockerfile, tagArgs, labelArgs, buildArgArgs, targetArg, dockerContext)
+
+	// Add push commands if push=true
+	if push == "true" {
+		for _, t := range tags {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				script += fmt.Sprintf(`
+echo "Pushing %s..."
+buildah push --storage-driver=vfs %q
+`, t, t)
+			}
+		}
+		script += `echo "Push complete"
+`
+	}
+
+	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+}
+
+// Docker metadata helpers
+
+// parseMultiline splits a string on newlines and trims whitespace.
+func parseMultiline(s string) []string {
+	var result []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+	return result
+}
+
+// parseTagRule parses a tag rule like "type=sha,prefix=sha-" into a map.
+func parseTagRule(rule string) map[string]string {
+	result := make(map[string]string)
+	for _, part := range strings.Split(rule, ",") {
+		part = strings.TrimSpace(part)
+		if eqIdx := strings.Index(part, "="); eqIdx >= 0 {
+			result[part[:eqIdx]] = part[eqIdx+1:]
+		}
+	}
+	return result
+}
+
+// evaluateMetadataCondition handles simple metadata enable conditions.
+func evaluateMetadataCondition(expr string, isDefault, isTag bool) bool {
+	expr = strings.TrimSpace(expr)
+	switch expr {
+	case "true":
+		return true
+	case "false":
+		return false
+	case "{{is_default_branch}}":
+		return isDefault
+	}
+	return true
+}
+
+// sanitizeDockerTag makes a string safe for use as a Docker tag.
+func sanitizeDockerTag(s string) string {
+	var result []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' {
+			result = append(result, c)
+		} else {
+			result = append(result, '-')
+		}
+	}
+	// Docker tags can't start with . or -
+	for len(result) > 0 && (result[0] == '.' || result[0] == '-') {
+		result = result[1:]
+	}
+	if len(result) == 0 {
+		return "latest"
+	}
+	// Limit to 128 chars
+	if len(result) > 128 {
+		result = result[:128]
+	}
+	return string(result)
+}
+
+// applySemverPattern applies a semver pattern to a version string.
+func applySemverPattern(pattern, version string) string {
+	// Strip v prefix for parsing
+	v := strings.TrimPrefix(version, "v")
+	parts := strings.SplitN(v, ".", 3)
+
+	major := ""
+	minor := ""
+	patch := ""
+	if len(parts) >= 1 {
+		major = parts[0]
+	}
+	if len(parts) >= 2 {
+		minor = parts[1]
+	}
+	if len(parts) >= 3 {
+		patch = parts[2]
+	}
+
+	if pattern == "" {
+		pattern = "{{version}}"
+	}
+
+	result := pattern
+	result = strings.ReplaceAll(result, "{{version}}", v)
+	result = strings.ReplaceAll(result, "{{major}}", major)
+	result = strings.ReplaceAll(result, "{{minor}}", minor)
+	result = strings.ReplaceAll(result, "{{patch}}", patch)
+	result = strings.ReplaceAll(result, "{{major}}.{{minor}}", major+"."+minor)
+	result = strings.ReplaceAll(result, "{{major}}.{{minor}}.{{patch}}", v)
+	return result
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // actionGeneric handles unknown actions by cloning the action repo and running action.yml.
