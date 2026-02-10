@@ -47,7 +47,13 @@ spec:
             runAsUser: 1000
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir: {}
       imagePullSecrets:
         - name: ghcr-pull-secret
