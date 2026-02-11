@@ -177,6 +177,74 @@ func (h *Handler) GetRepo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type UpdateRepoRequest struct {
+	Name       string `json:"name"`
+	Visibility string `json:"visibility"`
+}
+
+func (h *Handler) UpdateRepo(w http.ResponseWriter, r *http.Request) {
+	user := UserFromContext(r.Context())
+	org := OrgFromContext(r.Context())
+	repo := RepoFromContext(r.Context())
+
+	if user == nil || org == nil || repo == nil {
+		writeError(w, http.StatusInternalServerError, "missing context", nil)
+		return
+	}
+
+	var req UpdateRepoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	// Use existing values as defaults
+	name := repo.Name
+	visibility := repo.Visibility
+
+	if req.Name != "" {
+		name = NormalizeSlug(req.Name)
+		if !ValidateSlug(name) {
+			writeError(w, http.StatusBadRequest, "invalid repo name: must be 1-63 lowercase letters, numbers, hyphens, underscores, dots", nil)
+			return
+		}
+	}
+
+	if req.Visibility != "" {
+		visibility = req.Visibility
+		if visibility != "private" && visibility != "public" && visibility != "internal" {
+			writeError(w, http.StatusBadRequest, "invalid visibility: must be private, public, or internal", nil)
+			return
+		}
+	}
+
+	updated, err := h.db.UpdateRepo(repo.ID, name, visibility)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update repo", err)
+		return
+	}
+
+	// Audit
+	h.db.WriteAudit(&org.ID, &user.ID, "repo.update", "repo", repo.ID, map[string]string{
+		"name":       name,
+		"visibility": visibility,
+	})
+
+	cloneURL := fmt.Sprintf("%s/%s/%s", h.cfg.BaseURL, org.Slug, updated.Name)
+
+	writeJSON(w, http.StatusOK, RepoResponse{
+		ID:         updated.ID,
+		OrgID:      updated.OrgID,
+		OrgSlug:    org.Slug,
+		Name:       updated.Name,
+		Visibility: updated.Visibility,
+		ShardHint:  updated.ShardHint,
+		CreatedBy:  updated.CreatedBy,
+		CreatedAt:  updated.CreatedAt.Format(time.RFC3339),
+		CloneURL:   cloneURL,
+	})
+}
+
 func (h *Handler) DeleteRepo(w http.ResponseWriter, r *http.Request) {
 	user := UserFromContext(r.Context())
 	org := OrgFromContext(r.Context())

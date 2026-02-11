@@ -131,6 +131,13 @@ func NewRouter(h *Handler) http.Handler {
 		h.RequireMembership("reporter"),
 		h.WithRepo,
 	))
+	mux.Handle("PATCH /api/v1/orgs/{org}/repos/{repo}", Chain(
+		http.HandlerFunc(h.UpdateRepo),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("admin"),
+		h.WithRepo,
+	))
 	mux.Handle("DELETE /api/v1/orgs/{org}/repos/{repo}", Chain(
 		http.HandlerFunc(h.DeleteRepo),
 		h.WithAuth,

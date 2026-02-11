@@ -646,6 +646,18 @@ func (db *DB) ListOrgRepos(orgID string) ([]*model.Repo, error) {
 	return repos, rows.Err()
 }
 
+// UpdateRepo updates a repo's name and/or visibility.
+func (db *DB) UpdateRepo(id, name, visibility string) (*model.Repo, error) {
+	_, err := db.exec(
+		"UPDATE repos SET name = ?, visibility = ? WHERE id = ?",
+		name, visibility, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetRepoByID(id)
+}
+
 // DeleteRepo deletes a repo.
 func (db *DB) DeleteRepo(id string) error {
 	_, err := db.exec("DELETE FROM repos WHERE id = ?", id)
