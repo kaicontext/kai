@@ -1012,6 +1012,10 @@ func (h *Handler) TriggerCI(w http.ResponseWriter, r *http.Request) {
 		triggerType = "review"
 	case "review_updated":
 		triggerType = "review"
+	case "schedule":
+		triggerType = "schedule"
+	case "workflow_call":
+		triggerType = "workflow_call"
 	default:
 		writeError(w, http.StatusBadRequest, "unsupported event type", nil)
 		return
@@ -1174,6 +1178,35 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 			varsMap[v.Name] = v.Value
 		}
 		context["vars"] = varsMap
+	}
+
+	// For reusable workflow jobs (name contains "/"), extract inputs from the
+	// caller job's env vars (INPUT_*) by parsing the workflow definition.
+	if strings.Contains(job.Name, "/") {
+		parsedWF, parseErr := workflow.FromJSON(wf.ParsedJSON)
+		if parseErr == nil {
+			// Find the job definition and extract INPUT_ env vars as inputs
+			for _, jobDef := range parsedWF.Jobs {
+				displayName := jobDef.Name
+				if displayName == "" {
+					// Jobs are keyed, not named — we match by checking all jobs
+					continue
+				}
+				if displayName == job.Name {
+					inputsMap := make(map[string]string)
+					for k, v := range jobDef.Env {
+						if strings.HasPrefix(k, "INPUT_") {
+							inputName := strings.ToLower(strings.TrimPrefix(k, "INPUT_"))
+							inputsMap[inputName] = v
+						}
+					}
+					if len(inputsMap) > 0 {
+						context["inputs"] = inputsMap
+					}
+					break
+				}
+			}
+		}
 	}
 
 	// Add dependency job outputs (needs.*)
@@ -1352,6 +1385,12 @@ func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.Workflow
 		return err
 	}
 
+	// Resolve reusable workflow calls — replace job-level `uses:` with inlined jobs
+	if err := h.resolveReusableWorkflows(wf.RepoID, parsedWF); err != nil {
+		log.Printf("Warning: failed to resolve reusable workflows: %v", err)
+		// Continue with what we have
+	}
+
 	// Expand jobs with matrix
 	expandedJobs, err := workflow.ExpandJobsWithMatrix(parsedWF)
 	if err != nil {
@@ -1389,6 +1428,99 @@ func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.Workflow
 				}
 			}
 		}
+	}
+
+	return nil
+}
+
+// resolveReusableWorkflows resolves job-level `uses:` references to reusable workflows.
+// It replaces each reusable-workflow job with the inlined jobs from the called workflow,
+// prefixed with the caller job name and wired with proper dependencies.
+func (h *Handler) resolveReusableWorkflows(repoID string, parsedWF *workflow.Workflow) error {
+	// Collect jobs that reference reusable workflows
+	type reusableRef struct {
+		jobKey  string
+		job     workflow.Job
+		usesRef string
+	}
+	var refs []reusableRef
+	for key, job := range parsedWF.Jobs {
+		if job.IsReusableWorkflowCall() {
+			refs = append(refs, reusableRef{jobKey: key, job: job, usesRef: job.Uses})
+		}
+	}
+
+	if len(refs) == 0 {
+		return nil
+	}
+
+	for _, ref := range refs {
+		// Resolve the workflow path. Supports:
+		//   ./.kailab/workflows/foo.yml  (local reference)
+		//   .kailab/workflows/foo.yml    (local reference without ./)
+		usesPath := ref.usesRef
+		usesPath = strings.TrimPrefix(usesPath, "./")
+
+		// Strip @ref suffix if present (e.g., .kailab/workflows/foo.yml@main)
+		if idx := strings.LastIndex(usesPath, "@"); idx > 0 {
+			usesPath = usesPath[:idx]
+		}
+
+		// Look up the referenced workflow in the same repo
+		calledWF, err := h.db.GetWorkflowByRepoAndPath(repoID, usesPath)
+		if err != nil {
+			log.Printf("reusable workflow: could not resolve %q for repo %s: %v", usesPath, repoID, err)
+			continue
+		}
+
+		calledParsed, err := workflow.FromJSON(calledWF.ParsedJSON)
+		if err != nil {
+			log.Printf("reusable workflow: could not parse %q: %v", usesPath, err)
+			continue
+		}
+
+		// Verify the called workflow supports workflow_call
+		if calledParsed.On.WorkflowCall == nil {
+			log.Printf("reusable workflow: %q does not have workflow_call trigger", usesPath)
+			continue
+		}
+
+		// Delete the placeholder job
+		delete(parsedWF.Jobs, ref.jobKey)
+
+		// Inline the called workflow's jobs, prefixed with the caller job key
+		for calledJobKey, calledJob := range calledParsed.Jobs {
+			inlinedKey := ref.jobKey + "/" + calledJobKey
+
+			// Wire dependencies: the inlined job's needs become prefixed too,
+			// plus any original caller needs apply to root-level inlined jobs.
+			var inlinedNeeds []string
+			if len(calledJob.Needs) > 0 {
+				for _, n := range calledJob.Needs {
+					inlinedNeeds = append(inlinedNeeds, ref.jobKey+"/"+n)
+				}
+			} else {
+				// Root jobs in the called workflow inherit the caller's needs
+				inlinedNeeds = []string(ref.job.Needs)
+			}
+			calledJob.Needs = workflow.StringOrSlice(inlinedNeeds)
+
+			// Merge caller inputs (with:) into the inlined job's env
+			if len(ref.job.With) > 0 {
+				if calledJob.Env == nil {
+					calledJob.Env = make(map[string]string)
+				}
+				for k, v := range ref.job.With {
+					// Inputs are available as `inputs.<name>` in expressions,
+					// but also set as env vars for convenience
+					calledJob.Env["INPUT_"+strings.ToUpper(k)] = v
+				}
+			}
+
+			parsedWF.Jobs[inlinedKey] = calledJob
+		}
+
+		log.Printf("reusable workflow: inlined %d jobs from %q as %s/*", len(calledParsed.Jobs), usesPath, ref.jobKey)
 	}
 
 	return nil

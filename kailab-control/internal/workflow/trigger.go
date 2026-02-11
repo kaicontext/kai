@@ -22,6 +22,10 @@ func (w *Workflow) MatchTrigger(event *TriggerEvent) bool {
 		return w.matchReviewTrigger(event) || w.matchPullRequestTrigger(event)
 	case "workflow_dispatch":
 		return w.On.WorkflowDispatch != nil
+	case "schedule":
+		return len(w.On.Schedule) > 0
+	case "workflow_call":
+		return w.On.WorkflowCall != nil
 	default:
 		return false
 	}

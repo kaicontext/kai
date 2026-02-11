@@ -38,6 +38,8 @@ const (
 	TriggerReviewCreated    = "review_created"
 	TriggerReviewUpdated    = "review_updated"
 	TriggerWorkflowDispatch = "workflow_dispatch"
+	TriggerSchedule         = "schedule"
+	TriggerWorkflowCall     = "workflow_call"
 )
 
 // WorkflowRun represents an execution instance of a workflow.

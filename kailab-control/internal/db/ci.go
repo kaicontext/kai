@@ -152,6 +152,39 @@ func (db *DB) ListActiveWorkflowsByTrigger(repoID, trigger string) ([]*model.Wor
 	return workflows, rows.Err()
 }
 
+// ListAllScheduleWorkflows lists all active workflows with a schedule trigger across all repos.
+func (db *DB) ListAllScheduleWorkflows() ([]*model.Workflow, error) {
+	var query string
+	if db.driver == DriverPostgres {
+		query = "SELECT id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at FROM workflows WHERE active = true AND triggers LIKE ?"
+	} else {
+		query = "SELECT id, repo_id, path, name, content_hash, parsed_json, triggers, active, created_at, updated_at FROM workflows WHERE active = 1 AND triggers LIKE ?"
+	}
+	rows, err := db.query(query, "%\"schedule\"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workflows []*model.Workflow
+	for rows.Next() {
+		var w model.Workflow
+		var triggersJSON string
+		var active bool
+		var createdAt, updatedAt int64
+
+		if err := rows.Scan(&w.ID, &w.RepoID, &w.Path, &w.Name, &w.ContentHash, &w.ParsedJSON, &triggersJSON, &active, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		w.Active = active
+		w.CreatedAt = time.Unix(createdAt, 0)
+		w.UpdatedAt = time.Unix(updatedAt, 0)
+		json.Unmarshal([]byte(triggersJSON), &w.Triggers)
+		workflows = append(workflows, &w)
+	}
+	return workflows, rows.Err()
+}
+
 // UpdateWorkflow updates a workflow.
 func (db *DB) UpdateWorkflow(id, name, contentHash, parsedJSON string, triggers []string, active bool) error {
 	now := time.Now().Unix()

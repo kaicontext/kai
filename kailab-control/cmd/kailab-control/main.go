@@ -96,6 +96,9 @@ func main() {
 		close(done)
 	}()
 
+	// Start cron scheduler for scheduled workflows
+	handler.StartScheduler(done)
+
 	// Start cleanup goroutine
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)

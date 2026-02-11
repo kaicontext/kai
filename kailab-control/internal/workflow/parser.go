@@ -51,6 +51,7 @@ type WorkflowTrigger struct {
 	PullRequest      *PullRequestTrigger      `yaml:"pull_request,omitempty" json:"pull_request,omitempty"`
 	Review           *ReviewTrigger           `yaml:"review,omitempty" json:"review,omitempty"`
 	WorkflowDispatch *WorkflowDispatchTrigger `yaml:"workflow_dispatch,omitempty" json:"workflow_dispatch,omitempty"`
+	WorkflowCall     *WorkflowCallTrigger     `yaml:"workflow_call,omitempty" json:"workflow_call,omitempty"`
 	Schedule         []ScheduleTrigger        `yaml:"schedule,omitempty" json:"schedule,omitempty"`
 }
 
@@ -93,6 +94,33 @@ type DispatchInput struct {
 	Options     []string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
+// WorkflowCallTrigger configures a reusable workflow that can be called by other workflows.
+type WorkflowCallTrigger struct {
+	Inputs  map[string]WorkflowCallInput  `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	Outputs map[string]WorkflowCallOutput `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	Secrets map[string]WorkflowCallSecret `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+}
+
+// WorkflowCallInput defines an input parameter for a reusable workflow.
+type WorkflowCallInput struct {
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	Required    bool   `yaml:"required,omitempty" json:"required,omitempty"`
+	Default     string `yaml:"default,omitempty" json:"default,omitempty"`
+	Type        string `yaml:"type,omitempty" json:"type,omitempty"` // string, boolean, number
+}
+
+// WorkflowCallOutput defines an output of a reusable workflow.
+type WorkflowCallOutput struct {
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	Value       string `yaml:"value" json:"value"` // Expression like ${{ jobs.build.outputs.result }}
+}
+
+// WorkflowCallSecret defines a secret parameter for a reusable workflow.
+type WorkflowCallSecret struct {
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	Required    bool   `yaml:"required,omitempty" json:"required,omitempty"`
+}
+
 // ScheduleTrigger configures scheduled triggers.
 type ScheduleTrigger struct {
 	Cron string `yaml:"cron" json:"cron"`
@@ -102,11 +130,14 @@ type ScheduleTrigger struct {
 type Job struct {
 	Name        string             `yaml:"name,omitempty" json:"name,omitempty"`
 	RunsOn      StringOrSlice      `yaml:"runs-on" json:"runs_on"`
+	Uses        string             `yaml:"uses,omitempty" json:"uses,omitempty"` // Reusable workflow reference
+	With        map[string]string  `yaml:"with,omitempty" json:"with,omitempty"` // Inputs for reusable workflow
 	Needs       StringOrSlice      `yaml:"needs,omitempty" json:"needs,omitempty"`
 	If          string             `yaml:"if,omitempty" json:"if,omitempty"`
 	Steps       []Step             `yaml:"steps" json:"steps"`
 	Env         map[string]string  `yaml:"env,omitempty" json:"env,omitempty"`
 	Outputs     map[string]string  `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	Secrets     JobSecrets         `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Secret mapping for reusable workflow
 	Services    map[string]Service `yaml:"services,omitempty" json:"services,omitempty"`
 	Container   *Container         `yaml:"container,omitempty" json:"container,omitempty"`
 	Strategy    *Strategy          `yaml:"strategy,omitempty" json:"strategy,omitempty"`
@@ -114,6 +145,64 @@ type Job struct {
 	Timeout     int                `yaml:"timeout-minutes,omitempty" json:"timeout_minutes,omitempty"`
 	ContinueOn  *ContinueOnError   `yaml:"continue-on-error,omitempty" json:"continue_on_error,omitempty"`
 	Permissions Permissions        `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+}
+
+// IsReusableWorkflowCall returns true if this job calls a reusable workflow.
+func (j *Job) IsReusableWorkflowCall() bool {
+	return j.Uses != "" && strings.HasSuffix(j.Uses, ".yml") || strings.HasSuffix(j.Uses, ".yaml")
+}
+
+// JobSecrets can be "inherit" (string) or a map of secret name -> value expression.
+type JobSecrets struct {
+	Inherit bool              `json:"inherit,omitempty"`
+	Values  map[string]string `json:"values,omitempty"`
+}
+
+// UnmarshalYAML handles both `secrets: inherit` and `secrets: {name: value}`.
+func (s *JobSecrets) UnmarshalYAML(value *yaml.Node) error {
+	var str string
+	if err := value.Decode(&str); err == nil {
+		if str == "inherit" {
+			s.Inherit = true
+		}
+		return nil
+	}
+
+	var m map[string]string
+	if err := value.Decode(&m); err != nil {
+		return err
+	}
+	s.Values = m
+	return nil
+}
+
+// UnmarshalJSON handles both "inherit" and map forms.
+func (s *JobSecrets) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		if str == "inherit" {
+			s.Inherit = true
+		}
+		return nil
+	}
+
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	s.Values = m
+	return nil
+}
+
+// MarshalJSON serializes JobSecrets.
+func (s JobSecrets) MarshalJSON() ([]byte, error) {
+	if s.Inherit {
+		return json.Marshal("inherit")
+	}
+	if len(s.Values) > 0 {
+		return json.Marshal(s.Values)
+	}
+	return []byte("null"), nil
 }
 
 // Step represents a step in a job.
@@ -272,6 +361,8 @@ func (t *WorkflowTrigger) parseSimple(events []string) error {
 			t.Review = &ReviewTrigger{}
 		case "workflow_dispatch":
 			t.WorkflowDispatch = &WorkflowDispatchTrigger{}
+		case "workflow_call":
+			t.WorkflowCall = &WorkflowCallTrigger{}
 		}
 	}
 	return nil
@@ -394,6 +485,14 @@ func (w *Workflow) Validate() error {
 
 // Validate validates a job configuration.
 func (j *Job) Validate(name string) error {
+	if j.IsReusableWorkflowCall() {
+		// Reusable workflow call: uses is set, steps and runs-on not required
+		if len(j.Steps) > 0 {
+			return fmt.Errorf("job with 'uses' cannot also have 'steps'")
+		}
+		return nil
+	}
+
 	if len(j.RunsOn) == 0 {
 		return fmt.Errorf("runs-on is required")
 	}
@@ -489,6 +588,9 @@ func (w *Workflow) GetTriggerTypes() []string {
 	}
 	if w.On.WorkflowDispatch != nil {
 		triggers = append(triggers, "workflow_dispatch")
+	}
+	if w.On.WorkflowCall != nil {
+		triggers = append(triggers, "workflow_call")
 	}
 	if len(w.On.Schedule) > 0 {
 		triggers = append(triggers, "schedule")
