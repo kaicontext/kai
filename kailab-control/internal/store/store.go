@@ -16,4 +16,7 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 	// Exists checks if the given key exists.
 	Exists(ctx context.Context, key string) (bool, error)
+	// ListByPrefix returns all keys that start with the given prefix,
+	// sorted in reverse chronological order (most recently modified first).
+	ListByPrefix(ctx context.Context, prefix string) ([]string, error)
 }

@@ -352,3 +352,54 @@ func TestInterpolateInputs(t *testing.T) {
 		t.Errorf("expected 'v1.0.0', got %q", result)
 	}
 }
+
+func TestHashFilesWithCallback(t *testing.T) {
+	ctx := NewExprContext()
+	ctx.HashFilesFunc = func(patterns []string) string {
+		// Simulate a hash result
+		if len(patterns) == 1 && patterns[0] == "**/Cargo.lock" {
+			return "abc123def456"
+		}
+		return ""
+	}
+
+	result := Interpolate("${{ hashFiles('**/Cargo.lock') }}", ctx)
+	if result != "abc123def456" {
+		t.Errorf("expected 'abc123def456', got %q", result)
+	}
+
+	// Multiple patterns
+	ctx.HashFilesFunc = func(patterns []string) string {
+		if len(patterns) == 2 {
+			return "multi-hash"
+		}
+		return ""
+	}
+	result2 := Interpolate("${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}", ctx)
+	if result2 != "multi-hash" {
+		t.Errorf("expected 'multi-hash', got %q", result2)
+	}
+}
+
+func TestHashFilesNoCallback(t *testing.T) {
+	ctx := NewExprContext()
+	// No HashFilesFunc set - should return empty string
+	result := Interpolate("${{ hashFiles('**/Cargo.lock') }}", ctx)
+	if result != "" {
+		t.Errorf("expected empty string without callback, got %q", result)
+	}
+}
+
+func TestHashFilesInCacheKey(t *testing.T) {
+	ctx := NewExprContext()
+	ctx.Runner["os"] = "Linux"
+	ctx.HashFilesFunc = func(patterns []string) string {
+		return "a1b2c3d4e5f6"
+	}
+
+	// Simulates the real cache key pattern
+	result := Interpolate("${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}", ctx)
+	if result != "Linux-cargo-a1b2c3d4e5f6" {
+		t.Errorf("expected 'Linux-cargo-a1b2c3d4e5f6', got %q", result)
+	}
+}

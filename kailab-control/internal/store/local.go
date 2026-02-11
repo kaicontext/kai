@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // LocalStore implements Store using the local filesystem.
@@ -59,4 +61,48 @@ func (s *LocalStore) Exists(_ context.Context, key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *LocalStore) ListByPrefix(_ context.Context, prefix string) ([]string, error) {
+	searchDir := filepath.Dir(s.path(prefix))
+	prefixBase := filepath.Base(s.path(prefix))
+
+	type keyTime struct {
+		key     string
+		modTime int64
+	}
+	var results []keyTime
+
+	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if info.IsDir() {
+			return nil
+		}
+		// Get the key relative to store root
+		relPath, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		// Check if this key starts with the prefix
+		if strings.HasPrefix(relPath, prefix) || strings.HasPrefix(filepath.Base(path), prefixBase) {
+			results = append(results, keyTime{key: relPath, modTime: info.ModTime().UnixNano()})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort by most recently modified first
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].modTime > results[j].modTime
+	})
+
+	keys := make([]string, len(results))
+	for i, r := range results {
+		keys[i] = r.key
+	}
+	return keys, nil
 }

@@ -1055,6 +1055,7 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 		"event":     run.TriggerEvent,
 		"run_id":    run.ID,
 		"clone_url": cloneURL,
+		"actor":     run.CreatedBy,
 	}
 
 	// Add secrets (decrypted - TODO: proper decryption)

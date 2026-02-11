@@ -18,6 +18,11 @@ type ExprContext struct {
 	Runner  map[string]string      // runner.* context
 	Inputs  map[string]string      // inputs.* context
 	Vars    map[string]string      // vars.* context
+
+	// HashFilesFunc is called by hashFiles() to compute a SHA-256 hash of files
+	// matching the given glob patterns. The runner sets this to execute inside the
+	// job pod where the workspace files live. Returns hex-encoded hash or empty string.
+	HashFilesFunc func(patterns []string) string
 }
 
 // StepResult holds the result of a completed step.
@@ -402,7 +407,13 @@ func (p *exprParser) callFunction(name string, args []interface{}) interface{} {
 			return v
 		}
 	case "hashfiles":
-		// Return empty string for now; real implementation needs filesystem access
+		if p.ctx.HashFilesFunc != nil && len(args) >= 1 {
+			var patterns []string
+			for _, a := range args {
+				patterns = append(patterns, exprToString(a))
+			}
+			return p.ctx.HashFilesFunc(patterns)
+		}
 		return ""
 	case "success":
 		return p.statusCheck("success")

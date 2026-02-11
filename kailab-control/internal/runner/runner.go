@@ -4,6 +4,8 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -189,6 +191,9 @@ func buildExprContext(claim *model.JobClaimResponse) *workflow.ExprContext {
 	if runID, ok := claim.Context["run_id"].(string); ok {
 		ec.GitHub["run_id"] = runID
 	}
+	if actor, ok := claim.Context["actor"].(string); ok {
+		ec.GitHub["actor"] = actor
+	}
 	// Nested event data (for workflow_dispatch inputs, etc.)
 	if eventData, ok := claim.Context["event_data"].(map[string]interface{}); ok {
 		ec.GitHub["event"] = eventData
@@ -294,9 +299,23 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		claim.Context["services"] = jobDef.Services
 	}
 
-	// Add job-level env vars to expression context
+	// Add workflow-level env vars to expression context (lower priority than job-level)
+	for k, v := range parsedWF.Env {
+		exprCtx.Env[k] = workflow.Interpolate(v, exprCtx)
+	}
+
+	// Add job-level env vars to expression context (overrides workflow-level)
 	for k, v := range jobDef.Env {
 		exprCtx.Env[k] = workflow.Interpolate(v, exprCtx)
+	}
+
+	// Merge all env vars into the claim context so they're set in the pod
+	if _, ok := claim.Context["workflow_env"]; !ok {
+		envMap := make(map[string]string)
+		for k, v := range exprCtx.Env {
+			envMap[k] = v
+		}
+		claim.Context["workflow_env"] = envMap
 	}
 
 	// Create a single pod for the entire job
@@ -313,6 +332,11 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 	}()
 
 	fmt.Fprintf(jobLog, "Pod %s ready\n\n", jobPod.Name)
+
+	// Wire up hashFiles() to execute inside the pod
+	exprCtx.HashFilesFunc = func(patterns []string) string {
+		return hashFilesInPod(ctx, jobPod, patterns, claim.Context)
+	}
 
 	// Execute steps sequentially in the same pod
 	allSuccess := true
@@ -529,6 +553,7 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 
 type ParsedWorkflow struct {
 	Name string                   `json:"name"`
+	Env  map[string]string        `json:"env,omitempty"`
 	Jobs map[string]JobDefinition `json:"jobs"`
 }
 
@@ -588,6 +613,80 @@ func getJobDisplayName(j *JobDefinition, key string) string {
 
 func containsPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+// hashFilesInPod executes a glob + SHA-256 hash script inside the job pod.
+// Matches GitHub Actions hashFiles() behavior: expand glob patterns, sort matched
+// file paths, concatenate file contents in order, and return the hex SHA-256 digest.
+func hashFilesInPod(ctx context.Context, jp *JobPod, patterns []string, jobContext map[string]interface{}) string {
+	// Build a shell script that uses find + sha256sum to hash matching files.
+	// We use a Python-free approach with just shell builtins + sha256sum.
+	// The script:
+	// 1. For each pattern, uses bash globstar to expand **/ patterns
+	// 2. Sorts all matched files
+	// 3. Hashes each file and feeds into a final SHA-256
+	var patternArgs []string
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			// Shell-escape the pattern for the find command
+			patternArgs = append(patternArgs, fmt.Sprintf("%q", p))
+		}
+	}
+	if len(patternArgs) == 0 {
+		return ""
+	}
+
+	// Use a script that handles ** glob patterns via bash globstar
+	script := fmt.Sprintf(`
+set +e
+cd /workspace 2>/dev/null || true
+shopt -s globstar nullglob 2>/dev/null || true
+
+FILES=""
+for pattern in %s; do
+    for f in $pattern; do
+        if [ -f "$f" ]; then
+            FILES="$FILES
+$f"
+        fi
+    done
+done
+
+# Sort and deduplicate
+FILES=$(echo "$FILES" | sort -u | sed '/^$/d')
+
+if [ -z "$FILES" ]; then
+    echo ""
+    exit 0
+fi
+
+# Hash each file in sorted order and feed into final hash
+echo "$FILES" | while IFS= read -r f; do
+    cat "$f"
+done | sha256sum | cut -d' ' -f1
+`, strings.Join(patternArgs, " "))
+
+	result, err := jp.executeCommand(ctx, script, "bash", nil, "", io.Discard)
+	if err != nil {
+		return ""
+	}
+
+	hash := strings.TrimSpace(result.Output)
+	// Validate it looks like a hex hash
+	if len(hash) == 64 {
+		if _, err := hex.DecodeString(hash); err == nil {
+			return hash
+		}
+	}
+
+	// Fallback: if sha256sum isn't available, hash locally from output
+	// This shouldn't happen on ubuntu containers but handle gracefully
+	if hash != "" {
+		h := sha256.Sum256([]byte(hash))
+		return hex.EncodeToString(h[:])
+	}
+	return ""
 }
 
 // parseEnvFile parses a GITHUB_OUTPUT/GITHUB_ENV style file.

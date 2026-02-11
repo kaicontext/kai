@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"strings"
@@ -611,79 +612,99 @@ func (jp *JobPod) actionCache(ctx context.Context, stepDef *StepDefinition, logW
 		return &ExecutionResult{ExitCode: 0}, nil
 	}
 
-	// Try to restore cache
+	// Try to restore cache: exact key first, then restore-keys prefix matching
 	cacheKey := "cache/" + key
 	exists, _ := jp.executor.store.Exists(ctx, cacheKey)
 	if !exists && restoreKeys != "" {
-		// Try restore-keys prefixes (not a full implementation, but handles the common case)
+		// Try restore-keys with real prefix matching via ListByPrefix
 		for _, rk := range strings.Split(restoreKeys, "\n") {
 			rk = strings.TrimSpace(rk)
 			if rk == "" {
 				continue
 			}
 			prefixKey := "cache/" + rk
-			if ok, _ := jp.executor.store.Exists(ctx, prefixKey); ok {
-				cacheKey = prefixKey
+			keys, err := jp.executor.store.ListByPrefix(ctx, prefixKey)
+			if err != nil {
+				fmt.Fprintf(logWriter, "Cache prefix search error: %v\n", err)
+				continue
+			}
+			if len(keys) > 0 {
+				// ListByPrefix returns most recent first
+				cacheKey = keys[0]
 				exists = true
-				fmt.Fprintf(logWriter, "Cache restored from prefix key: %s\n", rk)
+				fmt.Fprintf(logWriter, "Cache restored from prefix key: %s (matched %d keys)\n", cacheKey, len(keys))
 				break
 			}
 		}
 	}
 
 	if exists {
-		// Restore: download tar from store, extract into pod
 		fmt.Fprintf(logWriter, "Cache hit, restoring...\n")
 		rc, err := jp.executor.store.Get(ctx, cacheKey)
 		if err != nil {
 			fmt.Fprintf(logWriter, "Cache restore failed: %v\n", err)
-			return &ExecutionResult{ExitCode: 0}, nil // Don't fail on cache miss
+			return &ExecutionResult{ExitCode: 0}, nil
 		}
 		defer rc.Close()
 
-		// Copy cache tarball into the pod and extract
+		// Transfer binary tar data via base64 to avoid corruption
 		tarData, _ := io.ReadAll(rc)
 		if len(tarData) > 0 {
-			// Write tarball to pod, then extract
-			result, err := jp.executeCommand(ctx, fmt.Sprintf(
-				"cat > /tmp/cache_restore.tar.gz << 'CACHE_EOF_MARKER'\n%s\nCACHE_EOF_MARKER\ntar xzf /tmp/cache_restore.tar.gz -C / 2>/dev/null || true\nrm -f /tmp/cache_restore.tar.gz\necho 'Cache restored (%d bytes)'",
-				"", len(tarData)), "bash", nil, "", logWriter)
+			encoded := base64Encode(tarData)
+			// Write base64 data to file in pod, decode, extract
+			// Split into chunks to avoid command-line length limits
+			chunkSize := 65536
+			writeScript := "rm -f /tmp/cache_restore.b64\n"
+			for i := 0; i < len(encoded); i += chunkSize {
+				end := i + chunkSize
+				if end > len(encoded) {
+					end = len(encoded)
+				}
+				writeScript += fmt.Sprintf("printf '%%s' %q >> /tmp/cache_restore.b64\n", encoded[i:end])
+			}
+			writeScript += `
+base64 -d /tmp/cache_restore.b64 > /tmp/cache_restore.tar.gz 2>/dev/null
+tar xzf /tmp/cache_restore.tar.gz -C / 2>/dev/null || true
+rm -f /tmp/cache_restore.tar.gz /tmp/cache_restore.b64
+echo "Cache restored"
+`
+			_, err := jp.executeCommand(ctx, writeScript, "bash", nil, "", logWriter)
 			if err != nil {
 				fmt.Fprintf(logWriter, "Cache extract failed: %v\n", err)
 			}
-			_ = result
 		}
-		fmt.Fprintf(logWriter, "Cache restored successfully\n")
+		fmt.Fprintf(logWriter, "Cache restored successfully (%d bytes)\n", len(tarData))
 	} else {
 		fmt.Fprintf(logWriter, "Cache miss\n")
 	}
 
-	// Register a post-job save: tar the paths and upload
-	// For now, we save immediately (a real implementation would use post-job hooks)
-	if !exists && paths != "" {
-		// Build tar command for all paths
-		pathList := strings.Split(paths, "\n")
-		var tarPaths []string
-		for _, p := range pathList {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				tarPaths = append(tarPaths, p)
+	// Save cache: tar the paths, base64-encode, read back, decode, and upload
+	// Save even on hit (to update the key if restore-keys was used with a different key)
+	shouldSave := !exists || cacheKey != "cache/"+key
+	if shouldSave && paths != "" {
+		pathList := parseMultiline(paths)
+		if len(pathList) > 0 {
+			// Quote each path for the tar command
+			var quotedPaths []string
+			for _, p := range pathList {
+				quotedPaths = append(quotedPaths, fmt.Sprintf("%q", p))
 			}
-		}
-
-		if len(tarPaths) > 0 {
-			tarCmd := fmt.Sprintf("tar czf /tmp/cache_save.tar.gz %s 2>/dev/null; wc -c < /tmp/cache_save.tar.gz",
-				strings.Join(tarPaths, " "))
+			// Create tar, base64 encode, and output
+			tarCmd := fmt.Sprintf(
+				"tar czf /tmp/cache_save.tar.gz -C / %s 2>/dev/null && base64 /tmp/cache_save.tar.gz && rm -f /tmp/cache_save.tar.gz",
+				strings.Join(quotedPaths, " "))
 			result, err := jp.executeCommand(ctx, tarCmd, "bash", nil, "", io.Discard)
-			if err == nil && result.ExitCode == 0 {
-				// Read tar from pod
-				catResult, catErr := jp.executeCommand(ctx, "cat /tmp/cache_save.tar.gz", "bash", nil, "", io.Discard)
-				if catErr == nil && catResult.Output != "" {
-					jp.executor.store.Put(ctx, "cache/"+key, strings.NewReader(catResult.Output), int64(len(catResult.Output)))
-					fmt.Fprintf(logWriter, "Cache saved: %s\n", key)
+			if err == nil && result.ExitCode == 0 && result.Output != "" {
+				decoded := base64Decode(strings.TrimSpace(result.Output))
+				if len(decoded) > 0 {
+					err := jp.executor.store.Put(ctx, "cache/"+key, bytes.NewReader(decoded), int64(len(decoded)))
+					if err != nil {
+						fmt.Fprintf(logWriter, "Cache save error: %v\n", err)
+					} else {
+						fmt.Fprintf(logWriter, "Cache saved: %s (%d bytes)\n", key, len(decoded))
+					}
 				}
 			}
-			jp.executeCommand(ctx, "rm -f /tmp/cache_save.tar.gz", "bash", nil, "", io.Discard)
 		}
 	}
 
@@ -693,6 +714,8 @@ func (jp *JobPod) actionCache(ctx context.Context, stepDef *StepDefinition, logW
 func (jp *JobPod) actionUploadArtifact(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
 	name, _ := stepDef.With["name"]
 	path, _ := stepDef.With["path"]
+	mergeMultiple, _ := stepDef.With["merge-multiple"]
+	_ = mergeMultiple
 	if name == "" {
 		name = "artifact"
 	}
@@ -713,35 +736,35 @@ func (jp *JobPod) actionUploadArtifact(ctx context.Context, stepDef *StepDefinit
 	storeKey := fmt.Sprintf("artifacts/%s/%s.tar.gz", runID, name)
 
 	// Tar the paths in the pod
-	pathList := strings.Split(path, "\n")
-	var tarPaths []string
-	for _, p := range pathList {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			tarPaths = append(tarPaths, p)
-		}
-	}
-
-	if len(tarPaths) == 0 {
+	pathList := parseMultiline(path)
+	if len(pathList) == 0 {
 		fmt.Fprintf(logWriter, "Warning: no valid paths for artifact\n")
 		return &ExecutionResult{ExitCode: 0}, nil
 	}
 
-	tarCmd := fmt.Sprintf("tar czf /tmp/artifact_upload.tar.gz %s 2>/dev/null && wc -c < /tmp/artifact_upload.tar.gz",
-		strings.Join(tarPaths, " "))
-	result, err := jp.executeCommand(ctx, tarCmd, "bash", nil, "", logWriter)
+	var quotedPaths []string
+	for _, p := range pathList {
+		quotedPaths = append(quotedPaths, fmt.Sprintf("%q", p))
+	}
+
+	// Create tar and base64-encode to avoid binary corruption
+	tarCmd := fmt.Sprintf("tar czf /tmp/artifact_upload.tar.gz %s 2>/dev/null && base64 /tmp/artifact_upload.tar.gz && rm -f /tmp/artifact_upload.tar.gz",
+		strings.Join(quotedPaths, " "))
+	result, err := jp.executeCommand(ctx, tarCmd, "bash", nil, "", io.Discard)
 	if err != nil || result.ExitCode != 0 {
 		fmt.Fprintf(logWriter, "Warning: failed to create artifact archive\n")
 		return &ExecutionResult{ExitCode: 0}, nil
 	}
 
-	// Read and upload
-	catResult, catErr := jp.executeCommand(ctx, "cat /tmp/artifact_upload.tar.gz", "bash", nil, "", io.Discard)
-	if catErr == nil && catResult.Output != "" {
-		jp.executor.store.Put(ctx, storeKey, strings.NewReader(catResult.Output), int64(len(catResult.Output)))
-		fmt.Fprintf(logWriter, "Artifact uploaded: %s (%d bytes)\n", name, len(catResult.Output))
+	decoded := base64Decode(strings.TrimSpace(result.Output))
+	if len(decoded) > 0 {
+		err := jp.executor.store.Put(ctx, storeKey, bytes.NewReader(decoded), int64(len(decoded)))
+		if err != nil {
+			fmt.Fprintf(logWriter, "Warning: artifact upload failed: %v\n", err)
+		} else {
+			fmt.Fprintf(logWriter, "Artifact uploaded: %s (%d bytes)\n", name, len(decoded))
+		}
 	}
-	jp.executeCommand(ctx, "rm -f /tmp/artifact_upload.tar.gz", "bash", nil, "", io.Discard)
 
 	return &ExecutionResult{ExitCode: 0}, nil
 }
@@ -749,7 +772,8 @@ func (jp *JobPod) actionUploadArtifact(ctx context.Context, stepDef *StepDefinit
 func (jp *JobPod) actionDownloadArtifact(ctx context.Context, stepDef *StepDefinition, jobContext map[string]interface{}, logWriter io.Writer) (*ExecutionResult, error) {
 	name, _ := stepDef.With["name"]
 	downloadPath, _ := stepDef.With["path"]
-	if name == "" {
+	mergeMultiple, _ := stepDef.With["merge-multiple"]
+	if name == "" && mergeMultiple != "true" {
 		fmt.Fprintf(logWriter, "Warning: no artifact name specified\n")
 		return &ExecutionResult{ExitCode: 0}, nil
 	}
@@ -765,28 +789,55 @@ func (jp *JobPod) actionDownloadArtifact(ctx context.Context, stepDef *StepDefin
 	}
 
 	runID, _ := jobContext["run_id"].(string)
-	storeKey := fmt.Sprintf("artifacts/%s/%s.tar.gz", runID, name)
 
-	exists, _ := jp.executor.store.Exists(ctx, storeKey)
-	if !exists {
-		fmt.Fprintf(logWriter, "Warning: artifact %q not found\n", name)
-		return &ExecutionResult{ExitCode: 1}, nil
+	// If merge-multiple is true and no specific name, download all artifacts for this run
+	var artifactKeys []string
+	if mergeMultiple == "true" && name == "" {
+		prefix := fmt.Sprintf("artifacts/%s/", runID)
+		keys, err := jp.executor.store.ListByPrefix(ctx, prefix)
+		if err == nil {
+			artifactKeys = keys
+		}
+	} else {
+		artifactKeys = []string{fmt.Sprintf("artifacts/%s/%s.tar.gz", runID, name)}
 	}
 
-	rc, err := jp.executor.store.Get(ctx, storeKey)
-	if err != nil {
-		fmt.Fprintf(logWriter, "Warning: failed to get artifact: %v\n", err)
-		return &ExecutionResult{ExitCode: 1}, nil
-	}
-	defer rc.Close()
+	for _, storeKey := range artifactKeys {
+		exists, _ := jp.executor.store.Exists(ctx, storeKey)
+		if !exists {
+			fmt.Fprintf(logWriter, "Warning: artifact %q not found\n", storeKey)
+			continue
+		}
 
-	data, _ := io.ReadAll(rc)
-	if len(data) > 0 {
-		// Extract into the download path
-		script := fmt.Sprintf("mkdir -p %s && tar xzf /tmp/artifact_download.tar.gz -C %s 2>/dev/null || true && rm -f /tmp/artifact_download.tar.gz",
-			downloadPath, downloadPath)
-		jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
-		fmt.Fprintf(logWriter, "Artifact downloaded: %s (%d bytes)\n", name, len(data))
+		rc, err := jp.executor.store.Get(ctx, storeKey)
+		if err != nil {
+			fmt.Fprintf(logWriter, "Warning: failed to get artifact: %v\n", err)
+			continue
+		}
+
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+
+		if len(data) > 0 {
+			// Transfer via base64 to avoid binary corruption
+			encoded := base64Encode(data)
+			chunkSize := 65536
+			writeScript := fmt.Sprintf("mkdir -p %q\nrm -f /tmp/artifact_download.b64\n", downloadPath)
+			for i := 0; i < len(encoded); i += chunkSize {
+				end := i + chunkSize
+				if end > len(encoded) {
+					end = len(encoded)
+				}
+				writeScript += fmt.Sprintf("printf '%%s' %q >> /tmp/artifact_download.b64\n", encoded[i:end])
+			}
+			writeScript += fmt.Sprintf(`
+base64 -d /tmp/artifact_download.b64 > /tmp/artifact_download.tar.gz 2>/dev/null
+tar xzf /tmp/artifact_download.tar.gz -C %q 2>/dev/null || true
+rm -f /tmp/artifact_download.tar.gz /tmp/artifact_download.b64
+`, downloadPath)
+			jp.executeCommand(ctx, writeScript, "bash", nil, "", logWriter)
+			fmt.Fprintf(logWriter, "Artifact downloaded: %s (%d bytes)\n", storeKey, len(data))
+		}
 	}
 
 	return &ExecutionResult{ExitCode: 0}, nil
@@ -1072,6 +1123,9 @@ func (jp *JobPod) actionDockerBuildPush(ctx context.Context, stepDef *StepDefini
 	buildArgs := stepDef.With["build-args"]
 	target := stepDef.With["target"]
 	push := stepDef.With["push"]
+	platforms := stepDef.With["platforms"]
+	cacheFrom := stepDef.With["cache-from"]
+	cacheTo := stepDef.With["cache-to"]
 
 	if dockerContext == "" {
 		dockerContext = "."
@@ -1118,6 +1172,23 @@ func (jp *JobPod) actionDockerBuildPush(ctx context.Context, stepDef *StepDefini
 		targetArg = fmt.Sprintf(" --target %q", target)
 	}
 
+	// Platform argument (Buildah supports --platform)
+	var platformArg string
+	if platforms != "" {
+		platformArg = fmt.Sprintf(" --platform %q", platforms)
+	}
+
+	// Layer caching: translate GitHub Actions cache directives to Buildah --layers
+	var cacheArgs string
+	if cacheFrom != "" || cacheTo != "" {
+		// Buildah supports --layers for layer caching
+		cacheArgs = " --layers"
+		fmt.Fprintf(logWriter, "Layer caching enabled (--layers)\n")
+		if cacheFrom != "" {
+			fmt.Fprintf(logWriter, "Note: cache-from=%s mapped to Buildah --layers (GHA cache type not directly supported)\n", cacheFrom)
+		}
+	}
+
 	script := fmt.Sprintf(`
 set -e
 echo "==> docker/build-push-action (using Buildah)"
@@ -1134,11 +1205,11 @@ echo "  Dockerfile: %s"
 
 buildah bud --storage-driver=vfs \
     -f %q \
-    %s%s%s%s \
+    %s%s%s%s%s%s \
     %s
 
 echo "Build complete"
-`, dockerContext, dockerfile, dockerfile, tagArgs, labelArgs, buildArgArgs, targetArg, dockerContext)
+`, dockerContext, dockerfile, dockerfile, tagArgs, labelArgs, buildArgArgs, targetArg, platformArg, cacheArgs, dockerContext)
 
 	// Add push commands if push=true
 	if push == "true" {
@@ -1682,6 +1753,13 @@ func buildEnvVars(context map[string]interface{}, stepEnv map[string]string) []c
 		corev1.EnvVar{Name: "WORKSPACE", Value: "/workspace"},
 	)
 
+	// Add workflow/job-level env vars
+	if wfEnv, ok := context["workflow_env"].(map[string]string); ok {
+		for name, value := range wfEnv {
+			env = append(env, corev1.EnvVar{Name: name, Value: value})
+		}
+	}
+
 	// Add secrets as environment variables
 	if secrets, ok := context["secrets"].(map[string]string); ok {
 		for name, value := range secrets {
@@ -1733,6 +1811,20 @@ func sanitizeName(s string) string {
 		result = result[:len(result)-1]
 	}
 	return result
+}
+
+// base64Encode encodes binary data to base64 string.
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// base64Decode decodes a base64 string to binary data.
+func base64Decode(s string) []byte {
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // Legacy types for compatibility with runner.go

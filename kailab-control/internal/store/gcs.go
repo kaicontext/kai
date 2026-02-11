@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 )
 
 // GCSStore implements Store using Google Cloud Storage.
@@ -61,4 +65,42 @@ func (s *GCSStore) Exists(ctx context.Context, key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *GCSStore) ListByPrefix(ctx context.Context, prefix string) ([]string, error) {
+	fullPrefix := s.key(prefix)
+	it := s.client.Bucket(s.bucket).Objects(ctx, &storage.Query{Prefix: fullPrefix})
+
+	type keyTime struct {
+		key     string
+		updated time.Time
+	}
+	var results []keyTime
+
+	for {
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Strip the store prefix to return keys relative to the store
+		relKey := attrs.Name
+		if s.prefix != "" {
+			relKey = strings.TrimPrefix(relKey, s.prefix+"/")
+		}
+		results = append(results, keyTime{key: relKey, updated: attrs.Updated})
+	}
+
+	// Sort by most recently updated first
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].updated.After(results[j].updated)
+	})
+
+	keys := make([]string, len(results))
+	for i, r := range results {
+		keys[i] = r.key
+	}
+	return keys, nil
 }
