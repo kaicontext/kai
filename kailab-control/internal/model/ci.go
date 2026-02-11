@@ -195,6 +195,17 @@ type WorkflowSecret struct {
 	CreatedBy string    `json:"created_by"`
 }
 
+// WorkflowVariable represents a non-encrypted variable for workflows (vars.* context).
+type WorkflowVariable struct {
+	ID        string    `json:"id"`
+	RepoID    string    `json:"repo_id,omitempty"`
+	OrgID     string    `json:"org_id,omitempty"`
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Runner represents a CI runner.
 type Runner struct {
 	ID         string    `json:"id"`

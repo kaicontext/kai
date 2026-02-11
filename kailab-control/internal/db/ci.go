@@ -531,6 +531,46 @@ func (db *DB) CompleteJob(id, conclusion string) error {
 	return err
 }
 
+// SetJobOutputs stores the evaluated outputs for a completed job.
+func (db *DB) SetJobOutputs(id string, outputs map[string]string) error {
+	b, _ := json.Marshal(outputs)
+	_, err := db.exec("UPDATE jobs SET outputs = ? WHERE id = ?", string(b), id)
+	return err
+}
+
+// GetJobOutputs retrieves the outputs for a job.
+func (db *DB) GetJobOutputs(id string) (map[string]string, error) {
+	var outputsJSON sql.NullString
+	err := db.queryRow("SELECT outputs FROM jobs WHERE id = ?", id).Scan(&outputsJSON)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	if outputsJSON.Valid && outputsJSON.String != "" {
+		json.Unmarshal([]byte(outputsJSON.String), &result)
+	}
+	return result, nil
+}
+
+// SetJobSummary stores the step summary markdown for a job.
+func (db *DB) SetJobSummary(id, summary string) error {
+	_, err := db.exec("UPDATE jobs SET summary = ? WHERE id = ?", summary, id)
+	return err
+}
+
+// GetJobSummary retrieves the step summary for a job.
+func (db *DB) GetJobSummary(id string) (string, error) {
+	var summary sql.NullString
+	err := db.queryRow("SELECT summary FROM jobs WHERE id = ?", id).Scan(&summary)
+	if err != nil {
+		return "", err
+	}
+	if summary.Valid {
+		return summary.String, nil
+	}
+	return "", nil
+}
+
 // ----- Steps -----
 
 // CreateStep creates a new step.
@@ -949,6 +989,108 @@ func (db *DB) UpdateWorkflowSecret(id string, encrypted []byte) error {
 // DeleteWorkflowSecret deletes a workflow secret.
 func (db *DB) DeleteWorkflowSecret(id string) error {
 	_, err := db.exec("DELETE FROM workflow_secrets WHERE id = ?", id)
+	return err
+}
+
+// ----- Variables -----
+
+// SetVariable creates or updates a workflow variable.
+func (db *DB) SetVariable(repoID, orgID, name, value string) error {
+	existing, _ := db.GetVariableByName(repoID, orgID, name)
+	if existing != nil {
+		now := time.Now().Unix()
+		_, err := db.exec("UPDATE workflow_variables SET value = ?, updated_at = ? WHERE id = ?", value, now, existing.ID)
+		return err
+	}
+
+	id := newUUID()
+	if repoID != "" {
+		_, err := db.exec(
+			"INSERT INTO workflow_variables (id, repo_id, name, value) VALUES (?, ?, ?, ?)",
+			id, repoID, name, value,
+		)
+		return err
+	}
+	_, err := db.exec(
+		"INSERT INTO workflow_variables (id, org_id, name, value) VALUES (?, ?, ?, ?)",
+		id, orgID, name, value,
+	)
+	return err
+}
+
+// GetVariableByName retrieves a variable by name.
+func (db *DB) GetVariableByName(repoID, orgID, name string) (*model.WorkflowVariable, error) {
+	var v model.WorkflowVariable
+	var createdAt, updatedAt int64
+	var repoIDNull, orgIDNull sql.NullString
+
+	var query string
+	var args []interface{}
+	if repoID != "" {
+		query = "SELECT id, repo_id, org_id, name, value, created_at, updated_at FROM workflow_variables WHERE repo_id = ? AND name = ?"
+		args = []interface{}{repoID, name}
+	} else if orgID != "" {
+		query = "SELECT id, repo_id, org_id, name, value, created_at, updated_at FROM workflow_variables WHERE org_id = ? AND repo_id IS NULL AND name = ?"
+		args = []interface{}{orgID, name}
+	} else {
+		return nil, ErrNotFound
+	}
+
+	err := db.queryRow(query, args...).Scan(&v.ID, &repoIDNull, &orgIDNull, &v.Name, &v.Value, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	v.CreatedAt = time.Unix(createdAt, 0)
+	v.UpdatedAt = time.Unix(updatedAt, 0)
+	if repoIDNull.Valid {
+		v.RepoID = repoIDNull.String
+	}
+	if orgIDNull.Valid {
+		v.OrgID = orgIDNull.String
+	}
+	return &v, nil
+}
+
+// ListRepoVariables lists all variables for a repo (includes org-level variables).
+func (db *DB) ListRepoVariables(repoID, orgID string) ([]*model.WorkflowVariable, error) {
+	rows, err := db.query(
+		"SELECT id, repo_id, org_id, name, value, created_at, updated_at FROM workflow_variables WHERE repo_id = ? OR (org_id = ? AND repo_id IS NULL) ORDER BY name",
+		repoID, orgID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vars []*model.WorkflowVariable
+	for rows.Next() {
+		var v model.WorkflowVariable
+		var createdAt, updatedAt int64
+		var repoIDNull, orgIDNull sql.NullString
+
+		if err := rows.Scan(&v.ID, &repoIDNull, &orgIDNull, &v.Name, &v.Value, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		v.CreatedAt = time.Unix(createdAt, 0)
+		v.UpdatedAt = time.Unix(updatedAt, 0)
+		if repoIDNull.Valid {
+			v.RepoID = repoIDNull.String
+		}
+		if orgIDNull.Valid {
+			v.OrgID = orgIDNull.String
+		}
+		vars = append(vars, &v)
+	}
+	return vars, rows.Err()
+}
+
+// DeleteVariable deletes a workflow variable.
+func (db *DB) DeleteVariable(id string) error {
+	_, err := db.exec("DELETE FROM workflow_variables WHERE id = ?", id)
 	return err
 }
 

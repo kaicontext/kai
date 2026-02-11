@@ -638,6 +638,9 @@ func (jp *JobPod) actionCache(ctx context.Context, stepDef *StepDefinition, logW
 		}
 	}
 
+	// Track whether this is an exact key match (not a restore-key fallback)
+	exactHit := exists && cacheKey == "cache/"+key
+
 	if exists {
 		fmt.Fprintf(logWriter, "Cache hit, restoring...\n")
 		rc, err := jp.executor.store.Get(ctx, cacheKey)
@@ -677,6 +680,14 @@ echo "Cache restored"
 	} else {
 		fmt.Fprintf(logWriter, "Cache miss\n")
 	}
+
+	// Write cache-hit output so steps can check: if steps.cache.outputs.cache-hit != 'true'
+	// cache-hit is only 'true' on exact key match, not on restore-key prefix fallback
+	cacheHitValue := "false"
+	if exactHit {
+		cacheHitValue = "true"
+	}
+	jp.executeCommand(ctx, fmt.Sprintf("echo 'cache-hit=%s' >> /tmp/github_output", cacheHitValue), "bash", nil, "", io.Discard)
 
 	// Save cache: tar the paths, base64-encode, read back, decode, and upload
 	// Save even on hit (to update the key if restore-keys was used with a different key)
@@ -1714,11 +1725,35 @@ func buildEnvVars(context map[string]interface{}, stepEnv map[string]string) []c
 	sha, _ := context["sha"].(string)
 	event, _ := context["event"].(string)
 	runID, _ := context["run_id"].(string)
+	actor, _ := context["actor"].(string)
+	workflowName, _ := context["workflow_name"].(string)
+	jobName, _ := context["job_name"].(string)
+	serverURL, _ := context["server_url"].(string)
+
+	// Run number (comes as float64 from JSON)
+	runNumber := "1"
+	if n, ok := context["run_number"].(float64); ok {
+		runNumber = fmt.Sprintf("%d", int(n))
+	} else if n, ok := context["run_number"].(int); ok {
+		runNumber = fmt.Sprintf("%d", n)
+	}
 
 	// Derive ref_name from ref
 	refName := ref
 	refName = strings.TrimPrefix(refName, "refs/heads/")
 	refName = strings.TrimPrefix(refName, "refs/tags/")
+
+	// Derive head_ref and base_ref for pull requests
+	headRef := ""
+	baseRef := ""
+	if event == "pull_request" || event == "review_created" || event == "review_updated" {
+		headRef = refName
+		if eventData, ok := context["event_data"].(map[string]interface{}); ok {
+			if br, ok := eventData["base_ref"].(string); ok {
+				baseRef = br
+			}
+		}
+	}
 
 	// GitHub-compatible environment variables
 	env = append(env,
@@ -1730,6 +1765,16 @@ func buildEnvVars(context map[string]interface{}, stepEnv map[string]string) []c
 		corev1.EnvVar{Name: "GITHUB_SHA", Value: sha},
 		corev1.EnvVar{Name: "GITHUB_EVENT_NAME", Value: event},
 		corev1.EnvVar{Name: "GITHUB_RUN_ID", Value: runID},
+		corev1.EnvVar{Name: "GITHUB_RUN_NUMBER", Value: runNumber},
+		corev1.EnvVar{Name: "GITHUB_RUN_ATTEMPT", Value: "1"},
+		corev1.EnvVar{Name: "GITHUB_ACTOR", Value: actor},
+		corev1.EnvVar{Name: "GITHUB_TRIGGERING_ACTOR", Value: actor},
+		corev1.EnvVar{Name: "GITHUB_WORKFLOW", Value: workflowName},
+		corev1.EnvVar{Name: "GITHUB_JOB", Value: jobName},
+		corev1.EnvVar{Name: "GITHUB_SERVER_URL", Value: serverURL},
+		corev1.EnvVar{Name: "GITHUB_API_URL", Value: serverURL + "/api/v1"},
+		corev1.EnvVar{Name: "GITHUB_HEAD_REF", Value: headRef},
+		corev1.EnvVar{Name: "GITHUB_BASE_REF", Value: baseRef},
 		corev1.EnvVar{Name: "GITHUB_WORKSPACE", Value: "/workspace"},
 		corev1.EnvVar{Name: "GITHUB_ENV", Value: "/tmp/github_env"},
 		corev1.EnvVar{Name: "GITHUB_OUTPUT", Value: "/tmp/github_output"},

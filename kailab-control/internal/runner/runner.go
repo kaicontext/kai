@@ -124,7 +124,7 @@ func (r *Runner) poll(ctx context.Context) error {
 	if err := r.executeJob(ctx, claim); err != nil {
 		log.Printf("Job %s failed: %v", claim.Job.ID, err)
 		// Mark job as failed
-		r.completeJob(ctx, claim.Job.ID, model.ConclusionFailure)
+		r.completeJob(ctx, claim.Job.ID, model.ConclusionFailure, nil)
 		return nil
 	}
 
@@ -215,6 +215,30 @@ func buildExprContext(claim *model.JobClaimResponse) *workflow.ExprContext {
 		ec.Matrix = matrix
 	}
 
+	// Populate needs.* context (dependency job outputs and results)
+	if needsRaw, ok := claim.Context["needs"].(map[string]interface{}); ok {
+		for jobName, data := range needsRaw {
+			jobData, ok := data.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			jr := workflow.JobResult{
+				Outputs: make(map[string]string),
+			}
+			if result, ok := jobData["result"].(string); ok {
+				jr.Result = result
+			}
+			if outputs, ok := jobData["outputs"].(map[string]interface{}); ok {
+				for k, v := range outputs {
+					if s, ok := v.(string); ok {
+						jr.Outputs[k] = s
+					}
+				}
+			}
+			ec.Needs[jobName] = jr
+		}
+	}
+
 	// Populate runner context
 	ec.Runner["os"] = "Linux"
 	ec.Runner["arch"] = "X64"
@@ -223,6 +247,15 @@ func buildExprContext(claim *model.JobClaimResponse) *workflow.ExprContext {
 	// Populate inputs (workflow_dispatch)
 	if inputs, ok := claim.Context["inputs"].(map[string]string); ok {
 		ec.Inputs = inputs
+	}
+
+	// Populate vars.* context
+	if varsRaw, ok := claim.Context["vars"].(map[string]interface{}); ok {
+		for k, v := range varsRaw {
+			if s, ok := v.(string); ok {
+				ec.Vars[k] = s
+			}
+		}
 	}
 
 	// Default job status to success
@@ -241,6 +274,12 @@ func interpolateStep(step *StepDefinition, ec *workflow.ExprContext) {
 	step.With = workflow.InterpolateMap(step.With, ec)
 	step.Env = workflow.InterpolateMap(step.Env, ec)
 }
+
+// defaultJobTimeoutMinutes is the default timeout for jobs (same as GitHub Actions).
+const defaultJobTimeoutMinutes = 360
+
+// defaultStepTimeoutMinutes is the default timeout for steps (same as GitHub Actions).
+const defaultStepTimeoutMinutes = 360
 
 // executeJob runs a job to completion using one pod for all steps.
 func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) error {
@@ -280,6 +319,18 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 	if jobDef == nil {
 		return fmt.Errorf("job definition not found")
 	}
+
+	// Apply job-level timeout. Keep the parent context for API calls (completeJob, etc.)
+	// so they still work after the job timeout fires.
+	parentCtx := ctx
+	jobTimeout := defaultJobTimeoutMinutes
+	if jobDef.TimeoutMinutes > 0 {
+		jobTimeout = jobDef.TimeoutMinutes
+	}
+	jobCtx, jobCancel := context.WithTimeout(ctx, time.Duration(jobTimeout)*time.Minute)
+	defer jobCancel()
+	ctx = jobCtx
+	_ = parentCtx // used for API calls after timeout
 
 	// Build expression context from claim data
 	exprCtx := buildExprContext(claim)
@@ -328,7 +379,8 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 	}
 	defer func() {
 		fmt.Fprintf(jobLog, "\n=== Cleaning up job pod ===\n")
-		jobPod.Cleanup(ctx)
+		// Use parentCtx so cleanup works even after job timeout
+		jobPod.Cleanup(parentCtx)
 	}()
 
 	fmt.Fprintf(jobLog, "Pod %s ready\n\n", jobPod.Name)
@@ -370,12 +422,30 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		// Interpolate expressions in step fields
 		interpolateStep(stepDef, exprCtx)
 
+		// Apply step-level timeout
+		stepCtx := ctx
+		stepTimeout := defaultStepTimeoutMinutes
+		if stepDef.TimeoutMinutes > 0 {
+			stepTimeout = stepDef.TimeoutMinutes
+		}
+		stepCtx, stepCancel := context.WithTimeout(ctx, time.Duration(stepTimeout)*time.Minute)
+
 		// Execute step in the job pod
-		result, err := jobPod.ExecuteStep(ctx, stepDef, claim.Context, stepLog)
+		result, err := jobPod.ExecuteStep(stepCtx, stepDef, claim.Context, stepLog)
+		stepCancel()
 
 		conclusion := model.ConclusionSuccess
 		if err != nil {
-			fmt.Fprintf(stepLog, "Error: %v\n", err)
+			if ctx.Err() == context.DeadlineExceeded {
+				// Job-level timeout — break out, handled below
+				fmt.Fprintf(stepLog, "Job timed out\n")
+				allSuccess = false
+				break
+			} else if stepCtx.Err() == context.DeadlineExceeded {
+				fmt.Fprintf(stepLog, "Step timed out after %d minutes\n", stepTimeout)
+			} else {
+				fmt.Fprintf(stepLog, "Error: %v\n", err)
+			}
 			conclusion = model.ConclusionFailure
 		} else if result.ExitCode != 0 {
 			fmt.Fprintf(stepLog, "Exit code: %d\n", result.ExitCode)
@@ -426,12 +496,38 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		}
 	}
 
+	// Check if the job timed out
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(jobLog, "\n=== Job timed out after %d minutes ===\n", jobTimeout)
+		return r.completeJob(parentCtx, job.ID, model.ConclusionFailure, nil)
+	}
+
+	// Evaluate job outputs by interpolating expressions against final step context
+	var jobOutputs map[string]string
+	if len(jobDef.Outputs) > 0 {
+		jobOutputs = make(map[string]string, len(jobDef.Outputs))
+		for key, expr := range jobDef.Outputs {
+			jobOutputs[key] = workflow.Interpolate(expr, exprCtx)
+		}
+		fmt.Fprintf(jobLog, "Job outputs: %v\n", jobOutputs)
+	}
+
+	// Read GITHUB_STEP_SUMMARY if it has content
+	var jobSummary string
+	summaryResult, summaryErr := jobPod.ExecuteStep(parentCtx, &StepDefinition{
+		Run:   "cat /tmp/github_step_summary 2>/dev/null || true",
+		Shell: "bash",
+	}, claim.Context, io.Discard)
+	if summaryErr == nil && strings.TrimSpace(summaryResult.Output) != "" {
+		jobSummary = strings.TrimSpace(summaryResult.Output)
+	}
+
 	// Complete job
 	conclusion := model.ConclusionSuccess
 	if !allSuccess {
 		conclusion = model.ConclusionFailure
 	}
-	return r.completeJob(ctx, job.ID, conclusion)
+	return r.completeJob(parentCtx, job.ID, conclusion, jobOutputs, jobSummary)
 }
 
 // startJob marks a job as started.
@@ -512,11 +608,17 @@ func (r *Runner) completeStep(ctx context.Context, jobID string, stepNumber int,
 	return nil
 }
 
-// completeJob marks a job as completed.
-func (r *Runner) completeJob(ctx context.Context, jobID, conclusion string) error {
-	reqBody := map[string]string{
+// completeJob marks a job as completed, optionally with outputs and summary.
+func (r *Runner) completeJob(ctx context.Context, jobID, conclusion string, outputs map[string]string, summaries ...string) error {
+	reqBody := map[string]interface{}{
 		"job_id":     jobID,
 		"conclusion": conclusion,
+	}
+	if len(outputs) > 0 {
+		reqBody["outputs"] = outputs
+	}
+	if len(summaries) > 0 && summaries[0] != "" {
+		reqBody["summary"] = summaries[0]
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -558,12 +660,14 @@ type ParsedWorkflow struct {
 }
 
 type JobDefinition struct {
-	Name      string                     `json:"name"`
-	RunsOn    []string                   `json:"runs_on"`
-	Container *ContainerDef              `json:"container,omitempty"`
-	Services  map[string]ServiceDef      `json:"services,omitempty"`
-	Steps     []StepDefinition           `json:"steps"`
-	Env       map[string]string          `json:"env,omitempty"`
+	Name           string                     `json:"name"`
+	RunsOn         []string                   `json:"runs_on"`
+	Container      *ContainerDef              `json:"container,omitempty"`
+	Services       map[string]ServiceDef      `json:"services,omitempty"`
+	Steps          []StepDefinition           `json:"steps"`
+	Env            map[string]string          `json:"env,omitempty"`
+	Outputs        map[string]string          `json:"outputs,omitempty"`
+	TimeoutMinutes int                        `json:"timeout_minutes,omitempty"`
 }
 
 type ServiceDef struct {

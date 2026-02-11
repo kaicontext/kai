@@ -165,6 +165,12 @@
 					Secrets
 				</a>
 				<a
+					href="/orgs/{$page.params.slug}/{$page.params.repo}/settings/variables"
+					class="block px-3 py-2 rounded-md text-sm font-medium text-kai-text-muted hover:text-kai-text hover:bg-kai-bg-tertiary"
+				>
+					Variables
+				</a>
+				<a
 					href="/orgs/{$page.params.slug}/{$page.params.repo}/webhooks"
 					class="block px-3 py-2 rounded-md text-sm font-medium text-kai-text-muted hover:text-kai-text hover:bg-kai-bg-tertiary"
 				>

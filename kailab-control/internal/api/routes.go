@@ -279,6 +279,29 @@ func NewRouter(h *Handler) http.Handler {
 		h.WithRepo,
 	))
 
+	// CI Variables
+	mux.Handle("GET /api/v1/orgs/{org}/repos/{repo}/variables", Chain(
+		http.HandlerFunc(h.ListVariables),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
+	mux.Handle("PUT /api/v1/orgs/{org}/repos/{repo}/variables/{var_name}", Chain(
+		http.HandlerFunc(h.SetVariable),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+	mux.Handle("DELETE /api/v1/orgs/{org}/repos/{repo}/variables/{var_name}", Chain(
+		http.HandlerFunc(h.DeleteVariable),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("maintainer"),
+		h.WithRepo,
+	))
+
 	// Internal endpoints (service-to-service)
 	// Use /-/ prefix to avoid conflict with /{org}/{repo}/v1/ proxy route
 	mux.HandleFunc("POST /-/ssh/verify", h.VerifySSHKey)

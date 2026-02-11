@@ -3,6 +3,22 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { api, loadUser } from '$lib/api.js';
+	import { marked } from 'marked';
+
+	marked.setOptions({ gfm: true, breaks: true });
+
+	function sanitizeHtml(html) {
+		if (!html) return '';
+		return html
+			.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+			.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
+			.replace(/\bon\w+\s*=/gi, 'data-removed=')
+			.replace(/javascript:/gi, 'removed:');
+	}
+
+	function safeMarkdown(content) {
+		return sanitizeHtml(marked(content));
+	}
 
 	let run = $state(null);
 	let jobs = $state([]);
@@ -323,7 +339,17 @@
 			</div>
 
 			<!-- Logs Panel -->
-			<div class="col-span-9">
+			<div class="col-span-9 space-y-4">
+				{#if selectedJob?.summary}
+					<div class="card p-0">
+						<div class="p-3 border-b border-kai-border">
+							<h3 class="font-medium">Summary</h3>
+						</div>
+						<div class="p-4 prose prose-invert max-w-none text-sm">
+							{@html safeMarkdown(selectedJob.summary)}
+						</div>
+					</div>
+				{/if}
 				<div class="card p-0 h-[600px] flex flex-col">
 					<div class="p-3 border-b border-kai-border flex items-center justify-between">
 						<h3 class="font-medium">

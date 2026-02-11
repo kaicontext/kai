@@ -420,6 +420,7 @@ type JobResponse struct {
 	Conclusion   string         `json:"conclusion,omitempty"`
 	RunnerName   string         `json:"runner_name,omitempty"`
 	MatrixValues map[string]any `json:"matrix_values,omitempty"`
+	Summary      string         `json:"summary,omitempty"`
 	StartedAt    string         `json:"started_at,omitempty"`
 	CompletedAt  string         `json:"completed_at,omitempty"`
 	CreatedAt    string         `json:"created_at"`
@@ -493,6 +494,11 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	for i, job := range jobs {
 		steps, _ := h.db.ListJobSteps(job.ID)
 		resp.Jobs[i] = jobToResponse(job, steps)
+		if job.Status == model.JobStatusCompleted {
+			if summary, err := h.db.GetJobSummary(job.ID); err == nil && summary != "" {
+				resp.Jobs[i].Summary = summary
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -703,6 +709,97 @@ func (h *Handler) DeleteSecret(w http.ResponseWriter, r *http.Request) {
 	h.db.WriteAudit(&org.ID, &user.ID, "secret.delete", "repo", repo.ID, map[string]string{
 		"name": secretName,
 	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ----- Variables -----
+
+type VariableResponse struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	Scope     string `json:"scope"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type ListVariablesResponse struct {
+	Variables []VariableResponse `json:"variables"`
+}
+
+// ListVariables lists all variables for a repo.
+func (h *Handler) ListVariables(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	org := OrgFromContext(r.Context())
+
+	vars, err := h.db.ListRepoVariables(repo.ID, org.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list variables", err)
+		return
+	}
+
+	resp := ListVariablesResponse{Variables: make([]VariableResponse, len(vars))}
+	for i, v := range vars {
+		scope := "repo"
+		if v.RepoID == "" {
+			scope = "org"
+		}
+		resp.Variables[i] = VariableResponse{
+			Name:      v.Name,
+			Value:     v.Value,
+			Scope:     scope,
+			UpdatedAt: v.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type SetVariableRequest struct {
+	Value string `json:"value"`
+}
+
+// SetVariable creates or updates a variable.
+func (h *Handler) SetVariable(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	varName := r.PathValue("var_name")
+
+	var req SetVariableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err)
+		return
+	}
+
+	if varName == "" {
+		writeError(w, http.StatusBadRequest, "variable name is required", nil)
+		return
+	}
+
+	if err := h.db.SetVariable(repo.ID, "", varName, req.Value); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set variable", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// DeleteVariable deletes a variable.
+func (h *Handler) DeleteVariable(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	varName := r.PathValue("var_name")
+
+	v, err := h.db.GetVariableByName(repo.ID, "", varName)
+	if err == db.ErrNotFound {
+		writeError(w, http.StatusNotFound, "variable not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get variable", err)
+		return
+	}
+
+	if err := h.db.DeleteVariable(v.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete variable", err)
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1049,13 +1146,17 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 
 	// Build context
 	context := map[string]interface{}{
-		"repo":      org.Slug + "/" + repo.Name,
-		"ref":       run.TriggerRef,
-		"sha":       run.TriggerSHA,
-		"event":     run.TriggerEvent,
-		"run_id":    run.ID,
-		"clone_url": cloneURL,
-		"actor":     run.CreatedBy,
+		"repo":          org.Slug + "/" + repo.Name,
+		"ref":           run.TriggerRef,
+		"sha":           run.TriggerSHA,
+		"event":         run.TriggerEvent,
+		"run_id":        run.ID,
+		"clone_url":     cloneURL,
+		"actor":         run.CreatedBy,
+		"workflow_name": wf.Name,
+		"run_number":    run.RunNumber,
+		"job_name":      job.Name,
+		"server_url":    h.cfg.BaseURL,
 	}
 
 	// Add secrets (decrypted - TODO: proper decryption)
@@ -1064,6 +1165,38 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 		secretsMap[s.Name] = string(s.Encrypted)
 	}
 	context["secrets"] = secretsMap
+
+	// Add variables (vars.* context)
+	vars, _ := h.db.ListRepoVariables(repo.ID, org.ID)
+	if len(vars) > 0 {
+		varsMap := make(map[string]string)
+		for _, v := range vars {
+			varsMap[v.Name] = v.Value
+		}
+		context["vars"] = varsMap
+	}
+
+	// Add dependency job outputs (needs.*)
+	if len(job.Needs) > 0 {
+		allJobs, _ := h.db.ListWorkflowRunJobs(run.ID)
+		needsMap := make(map[string]interface{})
+		for _, depName := range job.Needs {
+			for _, depJob := range allJobs {
+				if depJob.Name == depName && depJob.Status == model.JobStatusCompleted {
+					outputs, _ := h.db.GetJobOutputs(depJob.ID)
+					if outputs == nil {
+						outputs = make(map[string]string)
+					}
+					needsMap[depName] = map[string]interface{}{
+						"outputs": outputs,
+						"result":  depJob.Conclusion,
+					}
+					break
+				}
+			}
+		}
+		context["needs"] = needsMap
+	}
 
 	writeJSON(w, http.StatusOK, model.JobClaimResponse{
 		Job:         job,
@@ -1171,8 +1304,10 @@ func (h *Handler) CompleteStep(w http.ResponseWriter, r *http.Request) {
 
 // CompleteJobRequest marks a job as completed.
 type CompleteJobRequest struct {
-	JobID      string `json:"job_id"`
-	Conclusion string `json:"conclusion"`
+	JobID      string            `json:"job_id"`
+	Conclusion string            `json:"conclusion"`
+	Outputs    map[string]string `json:"outputs,omitempty"`
+	Summary    string            `json:"summary,omitempty"`
 }
 
 // CompleteJob marks a job as completed by a runner.
@@ -1187,6 +1322,16 @@ func (h *Handler) CompleteJob(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.CompleteJob(jobID, req.Conclusion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to complete job", err)
 		return
+	}
+
+	// Store job outputs if provided
+	if len(req.Outputs) > 0 {
+		h.db.SetJobOutputs(jobID, req.Outputs)
+	}
+
+	// Store step summary if provided
+	if req.Summary != "" {
+		h.db.SetJobSummary(jobID, req.Summary)
 	}
 
 	// Check if all jobs are complete and update workflow run

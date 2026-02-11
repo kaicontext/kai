@@ -50,6 +50,18 @@ var sqliteCIEnhancementsSchema string
 //go:embed schema/0005_ci_enhancements_pg.sql
 var postgresCIEnhancementsSchema string
 
+//go:embed schema/0006_job_outputs.sql
+var sqliteJobOutputsSchema string
+
+//go:embed schema/0006_job_outputs_pg.sql
+var postgresJobOutputsSchema string
+
+//go:embed schema/0007_variables.sql
+var sqliteVariablesSchema string
+
+//go:embed schema/0007_variables_pg.sql
+var postgresVariablesSchema string
+
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -143,6 +155,14 @@ func (db *DB) initSQLite() error {
 	if _, err := db.DB.Exec(sqliteCIEnhancementsSchema); err != nil {
 		return fmt.Errorf("running SQLite CI enhancements migrations: %w", err)
 	}
+	// Run job outputs schema
+	if _, err := db.DB.Exec(sqliteJobOutputsSchema); err != nil {
+		return fmt.Errorf("running SQLite job outputs migrations: %w", err)
+	}
+	// Run variables schema
+	if _, err := db.DB.Exec(sqliteVariablesSchema); err != nil {
+		return fmt.Errorf("running SQLite variables migrations: %w", err)
+	}
 	return nil
 }
 
@@ -167,6 +187,14 @@ func (db *DB) initPostgres() error {
 	// Run CI enhancements schema
 	if _, err := db.DB.Exec(postgresCIEnhancementsSchema); err != nil {
 		return fmt.Errorf("running PostgreSQL CI enhancements migrations: %w", err)
+	}
+	// Run job outputs schema
+	if _, err := db.DB.Exec(postgresJobOutputsSchema); err != nil {
+		return fmt.Errorf("running PostgreSQL job outputs migrations: %w", err)
+	}
+	// Run variables schema
+	if _, err := db.DB.Exec(postgresVariablesSchema); err != nil {
+		return fmt.Errorf("running PostgreSQL variables migrations: %w", err)
 	}
 	return nil
 }
