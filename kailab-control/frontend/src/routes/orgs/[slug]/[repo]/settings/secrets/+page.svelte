@@ -131,7 +131,7 @@
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 	{:else if error}
 		<div class="card text-center py-12">
-			<p class="text-red-400 mb-4">{error}</p>
+			<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 			<button class="btn" onclick={loadSecrets}>Retry</button>
 		</div>
 	{:else if secrets.length === 0}
@@ -163,7 +163,7 @@
 								<code class="font-mono text-sm">{secret.name}</code>
 							</td>
 							<td class="px-4 py-3">
-								<span class="px-2 py-0.5 rounded text-xs font-medium {secret.scope === 'org' ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}">
+								<span class="px-2 py-0.5 rounded text-xs font-medium {secret.scope === 'org' ? 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400' : 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400'}">
 									{secret.scope}
 								</span>
 							</td>
@@ -186,7 +186,7 @@
 									</button>
 								{:else}
 									<button
-										class="text-kai-text-muted hover:text-red-400 transition-colors"
+										class="text-kai-text-muted hover:text-red-700 dark:hover:text-red-400 transition-colors"
 										onclick={() => (deleteConfirm = secret.name)}
 									>
 										<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -231,7 +231,7 @@
 					autocomplete="off"
 				/>
 				{#if newSecretName && !isValidName(newSecretName)}
-					<p class="text-red-400 text-xs mt-1">Use only letters, numbers, and underscores. Must start with a letter or underscore.</p>
+					<p class="text-red-700 dark:text-red-400 text-xs mt-1">Use only letters, numbers, and underscores. Must start with a letter or underscore.</p>
 				{/if}
 			</div>
 

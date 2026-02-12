@@ -166,7 +166,7 @@
 				<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 			{:else if error}
 				<div class="card text-center py-12">
-					<p class="text-red-400 mb-4">{error}</p>
+					<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 					<button class="btn" onclick={loadVariables}>Retry</button>
 				</div>
 			{:else if variables.length === 0}
@@ -216,7 +216,7 @@
 										{/if}
 									</td>
 									<td class="px-4 py-3">
-										<span class="px-2 py-0.5 rounded text-xs font-medium {v.scope === 'org' ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}">
+										<span class="px-2 py-0.5 rounded text-xs font-medium {v.scope === 'org' ? 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400' : 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400'}">
 											{v.scope}
 										</span>
 									</td>
@@ -245,7 +245,7 @@
 												</svg>
 											</button>
 											<button
-												class="text-kai-text-muted hover:text-red-400 transition-colors"
+												class="text-kai-text-muted hover:text-red-700 dark:hover:text-red-400 transition-colors"
 												onclick={() => (deleteConfirm = v.name)}
 												title="Delete"
 											>
@@ -293,7 +293,7 @@
 					autocomplete="off"
 				/>
 				{#if newVarName && !isValidName(newVarName)}
-					<p class="text-red-400 text-xs mt-1">Use only letters, numbers, and underscores. Must start with a letter or underscore.</p>
+					<p class="text-red-700 dark:text-red-400 text-xs mt-1">Use only letters, numbers, and underscores. Must start with a letter or underscore.</p>
 				{/if}
 			</div>
 

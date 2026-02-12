@@ -115,12 +115,12 @@
 
 	function getRoleBadgeColor(role) {
 		switch (role) {
-			case 'owner': return 'bg-purple-500/20 text-purple-400';
-			case 'admin': return 'bg-red-500/20 text-red-400';
-			case 'maintainer': return 'bg-orange-500/20 text-orange-400';
-			case 'developer': return 'bg-blue-500/20 text-blue-400';
-			case 'reporter': return 'bg-gray-500/20 text-gray-400';
-			default: return 'bg-gray-500/20 text-gray-400';
+			case 'owner': return 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400';
+			case 'admin': return 'bg-red-600/10 dark:bg-red-500/20 text-red-700 dark:text-red-400';
+			case 'maintainer': return 'bg-orange-600/10 dark:bg-orange-500/20 text-orange-700 dark:text-orange-400';
+			case 'developer': return 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400';
+			case 'reporter': return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
+			default: return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
 		}
 	}
 </script>
@@ -221,7 +221,7 @@
 							<span class="px-2 py-1 text-xs rounded-full {getRoleBadgeColor(member.role)}">{member.role}</span>
 							{#if isAdmin() && member.role !== 'owner'}
 								<button
-									class="text-kai-text-muted hover:text-red-400 transition-colors"
+									class="text-kai-text-muted hover:text-red-700 dark:hover:text-red-400 transition-colors"
 									onclick={() => removeMember(member.user_id)}
 									title="Remove member"
 								>

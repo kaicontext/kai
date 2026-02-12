@@ -154,11 +154,11 @@
 	function getStatusColor(status) {
 		switch (status) {
 			case 'success':
-				return 'text-green-400';
+				return 'text-green-700 dark:text-green-400';
 			case 'failed':
-				return 'text-red-400';
+				return 'text-red-700 dark:text-red-400';
 			default:
-				return 'text-yellow-400';
+				return 'text-yellow-700 dark:text-yellow-400';
 		}
 	}
 </script>
@@ -203,7 +203,7 @@
 					<div class="flex-1 min-w-0">
 						<div class="flex items-center gap-2">
 							<span
-								class="w-2 h-2 rounded-full {webhook.active ? 'bg-green-400' : 'bg-gray-500'}"
+								class="w-2 h-2 rounded-full {webhook.active ? 'bg-green-500 dark:bg-green-400' : 'bg-gray-400 dark:bg-gray-500'}"
 							></span>
 							<span class="font-medium font-mono text-sm">{truncateUrl(webhook.url)}</span>
 						</div>

@@ -11,6 +11,18 @@
 
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Kailab</title>
+		<script>
+			(function() {
+				var saved = localStorage.getItem('theme');
+				var theme;
+				if (saved === 'light' || saved === 'dark') {
+					theme = saved;
+				} else {
+					theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+				}
+				document.documentElement.setAttribute('data-theme', theme);
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body class="bg-kai-bg text-kai-text" data-sveltekit-preload-data="hover">

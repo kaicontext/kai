@@ -408,17 +408,17 @@
 	function getStateColor(state) {
 		switch (state) {
 			case 'open':
-				return 'bg-green-500/20 text-green-400';
+				return 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400';
 			case 'approved':
-				return 'bg-blue-500/20 text-blue-400';
+				return 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400';
 			case 'changes_requested':
-				return 'bg-yellow-500/20 text-yellow-400';
+				return 'bg-yellow-600/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400';
 			case 'merged':
-				return 'bg-purple-500/20 text-purple-400';
+				return 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400';
 			case 'abandoned':
-				return 'bg-gray-500/20 text-gray-400';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
 			default:
-				return 'bg-gray-500/20 text-gray-400';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
 		}
 	}
 
@@ -441,18 +441,18 @@
 
 	function getActionColor(action) {
 		switch (action) {
-			case 'added': return 'text-green-400';
-			case 'removed': return 'text-red-400';
-			default: return 'text-yellow-400';
+			case 'added': return 'text-green-700 dark:text-green-400';
+			case 'removed': return 'text-red-700 dark:text-red-400';
+			default: return 'text-yellow-700 dark:text-yellow-400';
 		}
 	}
 
 	function getKindColor(kind) {
 		switch (kind) {
-			case 'feature': return 'text-green-400';
-			case 'fix': return 'text-red-400';
-			case 'test': return 'text-blue-400';
-			case 'docs': return 'text-purple-400';
+			case 'feature': return 'text-green-700 dark:text-green-400';
+			case 'fix': return 'text-red-700 dark:text-red-400';
+			case 'test': return 'text-blue-700 dark:text-blue-400';
+			case 'docs': return 'text-purple-700 dark:text-purple-400';
 			default: return 'text-kai-text-muted';
 		}
 	}
@@ -575,15 +575,15 @@
 		switch (kind?.toLowerCase()) {
 			case 'function':
 			case 'method':
-				return 'text-blue-400';
+				return 'text-blue-700 dark:text-blue-400';
 			case 'class':
 			case 'struct':
-				return 'text-yellow-400';
+				return 'text-yellow-700 dark:text-yellow-400';
 			case 'const':
 			case 'var':
-				return 'text-purple-400';
+				return 'text-purple-700 dark:text-purple-400';
 			case 'type':
-				return 'text-green-400';
+				return 'text-green-700 dark:text-green-400';
 			default:
 				return 'text-kai-text-muted';
 		}
@@ -624,7 +624,7 @@
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 	{:else if error}
 		<div class="card text-center py-12">
-			<p class="text-red-400 mb-4">{error}</p>
+			<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 			<a href="/orgs/{$page.params.slug}/{$page.params.repo}/reviews" class="btn">Back to Reviews</a>
 		</div>
 	{:else if review}
@@ -722,13 +722,13 @@
 
 		<!-- Changes Requested Summary -->
 		{#if review.state === 'changes_requested' && review.changesRequestedSummary}
-			<div class="mb-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+			<div class="mb-6 p-4 bg-yellow-500/5 dark:bg-yellow-500/10 border border-yellow-600/30 dark:border-yellow-500/30 rounded-lg">
 				<div class="flex items-start gap-3">
-					<svg class="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<svg class="w-5 h-5 text-yellow-700 dark:text-yellow-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
 					</svg>
 					<div>
-						<div class="font-medium text-yellow-400 mb-1">Changes requested{#if review.changesRequestedBy} by {review.changesRequestedBy}{/if}</div>
+						<div class="font-medium text-yellow-700 dark:text-yellow-400 mb-1">Changes requested{#if review.changesRequestedBy} by {review.changesRequestedBy}{/if}</div>
 						<p class="text-kai-text">{review.changesRequestedSummary}</p>
 					</div>
 				</div>
@@ -802,7 +802,7 @@
 											{#each group.files as file}
 												<li class="text-sm font-mono">
 													<button
-														class="flex items-center gap-2 hover:text-blue-400 hover:underline cursor-pointer transition-colors text-left w-full {selectedFile === file.path ? 'text-blue-400' : ''}"
+														class="flex items-center gap-2 hover:text-blue-700 dark:hover:text-blue-400 hover:underline cursor-pointer transition-colors text-left w-full {selectedFile === file.path ? 'text-blue-700 dark:text-blue-400' : ''}"
 														onclick={() => loadFileDiff(file.path)}
 													>
 														<span class="text-kai-text-muted">•</span>
@@ -887,7 +887,7 @@
 									<div class="flex-1 min-w-0">
 										<div class="flex items-center gap-2 mb-1">
 											<span class="font-mono font-medium">{unit.name}</span>
-											<span class="text-xs px-2 py-0.5 rounded {unit.action === 'added' ? 'bg-green-500/20 text-green-400' : unit.action === 'removed' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}">
+											<span class="text-xs px-2 py-0.5 rounded {unit.action === 'added' ? 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400' : unit.action === 'removed' ? 'bg-red-600/10 dark:bg-red-500/20 text-red-700 dark:text-red-400' : 'bg-yellow-600/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400'}">
 												{unit.action}
 											</span>
 											{#if unit.changeType}
@@ -900,10 +900,10 @@
 										{#if unit.beforeSig || unit.afterSig}
 											<div class="mt-2 text-xs font-mono">
 												{#if unit.beforeSig && unit.action !== 'added'}
-													<div class="text-red-400/70">- {unit.beforeSig}</div>
+													<div class="text-red-700/70 dark:text-red-400/70">- {unit.beforeSig}</div>
 												{/if}
 												{#if unit.afterSig && unit.action !== 'removed'}
-													<div class="text-green-400/70">+ {unit.afterSig}</div>
+													<div class="text-green-700/70 dark:text-green-400/70">+ {unit.afterSig}</div>
 												{/if}
 											</div>
 										{/if}
@@ -958,7 +958,7 @@
 					<div class="bg-kai-bg rounded-lg overflow-x-auto">
 						{#each fileDiff.hunks as hunk, hunkIdx}
 							<div class="border-b border-kai-border last:border-b-0">
-								<div class="bg-blue-900/20 text-blue-300 px-4 py-1 text-xs font-mono">
+								<div class="bg-blue-500/10 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 px-4 py-1 text-xs font-mono">
 									@@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
 								</div>
 								<div class="text-sm font-mono">
@@ -967,17 +967,17 @@
 										{@const lineComments = getCommentsForLine(selectedFile, lineNum)}
 										<!-- Line row -->
 										<div
-											class="group flex w-full items-stretch hover:bg-kai-bg-tertiary/50 cursor-pointer {line.type === 'add' ? 'bg-green-900/30' : line.type === 'delete' ? 'bg-red-900/30' : ''}"
+											class="group flex w-full items-stretch hover:bg-kai-bg-tertiary/50 cursor-pointer {line.type === 'add' ? 'bg-green-500/10 dark:bg-green-900/30' : line.type === 'delete' ? 'bg-red-500/10 dark:bg-red-900/30' : ''}"
 											onclick={() => openInlineComment(lineNum, line.type)}
 										>
 											<span class="w-12 flex-shrink-0 text-right pr-2 text-kai-text-muted text-xs py-0.5 select-none border-r border-kai-border">
 												{lineNum || ''}
 											</span>
-											<span class="flex-shrink-0 w-5 text-center py-0.5 {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text-muted'}">
+											<span class="flex-shrink-0 w-5 text-center py-0.5 {line.type === 'add' ? 'text-green-700 dark:text-green-300' : line.type === 'delete' ? 'text-red-700 dark:text-red-300' : 'text-kai-text-muted'}">
 												{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
 											</span>
 											<code class="flex-1 py-0.5 pr-4 hljs whitespace-pre">{@html highlightLine(line.content, selectedFile)}</code>
-											<span class="w-8 flex-shrink-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-blue-400" title="Add comment">
+											<span class="w-8 flex-shrink-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-blue-700 dark:text-blue-400" title="Add comment">
 												+
 											</span>
 										</div>
@@ -993,7 +993,7 @@
 										{/each}
 										<!-- Inline comment form -->
 										{#if inlineCommentLine?.file === selectedFile && inlineCommentLine?.line === lineNum && inlineCommentLine?.type === line.type}
-											<div class="ml-12 mr-4 my-2 p-3 bg-kai-bg-tertiary rounded-lg border border-blue-500">
+											<div class="ml-12 mr-4 my-2 p-3 bg-kai-bg-tertiary rounded-lg border border-blue-600 dark:border-blue-500">
 												<MentionInput
 													bind:value={inlineCommentText}
 													placeholder="Add a comment on this line... (use @ to mention)"
@@ -1019,7 +1019,7 @@
 						{/each}
 					</div>
 				{:else if fileDiff?.error}
-					<div class="text-center py-8 text-red-400">{fileDiff.error}</div>
+					<div class="text-center py-8 text-red-700 dark:text-red-400">{fileDiff.error}</div>
 				{:else}
 					<div class="text-center py-8 text-kai-text-muted">No diff available</div>
 				{/if}
@@ -1035,11 +1035,11 @@
 						<div class="flex items-start gap-3 p-3 rounded-lg bg-kai-bg">
 							<span class="text-lg">
 								{#if suggestion.level === 'error'}
-									<span class="text-red-400">✗</span>
+									<span class="text-red-700 dark:text-red-400">✗</span>
 								{:else if suggestion.level === 'warning'}
-									<span class="text-yellow-400">⚠</span>
+									<span class="text-yellow-700 dark:text-yellow-400">⚠</span>
 								{:else}
-									<span class="text-blue-400">•</span>
+									<span class="text-blue-700 dark:text-blue-400">•</span>
 								{/if}
 							</span>
 							<div class="flex-1">
@@ -1082,7 +1082,7 @@
 									</div>
 								{/if}
 								<button
-									class="mt-2 text-xs text-blue-400 hover:text-blue-300"
+									class="mt-2 text-xs text-blue-700 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
 									onclick={() => startReply(thread.id)}
 								>
 									Reply

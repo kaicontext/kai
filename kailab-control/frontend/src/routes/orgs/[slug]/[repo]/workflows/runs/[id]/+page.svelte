@@ -160,24 +160,24 @@
 		if (status === 'completed') {
 			switch (conclusion) {
 				case 'success':
-					return 'bg-green-500/20 text-green-400 border-green-500/30';
+					return 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400 border-green-600/30 dark:border-green-500/30';
 				case 'failure':
-					return 'bg-red-500/20 text-red-400 border-red-500/30';
+					return 'bg-red-600/10 dark:bg-red-500/20 text-red-700 dark:text-red-400 border-red-600/30 dark:border-red-500/30';
 				case 'cancelled':
-					return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+					return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30 dark:border-gray-500/30';
 				default:
-					return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+					return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30 dark:border-gray-500/30';
 			}
 		}
 		switch (status) {
 			case 'queued':
-				return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
+				return 'bg-yellow-600/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 border-yellow-600/30 dark:border-yellow-500/30';
 			case 'in_progress':
-				return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+				return 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400 border-blue-600/30 dark:border-blue-500/30';
 			case 'pending':
-				return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30 dark:border-gray-500/30';
 			default:
-				return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30 dark:border-gray-500/30';
 		}
 	}
 
@@ -252,7 +252,7 @@
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 	{:else if error}
 		<div class="card text-center py-12">
-			<p class="text-red-400 mb-4">{error}</p>
+			<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 			<button class="btn" onclick={() => loadRun()}>Retry</button>
 		</div>
 	{:else if run}

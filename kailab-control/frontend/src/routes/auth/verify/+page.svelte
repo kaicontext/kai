@@ -42,7 +42,7 @@
 <div class="min-h-screen flex items-center justify-center bg-kai-bg">
   <div class="max-w-md w-full p-8 bg-kai-surface rounded-lg shadow-lg text-center">
     {#if error}
-      <div class="text-red-500 mb-4">
+      <div class="text-red-700 dark:text-red-500 mb-4">
         <svg class="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>

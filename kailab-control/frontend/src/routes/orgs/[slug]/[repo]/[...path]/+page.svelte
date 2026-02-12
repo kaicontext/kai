@@ -894,9 +894,9 @@ kai push origin snap.latest`;
 
 	function getActionClass(action) {
 		switch(action) {
-			case 'added': return 'text-green-400';
-			case 'removed': return 'text-red-400';
-			case 'modified': return 'text-yellow-400';
+			case 'added': return 'text-green-700 dark:text-green-400';
+			case 'removed': return 'text-red-700 dark:text-red-400';
+			case 'modified': return 'text-yellow-700 dark:text-yellow-400';
 			default: return '';
 		}
 	}
@@ -1100,7 +1100,7 @@ kai push origin snap.latest`;
 <div class="max-w-6xl mx-auto px-5 py-8">
 	<!-- Error toast notification -->
 	{#if errorMessage}
-		<div class="fixed top-4 right-4 z-50 bg-red-500/90 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 max-w-md animate-fade-in">
+		<div class="fixed top-4 right-4 z-50 bg-red-600/90 dark:bg-red-500/90 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 max-w-md animate-fade-in">
 			<span class="flex-1">{errorMessage}</span>
 			<button
 				class="text-white/80 hover:text-white"
@@ -1402,7 +1402,7 @@ kai push origin snap.latest</pre>
 													Back to file list
 												</button>
 												<div class="flex items-center gap-2 mb-4">
-													<span class="{selectedDiffFile.status === 'added' ? 'text-green-400' : selectedDiffFile.status === 'removed' ? 'text-red-400' : 'text-yellow-400'} font-mono">
+													<span class="{selectedDiffFile.status === 'added' ? 'text-green-700 dark:text-green-400' : selectedDiffFile.status === 'removed' ? 'text-red-700 dark:text-red-400' : 'text-yellow-700 dark:text-yellow-400'} font-mono">
 														{selectedDiffFile.status === 'added' ? '+' : selectedDiffFile.status === 'removed' ? '-' : '~'}
 													</span>
 													<span class="font-mono text-kai-text">{selectedDiffFile.path}</span>
@@ -1418,17 +1418,17 @@ kai push origin snap.latest</pre>
 															</div>
 															<div class="font-mono text-sm">
 																{#each hunk.lines as line}
-																	<div class="flex {line.type === 'add' ? 'bg-green-900/30' : line.type === 'delete' ? 'bg-red-900/30' : ''}">
+																	<div class="flex {line.type === 'add' ? 'bg-green-500/10 dark:bg-green-900/30' : line.type === 'delete' ? 'bg-red-500/10 dark:bg-red-900/30' : ''}">
 																		<span class="w-12 text-right pr-2 text-kai-text-muted select-none border-r border-kai-border text-xs py-0.5">
 																			{line.oldLine || ''}
 																		</span>
 																		<span class="w-12 text-right pr-2 text-kai-text-muted select-none border-r border-kai-border text-xs py-0.5">
 																			{line.newLine || ''}
 																		</span>
-																		<span class="w-6 text-center select-none {line.type === 'add' ? 'text-green-400' : line.type === 'delete' ? 'text-red-400' : 'text-kai-text-muted'}">
+																		<span class="w-6 text-center select-none {line.type === 'add' ? 'text-green-700 dark:text-green-400' : line.type === 'delete' ? 'text-red-700 dark:text-red-400' : 'text-kai-text-muted'}">
 																			{line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
 																		</span>
-																		<span class="flex-1 px-2 py-0.5 whitespace-pre {line.type === 'add' ? 'text-green-300' : line.type === 'delete' ? 'text-red-300' : 'text-kai-text'}">{line.content}</span>
+																		<span class="flex-1 px-2 py-0.5 whitespace-pre {line.type === 'add' ? 'text-green-700 dark:text-green-300' : line.type === 'delete' ? 'text-red-700 dark:text-red-300' : 'text-kai-text'}">{line.content}</span>
 																	</div>
 																{/each}
 															</div>
@@ -1451,13 +1451,13 @@ kai push origin snap.latest</pre>
 											<div class="text-sm text-kai-text-muted">
 												{totalFiles} file{totalFiles !== 1 ? 's' : ''} changed
 												{#if changesetFiles.added.length > 0}
-													<span class="text-green-400 ml-2">+{changesetFiles.added.length} added</span>
+													<span class="text-green-700 dark:text-green-400 ml-2">+{changesetFiles.added.length} added</span>
 												{/if}
 												{#if changesetFiles.modified.length > 0}
-													<span class="text-yellow-400 ml-2">~{changesetFiles.modified.length} modified</span>
+													<span class="text-yellow-700 dark:text-yellow-400 ml-2">~{changesetFiles.modified.length} modified</span>
 												{/if}
 												{#if changesetFiles.removed.length > 0}
-													<span class="text-red-400 ml-2">-{changesetFiles.removed.length} removed</span>
+													<span class="text-red-700 dark:text-red-400 ml-2">-{changesetFiles.removed.length} removed</span>
 												{/if}
 											</div>
 
@@ -1467,7 +1467,7 @@ kai push origin snap.latest</pre>
 														onclick={() => loadFileDiff(file.path, 'added')}
 														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
 													>
-														<span class="text-green-400 font-mono w-4">+</span>
+														<span class="text-green-700 dark:text-green-400 font-mono w-4">+</span>
 														<span class="text-kai-text font-mono">{file.path}</span>
 													</button>
 												{/each}
@@ -1476,7 +1476,7 @@ kai push origin snap.latest</pre>
 														onclick={() => loadFileDiff(file.path, 'modified')}
 														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
 													>
-														<span class="text-yellow-400 font-mono w-4">~</span>
+														<span class="text-yellow-700 dark:text-yellow-400 font-mono w-4">~</span>
 														<span class="text-kai-text font-mono">{file.path}</span>
 													</button>
 												{/each}
@@ -1485,7 +1485,7 @@ kai push origin snap.latest</pre>
 														onclick={() => loadFileDiff(file.path, 'removed')}
 														class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-kai-bg-tertiary text-left cursor-pointer"
 													>
-														<span class="text-red-400 font-mono w-4">-</span>
+														<span class="text-red-700 dark:text-red-400 font-mono w-4">-</span>
 														<span class="text-kai-text font-mono">{file.path}</span>
 													</button>
 												{/each}
@@ -1511,7 +1511,7 @@ kai push origin snap.latest</pre>
 									<div class="space-y-1">
 										{#each affectedTests as testPath}
 											<div class="flex items-center gap-2 text-sm py-1 px-2 rounded bg-kai-bg-tertiary">
-												<span class="text-purple-400 font-mono w-4">T</span>
+												<span class="text-purple-700 dark:text-purple-400 font-mono w-4">T</span>
 												<span class="text-kai-text font-mono">{testPath}</span>
 											</div>
 										{/each}
@@ -1638,11 +1638,11 @@ kai push origin snap.latest</pre>
 										</td>
 										<td class="px-4 py-3">
 											<span class="px-2 py-0.5 text-xs rounded-full {
-												review.state === 'open' ? 'bg-green-500/20 text-green-400' :
-												review.state === 'approved' ? 'bg-blue-500/20 text-blue-400' :
-												review.state === 'changes_requested' ? 'bg-yellow-500/20 text-yellow-400' :
-												review.state === 'merged' ? 'bg-purple-500/20 text-purple-400' :
-												review.state === 'abandoned' ? 'bg-red-500/20 text-red-400' :
+												review.state === 'open' ? 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400' :
+												review.state === 'approved' ? 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400' :
+												review.state === 'changes_requested' ? 'bg-yellow-600/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400' :
+												review.state === 'merged' ? 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400' :
+												review.state === 'abandoned' ? 'bg-red-600/10 dark:bg-red-500/20 text-red-700 dark:text-red-400' :
 												'bg-kai-bg-tertiary text-kai-text-muted'
 											}">{review.state}</span>
 										</td>
@@ -1799,7 +1799,7 @@ kai push origin snap.latest</pre>
 													src="data:{getMimeType(selectedFile.path)};base64,{fileContentRaw}"
 													alt={selectedFile.path}
 													class="max-w-full max-h-96 object-contain rounded"
-													style="background: repeating-conic-gradient(#333 0% 25%, #444 0% 50%) 50% / 16px 16px;"
+													style="background: repeating-conic-gradient(var(--checker-a) 0% 25%, var(--checker-b) 0% 50%) 50% / 16px 16px;"
 												/>
 												<p class="text-kai-text-muted text-sm mt-4">
 													{selectedFile.path.split('/').pop()}
@@ -1861,7 +1861,7 @@ kai push origin snap.latest</pre>
 											</div>
 										<!-- Markdown rendering -->
 										{:else if isMarkdownFile(selectedFile.path)}
-											<div class="markdown-body bg-kai-bg rounded border border-kai-border p-6 overflow-auto">
+											<div class="markdown-body markdown-body-constrained bg-kai-bg rounded border border-kai-border p-6 overflow-auto">
 												{@html safeMarkdown(fileContent)}
 											</div>
 										<!-- Regular code view -->
@@ -1926,8 +1926,8 @@ kai push origin snap.latest</pre>
 					</div>
 
 					<!-- Danger Zone -->
-					<div class="border border-red-500/30 rounded-md p-4">
-						<h4 class="font-medium mb-3 text-red-400">Danger Zone</h4>
+					<div class="border border-red-600/30 dark:border-red-500/30 rounded-md p-4">
+						<h4 class="font-medium mb-3 text-red-700 dark:text-red-400">Danger Zone</h4>
 						<div class="flex items-center justify-between">
 							<div>
 								<p class="text-sm font-medium">Delete this repository</p>
@@ -1957,94 +1957,7 @@ kai push origin snap.latest</pre>
 		animation: fade-in 0.2s ease-out;
 	}
 
-	/* Syntax highlighting theme - dark mode matching Kai design */
-	:global(.hljs) {
-		color: #e4e4e7; /* zinc-200 */
-		background: transparent;
-	}
-
-	/* Comments */
-	:global(.hljs-comment),
-	:global(.hljs-quote) {
-		color: #71717a; /* zinc-500 */
-		font-style: italic;
-	}
-
-	/* Keywords, tags */
-	:global(.hljs-keyword),
-	:global(.hljs-selector-tag),
-	:global(.hljs-tag) {
-		color: #f472b6; /* pink-400 */
-	}
-
-	/* Strings */
-	:global(.hljs-string),
-	:global(.hljs-template-variable),
-	:global(.hljs-addition) {
-		color: #4ade80; /* green-400 */
-	}
-
-	/* Numbers, built-in */
-	:global(.hljs-number),
-	:global(.hljs-literal),
-	:global(.hljs-built_in) {
-		color: #fb923c; /* orange-400 */
-	}
-
-	/* Functions, methods */
-	:global(.hljs-title),
-	:global(.hljs-title.function_),
-	:global(.hljs-section) {
-		color: #60a5fa; /* blue-400 */
-	}
-
-	/* Variables, attributes */
-	:global(.hljs-variable),
-	:global(.hljs-attr),
-	:global(.hljs-attribute) {
-		color: #c084fc; /* purple-400 */
-	}
-
-	/* Types, classes */
-	:global(.hljs-type),
-	:global(.hljs-class .hljs-title),
-	:global(.hljs-title.class_) {
-		color: #fbbf24; /* amber-400 */
-	}
-
-	/* Symbols, bullets */
-	:global(.hljs-symbol),
-	:global(.hljs-bullet),
-	:global(.hljs-link) {
-		color: #2dd4bf; /* teal-400 */
-	}
-
-	/* Meta, preprocessor */
-	:global(.hljs-meta),
-	:global(.hljs-selector-id),
-	:global(.hljs-selector-class) {
-		color: #818cf8; /* indigo-400 */
-	}
-
-	/* Deletion */
-	:global(.hljs-deletion) {
-		color: #f87171; /* red-400 */
-	}
-
-	/* Emphasis */
-	:global(.hljs-emphasis) {
-		font-style: italic;
-	}
-
-	:global(.hljs-strong) {
-		font-weight: bold;
-	}
-
 	/* Code viewer specific styles */
-	.code-viewer {
-		/* Let parent container handle scrolling */
-	}
-
 	.code-table {
 		border-collapse: collapse;
 		border-spacing: 0;
@@ -2055,20 +1968,20 @@ kai push origin snap.latest</pre>
 	}
 
 	.code-line:hover {
-		background: rgba(255, 255, 255, 0.03);
+		background: var(--code-hover-bg);
 	}
 
 	.code-line.line-selected {
-		background: rgba(250, 204, 21, 0.15); /* yellow highlight */
+		background: var(--code-selected-bg);
 	}
 
 	.code-line.line-selected .line-number {
-		color: #fbbf24; /* amber-400 */
+		color: var(--code-selected-line-num);
 		font-weight: 600;
 	}
 
 	.line-number {
-		background: rgba(0, 0, 0, 0.2);
+		background: var(--code-line-num-bg);
 		min-width: 3rem;
 		font-size: 0.75rem;
 		font-family: ui-monospace, monospace;
@@ -2093,144 +2006,9 @@ kai push origin snap.latest</pre>
 		padding: 0;
 	}
 
-	/* GitHub-style markdown rendering for dark mode */
-	.markdown-body {
-		color: #e4e4e7;
-		line-height: 1.6;
+	/* Constrain README height in file browser */
+	.markdown-body-constrained {
 		max-height: 500px;
-	}
-
-	.markdown-body :global(h1),
-	.markdown-body :global(h2),
-	.markdown-body :global(h3),
-	.markdown-body :global(h4),
-	.markdown-body :global(h5),
-	.markdown-body :global(h6) {
-		margin-top: 1.5em;
-		margin-bottom: 0.5em;
-		font-weight: 600;
-		line-height: 1.25;
-		color: #fafafa;
-	}
-
-	.markdown-body :global(h1) {
-		font-size: 2em;
-		padding-bottom: 0.3em;
-		border-bottom: 1px solid #3f3f46;
-	}
-
-	.markdown-body :global(h2) {
-		font-size: 1.5em;
-		padding-bottom: 0.3em;
-		border-bottom: 1px solid #3f3f46;
-	}
-
-	.markdown-body :global(h3) { font-size: 1.25em; }
-	.markdown-body :global(h4) { font-size: 1em; }
-	.markdown-body :global(h5) { font-size: 0.875em; }
-	.markdown-body :global(h6) { font-size: 0.85em; color: #a1a1aa; }
-
-	.markdown-body :global(p) {
-		margin-top: 0;
-		margin-bottom: 1em;
-	}
-
-	.markdown-body :global(a) {
-		color: #60a5fa;
-		text-decoration: none;
-	}
-
-	.markdown-body :global(a:hover) {
-		text-decoration: underline;
-	}
-
-	.markdown-body :global(code) {
-		background: #27272a;
-		padding: 0.2em 0.4em;
-		border-radius: 4px;
-		font-size: 0.875em;
-		font-family: ui-monospace, monospace;
-	}
-
-	.markdown-body :global(pre) {
-		background: #18181b;
-		padding: 1em;
-		border-radius: 6px;
-		overflow-x: auto;
-		margin: 1em 0;
-	}
-
-	.markdown-body :global(pre code) {
-		background: transparent;
-		padding: 0;
-		font-size: 0.875em;
-	}
-
-	.markdown-body :global(blockquote) {
-		margin: 1em 0;
-		padding: 0 1em;
-		color: #a1a1aa;
-		border-left: 4px solid #3f3f46;
-	}
-
-	.markdown-body :global(ul),
-	.markdown-body :global(ol) {
-		margin: 1em 0;
-		padding-left: 2em;
-	}
-
-	.markdown-body :global(li) {
-		margin: 0.25em 0;
-	}
-
-	.markdown-body :global(li + li) {
-		margin-top: 0.25em;
-	}
-
-	.markdown-body :global(hr) {
-		border: none;
-		border-top: 1px solid #3f3f46;
-		margin: 1.5em 0;
-	}
-
-	.markdown-body :global(table) {
-		border-collapse: collapse;
-		width: 100%;
-		margin: 1em 0;
-	}
-
-	.markdown-body :global(th),
-	.markdown-body :global(td) {
-		border: 1px solid #3f3f46;
-		padding: 0.5em 1em;
-		text-align: left;
-	}
-
-	.markdown-body :global(th) {
-		background: #27272a;
-		font-weight: 600;
-	}
-
-	.markdown-body :global(img) {
-		max-width: 100%;
-		height: auto;
-		border-radius: 6px;
-	}
-
-	.markdown-body :global(strong) {
-		font-weight: 600;
-		color: #fafafa;
-	}
-
-	.markdown-body :global(em) {
-		font-style: italic;
-	}
-
-	.markdown-body > :global(*:first-child) {
-		margin-top: 0;
-	}
-
-	.markdown-body > :global(*:last-child) {
-		margin-bottom: 0;
+		overflow-y: auto;
 	}
 </style>

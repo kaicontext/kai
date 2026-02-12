@@ -184,7 +184,7 @@
 				<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 			{:else if error}
 				<div class="card text-center py-12">
-					<p class="text-red-400 mb-4">{error}</p>
+					<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 					<button class="btn" onclick={loadRepo}>Retry</button>
 				</div>
 			{:else}
@@ -213,10 +213,10 @@
 							</button>
 						</div>
 						{#if renameError}
-							<p class="text-red-400 text-sm mt-2">{renameError}</p>
+							<p class="text-red-700 dark:text-red-400 text-sm mt-2">{renameError}</p>
 						{/if}
 						{#if renameSuccess}
-							<p class="text-green-400 text-sm mt-2">{renameSuccess}</p>
+							<p class="text-green-700 dark:text-green-400 text-sm mt-2">{renameSuccess}</p>
 						{/if}
 					</div>
 
@@ -275,16 +275,16 @@
 							{savingVisibility ? 'Saving...' : 'Update visibility'}
 						</button>
 						{#if visibilityError}
-							<p class="text-red-400 text-sm mt-2">{visibilityError}</p>
+							<p class="text-red-700 dark:text-red-400 text-sm mt-2">{visibilityError}</p>
 						{/if}
 						{#if visibilitySuccess}
-							<p class="text-green-400 text-sm mt-2">{visibilitySuccess}</p>
+							<p class="text-green-700 dark:text-green-400 text-sm mt-2">{visibilitySuccess}</p>
 						{/if}
 					</div>
 
 					<!-- Danger Zone -->
-					<div class="border border-red-500/30 rounded-xl p-5">
-						<h3 class="text-base font-semibold text-red-400 mb-4">Danger Zone</h3>
+					<div class="border border-red-600/30 dark:border-red-500/30 rounded-xl p-5">
+						<h3 class="text-base font-semibold text-red-700 dark:text-red-400 mb-4">Danger Zone</h3>
 						<div class="flex items-center justify-between">
 							<div>
 								<p class="text-sm font-medium">Delete this repository</p>

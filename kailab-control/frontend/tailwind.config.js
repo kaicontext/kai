@@ -1,25 +1,24 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+	darkMode: ['selector', '[data-theme="dark"]'],
 	content: ['./src/**/*.{html,js,svelte,ts}'],
 	theme: {
 		extend: {
 			colors: {
-				// GitHub dark theme colors
-				'kai-bg': '#0d1117',
-				'kai-bg-secondary': '#161b22',
-				'kai-bg-tertiary': '#21262d',
-				'kai-border': '#30363d',
-				'kai-border-muted': '#21262d',
-				'kai-text': '#e6edf3',
-				'kai-text-muted': '#8b949e',
-				'kai-accent': '#58a6ff',
-				'kai-accent-hover': '#79c0ff',
-				// GitHub's muted green (not neon)
-				'kai-success': '#238636',
-				'kai-success-emphasis': '#2ea043',
-				'kai-error': '#f85149',
-				'kai-warning': '#d29922',
-				'kai-purple': '#a371f7'
+				'kai-bg': 'rgb(var(--kai-bg) / <alpha-value>)',
+				'kai-bg-secondary': 'rgb(var(--kai-bg-secondary) / <alpha-value>)',
+				'kai-bg-tertiary': 'rgb(var(--kai-bg-tertiary) / <alpha-value>)',
+				'kai-border': 'rgb(var(--kai-border) / <alpha-value>)',
+				'kai-border-muted': 'rgb(var(--kai-border-muted) / <alpha-value>)',
+				'kai-text': 'rgb(var(--kai-text) / <alpha-value>)',
+				'kai-text-muted': 'rgb(var(--kai-text-muted) / <alpha-value>)',
+				'kai-accent': 'rgb(var(--kai-accent) / <alpha-value>)',
+				'kai-accent-hover': 'rgb(var(--kai-accent-hover) / <alpha-value>)',
+				'kai-success': 'rgb(var(--kai-success) / <alpha-value>)',
+				'kai-success-emphasis': 'rgb(var(--kai-success-emphasis) / <alpha-value>)',
+				'kai-error': 'rgb(var(--kai-error) / <alpha-value>)',
+				'kai-warning': 'rgb(var(--kai-warning) / <alpha-value>)',
+				'kai-purple': 'rgb(var(--kai-purple) / <alpha-value>)'
 			}
 		}
 	},

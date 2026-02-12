@@ -131,11 +131,11 @@
 	function getKindColor(kind) {
 		switch (kind) {
 			case 'REF_UPDATE':
-				return 'bg-blue-500/20 text-blue-400';
+				return 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400';
 			case 'NODE_PUBLISH':
-				return 'bg-green-500/20 text-green-400';
+				return 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400';
 			default:
-				return 'bg-gray-500/20 text-gray-400';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
 		}
 	}
 
@@ -162,15 +162,15 @@
 		const type = getRefType(refName);
 		switch (type) {
 			case 'snapshot':
-				return 'bg-purple-500/20 text-purple-400';
+				return 'bg-purple-600/10 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400';
 			case 'changeset':
-				return 'bg-green-500/20 text-green-400';
+				return 'bg-green-600/10 dark:bg-green-500/20 text-green-700 dark:text-green-400';
 			case 'review':
-				return 'bg-yellow-500/20 text-yellow-400';
+				return 'bg-yellow-600/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400';
 			case 'workspace':
-				return 'bg-blue-500/20 text-blue-400';
+				return 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400';
 			default:
-				return 'bg-gray-500/20 text-gray-400';
+				return 'bg-gray-500/10 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400';
 		}
 	}
 
@@ -275,7 +275,7 @@
 		<div class="text-center py-12 text-kai-text-muted">Loading...</div>
 	{:else if error}
 		<div class="card text-center py-12">
-			<p class="text-red-400 mb-4">{error}</p>
+			<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
 			<button class="btn" onclick={loadEntries}>Retry</button>
 		</div>
 	{:else if entries.length === 0}
@@ -323,7 +323,7 @@
 						{#if entry.old || entry.new}
 							<div class="text-xs mt-2 font-mono flex items-center gap-2">
 								{#if entry.old}
-									<span class="text-red-400/70" title={hexEncode(entry.old)}>
+									<span class="text-red-700/70 dark:text-red-400/70" title={hexEncode(entry.old)}>
 										{shortId(entry.old)}
 									</span>
 								{/if}
@@ -331,7 +331,7 @@
 									<span class="text-kai-text-muted">→</span>
 								{/if}
 								{#if entry.new}
-									<span class="text-green-400/70" title={hexEncode(entry.new)}>
+									<span class="text-green-700/70 dark:text-green-400/70" title={hexEncode(entry.new)}>
 										{shortId(entry.new)}
 									</span>
 								{/if}

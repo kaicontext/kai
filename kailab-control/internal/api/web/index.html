@@ -11,30 +11,42 @@
 
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Kailab</title>
+		<script>
+			(function() {
+				var saved = localStorage.getItem('theme');
+				var theme;
+				if (saved === 'light' || saved === 'dark') {
+					theme = saved;
+				} else {
+					theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+				}
+				document.documentElement.setAttribute('data-theme', theme);
+			})();
+		</script>
 		
-		<link rel="modulepreload" href="/_app/immutable/entry/start.BF90S9kv.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/D7RbcKNK.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/CeM1pKV5.js">
-		<link rel="modulepreload" href="/_app/immutable/entry/app.CjF8pqTp.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/5NQbLipZ.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/D3FKp5w0.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/kocRKCgj.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/CYeHtZZ9.js">
-		<link rel="modulepreload" href="/_app/immutable/chunks/BCjWzYmP.js">
+		<link rel="modulepreload" href="/_app/immutable/entry/start.fszgf8XX.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/BfddkLKj.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/n_haO78C.js">
+		<link rel="modulepreload" href="/_app/immutable/entry/app.Kjn6rJAI.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/VUefJQ60.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/DRBHjK6f.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/Bkd5hZ4E.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/C2XK8Bn1.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/LnsYLQFB.js">
 	</head>
 	<body class="bg-kai-bg text-kai-text" data-sveltekit-preload-data="hover">
 		<div style="display: contents">
 			<script>
 				{
-					__sveltekit_2sv1lg = {
+					__sveltekit_hv3t1w = {
 						base: ""
 					};
 
 					const element = document.currentScript.parentElement;
 
 					Promise.all([
-						import("/_app/immutable/entry/start.BF90S9kv.js"),
-						import("/_app/immutable/entry/app.CjF8pqTp.js")
+						import("/_app/immutable/entry/start.fszgf8XX.js"),
+						import("/_app/immutable/entry/app.Kjn6rJAI.js")
 					]).then(([kit, app]) => {
 						kit.start(app, element);
 					});
