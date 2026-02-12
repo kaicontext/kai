@@ -318,10 +318,8 @@ func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
 }
 
 // MarshalJSON implements json.Marshaler.
+// Always marshals as an array for consistent deserialization.
 func (s StringOrSlice) MarshalJSON() ([]byte, error) {
-	if len(s) == 1 {
-		return json.Marshal(s[0])
-	}
 	return json.Marshal([]string(s))
 }
 

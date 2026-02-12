@@ -651,6 +651,23 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// StringOrSlice handles JSON fields that can be either a string or string array.
+type StringOrSlice []string
+
+func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*s = []string{single}
+		return nil
+	}
+	var multi []string
+	if err := json.Unmarshal(data, &multi); err != nil {
+		return err
+	}
+	*s = multi
+	return nil
+}
+
 // Helper types for parsing workflow JSON
 
 type ParsedWorkflow struct {
@@ -661,7 +678,7 @@ type ParsedWorkflow struct {
 
 type JobDefinition struct {
 	Name           string                     `json:"name"`
-	RunsOn         []string                   `json:"runs_on"`
+	RunsOn         StringOrSlice              `json:"runs_on"`
 	Container      *ContainerDef              `json:"container,omitempty"`
 	Services       map[string]ServiceDef      `json:"services,omitempty"`
 	Steps          []StepDefinition           `json:"steps"`
