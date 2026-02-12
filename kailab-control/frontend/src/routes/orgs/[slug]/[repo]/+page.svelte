@@ -56,15 +56,21 @@
 		try {
 			// Load org and repo info
 			const orgData = await api('GET', `/api/v1/orgs/${slug}`);
-			if (orgData && !orgData.error) {
-				currentOrg.set(orgData);
+			if (!orgData || orgData.error) {
+				error = 'Organization not found';
+				loading = false;
+				return;
 			}
+			currentOrg.set(orgData);
 
 			const repoData = await api('GET', `/api/v1/orgs/${slug}/repos/${repo}`);
-			if (repoData && !repoData.error) {
-				repoInfo = repoData;
-				currentRepo.set(repoData);
+			if (!repoData || repoData.error) {
+				error = 'Repository not found';
+				loading = false;
+				return;
 			}
+			repoInfo = repoData;
+			currentRepo.set(repoData);
 
 			// Get latest snapshot ref
 			const refsData = await api('GET', `/${slug}/${repo}/v1/refs?prefix=snap.`);
