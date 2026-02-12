@@ -1444,6 +1444,18 @@ func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.Workflow
 		return err
 	}
 
+	// Build a map of job key → list of expanded display names.
+	// The "needs" field in YAML uses job keys (e.g., "build"), but the jobs
+	// table stores display names (e.g., "Build (x86_64-unknown-linux-gnu)").
+	// We must convert needs to display names so the ClaimJob dependency
+	// check can match against the name column.
+	keyToNames := make(map[string][]string)
+	for _, jobKey := range jobOrder {
+		for _, ej := range expandedJobs[jobKey] {
+			keyToNames[jobKey] = append(keyToNames[jobKey], ej.Name)
+		}
+	}
+
 	// Create jobs in order
 	for _, jobKey := range jobOrder {
 		jobs := expandedJobs[jobKey]
@@ -1455,7 +1467,15 @@ func (h *Handler) createJobsFromWorkflow(wf *model.Workflow, run *model.Workflow
 				matrixJSON = string(b)
 			}
 
-			job, err := h.db.CreateJob(run.ID, ej.Name, []string(ej.Job.Needs), matrixJSON, []string(ej.Job.RunsOn))
+			// Expand needs from job keys to display names
+			var expandedNeeds []string
+			for _, need := range ej.Job.Needs {
+				if names, ok := keyToNames[need]; ok {
+					expandedNeeds = append(expandedNeeds, names...)
+				}
+			}
+
+			job, err := h.db.CreateJob(run.ID, ej.Name, expandedNeeds, matrixJSON, []string(ej.Job.RunsOn))
 			if err != nil {
 				return err
 			}

@@ -508,11 +508,18 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 			WHERE j.status = $1
 			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = ''
 				OR jsonb_typeof(j.needs::jsonb) != 'array'
-				OR NOT EXISTS (
-					SELECT 1 FROM jobs dep
-					WHERE dep.workflow_run_id = j.workflow_run_id
-					AND dep.name IN (SELECT jsonb_array_elements_text(j.needs::jsonb))
-					AND dep.status != $2
+				OR (
+					-- All needed jobs must exist and be completed with success
+					NOT EXISTS (
+						SELECT 1 FROM jsonb_array_elements_text(j.needs::jsonb) AS needed_name
+						WHERE NOT EXISTS (
+							SELECT 1 FROM jobs dep
+							WHERE dep.workflow_run_id = j.workflow_run_id
+							AND dep.name = needed_name
+							AND dep.status = $2
+							AND dep.conclusion = $4
+						)
+					)
 				))
 			AND (j.runs_on IS NULL OR j.runs_on = '[]' OR j.runs_on = ''
 				OR NOT EXISTS (
@@ -526,11 +533,18 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 		query = `
 			SELECT j.id FROM jobs j
 			WHERE j.status = ?
-			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = '' OR NOT EXISTS (
-				SELECT 1 FROM jobs dep
-				WHERE dep.workflow_run_id = j.workflow_run_id
-				AND dep.name IN (SELECT value FROM json_each(j.needs))
-				AND dep.status != ?
+			AND (j.needs IS NULL OR j.needs = '[]' OR j.needs = '' OR (
+				-- All needed jobs must exist and be completed with success
+				NOT EXISTS (
+					SELECT 1 FROM json_each(j.needs) AS needed
+					WHERE NOT EXISTS (
+						SELECT 1 FROM jobs dep
+						WHERE dep.workflow_run_id = j.workflow_run_id
+						AND dep.name = needed.value
+						AND dep.status = ?
+						AND dep.conclusion = ?
+					)
+				)
 			))
 			AND (j.runs_on IS NULL OR j.runs_on = '[]' OR j.runs_on = '' OR NOT EXISTS (
 				SELECT 1 FROM json_each(j.runs_on) AS required
@@ -540,7 +554,7 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 			LIMIT 1
 		`
 	}
-	row := db.queryRow(query, model.JobStatusQueued, model.JobStatusCompleted, string(labelsJSON))
+	row := db.queryRow(query, model.JobStatusQueued, model.JobStatusCompleted, string(labelsJSON), model.ConclusionSuccess)
 
 	var jobID string
 	if err := row.Scan(&jobID); err == sql.ErrNoRows {
