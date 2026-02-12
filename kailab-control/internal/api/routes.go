@@ -193,6 +193,13 @@ func NewRouter(h *Handler) http.Handler {
 		h.RequireMembership("maintainer"),
 		h.WithRepo,
 	))
+	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/workflows/discover", Chain(
+		http.HandlerFunc(h.DiscoverWorkflows),
+		h.WithAuth,
+		h.WithOrg,
+		h.RequireMembership("reporter"),
+		h.WithRepo,
+	))
 	mux.Handle("POST /api/v1/orgs/{org}/repos/{repo}/workflows/{workflow_id}/dispatch", Chain(
 		http.HandlerFunc(h.DispatchWorkflow),
 		h.WithAuth,

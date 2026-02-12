@@ -5,6 +5,7 @@
 	import { api, loadUser } from '$lib/api.js';
 
 	let runs = $state([]);
+	let workflows = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let pollInterval = $state(null);
@@ -21,7 +22,7 @@
 			goto('/login');
 			return;
 		}
-		await loadRuns();
+		await loadData();
 
 		// Poll for updates when there are in-progress runs
 		startPolling();
@@ -40,6 +41,33 @@
 				await loadRuns(true);
 			}
 		}, 5000);
+	}
+
+	async function loadData() {
+		loading = true;
+		error = '';
+		const { slug, repo } = $page.params;
+
+		try {
+			// Fetch runs and workflows in parallel
+			const [runsData, workflowsData] = await Promise.all([
+				api('GET', `/api/v1/orgs/${slug}/repos/${repo}/runs?limit=50`),
+				api('GET', `/api/v1/orgs/${slug}/repos/${repo}/workflows`)
+			]);
+
+			runs = runsData?.runs || [];
+			workflows = workflowsData?.workflows || [];
+
+			// If no workflows found in DB, try discovering from data plane
+			if (workflows.length === 0 && runs.length === 0) {
+				const discovered = await api('POST', `/api/v1/orgs/${slug}/repos/${repo}/workflows/discover`);
+				workflows = discovered?.workflows || [];
+			}
+		} catch (e) {
+			error = 'Failed to load workflow data';
+		}
+
+		loading = false;
 	}
 
 	async function loadRuns(silent = false) {
@@ -158,6 +186,10 @@
 		const { slug, repo } = $page.params;
 		goto(`/orgs/${slug}/${repo}/workflows/runs/${run.id}`);
 	}
+
+	function getWorkflowFileName(path) {
+		return path.split('/').pop() || path;
+	}
 </script>
 
 <div class="max-w-6xl mx-auto px-5 py-8">
@@ -184,58 +216,92 @@
 	{:else if error}
 		<div class="card text-center py-12">
 			<p class="text-red-700 dark:text-red-400 mb-4">{error}</p>
-			<button class="btn" onclick={() => loadRuns()}>Retry</button>
+			<button class="btn" onclick={() => loadData()}>Retry</button>
 		</div>
-	{:else if runs.length === 0}
+	{:else if runs.length === 0 && workflows.length === 0}
 		<div class="card text-center py-12">
-			<div class="text-5xl mb-4">🚀</div>
 			<p class="text-kai-text-muted mb-4">No workflow runs yet</p>
 			<p class="text-kai-text-muted text-sm">
 				Create workflows in <code class="bg-kai-bg-tertiary px-2 py-1 rounded">.kailab/workflows/</code> to get started
 			</p>
 		</div>
 	{:else}
-		<div class="card p-0">
-			{#each runs as run}
-				<button
-					class="list-item w-full text-left hover:bg-kai-bg-tertiary transition-colors cursor-pointer"
-					onclick={() => viewRun(run)}
-				>
-					<div class="flex items-center gap-3 min-w-0 flex-1">
-						<span class="w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold {getStatusColor(run.status, run.conclusion)}">
-							{getStatusIcon(run.status, run.conclusion)}
-						</span>
-						<div class="flex-1 min-w-0">
-							<div class="flex items-center gap-2">
-								<span class="font-medium truncate">{run.workflow_name || 'Workflow'}</span>
-								<span class="text-kai-text-muted text-xs">#{run.run_number}</span>
-							</div>
-							<div class="text-kai-text-muted text-xs mt-1 flex items-center gap-3">
-								<span class="px-1.5 py-0.5 rounded bg-kai-bg-tertiary">{run.trigger_event}</span>
-								{#if run.trigger_ref}
-									<span class="truncate">{getRefDisplay(run.trigger_ref)}</span>
-								{/if}
-								{#if run.trigger_sha}
-									<span class="font-mono">{run.trigger_sha.slice(0, 7)}</span>
-								{/if}
+		{#if workflows.length > 0 && runs.length === 0}
+			<div class="card mb-6">
+				<div class="px-4 py-3 border-b border-kai-border">
+					<h3 class="font-medium text-sm">Workflows</h3>
+				</div>
+				{#each workflows as wf}
+					<div class="list-item">
+						<div class="flex items-center gap-3 min-w-0 flex-1">
+							<svg class="w-4 h-4 text-kai-text-muted flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+							</svg>
+							<div class="min-w-0">
+								<div class="font-medium">{wf.name}</div>
+								<div class="text-kai-text-muted text-xs mt-0.5">
+									<span class="font-mono">{getWorkflowFileName(wf.path)}</span>
+									{#if wf.triggers?.length}
+										<span class="mx-1.5">·</span>
+										{#each wf.triggers as trigger, i}
+											<span class="px-1.5 py-0.5 rounded bg-kai-bg-tertiary">{trigger}</span>
+											{#if i < wf.triggers.length - 1}<span class="mx-0.5"></span>{/if}
+										{/each}
+									{/if}
+								</div>
 							</div>
 						</div>
 					</div>
-					<div class="text-right text-sm">
-						<div class="px-2 py-0.5 rounded text-xs font-medium {getStatusColor(run.status, run.conclusion)}">
-							{formatStatus(run.status, run.conclusion)}
+				{/each}
+				<div class="px-4 py-3 text-kai-text-muted text-sm border-t border-kai-border">
+					No runs yet. Push to the repository to trigger workflows.
+				</div>
+			</div>
+		{/if}
+
+		{#if runs.length > 0}
+			<div class="card p-0">
+				{#each runs as run}
+					<button
+						class="list-item w-full text-left hover:bg-kai-bg-tertiary transition-colors cursor-pointer"
+						onclick={() => viewRun(run)}
+					>
+						<div class="flex items-center gap-3 min-w-0 flex-1">
+							<span class="w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold {getStatusColor(run.status, run.conclusion)}">
+								{getStatusIcon(run.status, run.conclusion)}
+							</span>
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="font-medium truncate">{run.workflow_name || 'Workflow'}</span>
+									<span class="text-kai-text-muted text-xs">#{run.run_number}</span>
+								</div>
+								<div class="text-kai-text-muted text-xs mt-1 flex items-center gap-3">
+									<span class="px-1.5 py-0.5 rounded bg-kai-bg-tertiary">{run.trigger_event}</span>
+									{#if run.trigger_ref}
+										<span class="truncate">{getRefDisplay(run.trigger_ref)}</span>
+									{/if}
+									{#if run.trigger_sha}
+										<span class="font-mono">{run.trigger_sha.slice(0, 7)}</span>
+									{/if}
+								</div>
+							</div>
 						</div>
-						<div class="text-kai-text-muted text-xs mt-1">
-							{#if run.started_at}
-								{formatDuration(run.started_at, run.completed_at)}
-							{/if}
-							{#if run.created_at}
-								<span class="ml-2">{formatDate(run.created_at)}</span>
-							{/if}
+						<div class="text-right text-sm">
+							<div class="px-2 py-0.5 rounded text-xs font-medium {getStatusColor(run.status, run.conclusion)}">
+								{formatStatus(run.status, run.conclusion)}
+							</div>
+							<div class="text-kai-text-muted text-xs mt-1">
+								{#if run.started_at}
+									{formatDuration(run.started_at, run.completed_at)}
+								{/if}
+								{#if run.created_at}
+									<span class="ml-2">{formatDate(run.created_at)}</span>
+								{/if}
+							</div>
 						</div>
-					</div>
-				</button>
-			{/each}
-		</div>
+					</button>
+				{/each}
+			</div>
+		{/if}
 	{/if}
 </div>

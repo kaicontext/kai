@@ -156,6 +156,28 @@ func (h *Handler) SyncWorkflows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// DiscoverWorkflows syncs workflows from the data plane snapshot.
+func (h *Handler) DiscoverWorkflows(w http.ResponseWriter, r *http.Request) {
+	repo := RepoFromContext(r.Context())
+	org := OrgFromContext(r.Context())
+
+	if err := h.syncWorkflowsFromDataPlane(repo.ID, org.Slug, repo.Name, "refs/heads/main"); err != nil {
+		log.Printf("Workflow discovery failed for %s/%s: %v", org.Slug, repo.Name, err)
+	}
+
+	workflows, err := h.db.ListRepoWorkflows(repo.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workflows", err)
+		return
+	}
+
+	resp := ListWorkflowsResponse{Workflows: make([]WorkflowResponse, len(workflows))}
+	for i, wf := range workflows {
+		resp.Workflows[i] = workflowToResponse(wf)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // ----- Workflow Runs -----
 
 type WorkflowRunResponse struct {
