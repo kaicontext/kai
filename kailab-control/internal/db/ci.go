@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"kailab-control/internal/model"
@@ -481,7 +482,24 @@ func (db *DB) ClaimJob(runnerID string, labels []string) (*model.Job, error) {
 	// Find the first queued job that:
 	// 1. Has all dependencies completed successfully
 	// 2. Matches the runner's labels (all job runs_on labels must be in runner labels)
-	labelsJSON, _ := json.Marshal(labels)
+	//
+	// Normalize GitHub Actions runner labels: ubuntu-latest, ubuntu-22.04, etc.
+	// all map to linux; macos-latest maps to macos; windows-latest maps to windows.
+	expanded := make([]string, len(labels))
+	copy(expanded, labels)
+	for _, l := range labels {
+		switch {
+		case strings.HasPrefix(l, "linux"):
+			expanded = append(expanded, "ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04")
+		case strings.HasPrefix(l, "ubuntu"):
+			expanded = append(expanded, "linux")
+		case strings.HasPrefix(l, "macos"):
+			expanded = append(expanded, "macos-latest", "macos-14", "macos-15")
+		case strings.HasPrefix(l, "windows"):
+			expanded = append(expanded, "windows-latest", "windows-2022")
+		}
+	}
+	labelsJSON, _ := json.Marshal(expanded)
 
 	var query string
 	if db.driver == DriverPostgres {

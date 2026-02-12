@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // MatrixInstance represents a single combination of matrix values.
@@ -231,15 +232,40 @@ func ExpandJobsWithMatrix(wf *Workflow) (map[string][]ExpandedJob, error) {
 		expanded := make([]ExpandedJob, len(instances))
 		for i, instance := range instances {
 			name := job.GetJobDisplayName(key)
+			// Resolve ${{ matrix.* }} expressions in the job name
 			if len(instance.Values) > 0 {
+				for mk, mv := range instance.Values {
+					placeholder := fmt.Sprintf("${{ matrix.%s }}", mk)
+					name = strings.ReplaceAll(name, placeholder, fmt.Sprintf("%v", mv))
+				}
+			}
+			// If name still contains unresolved expressions, append matrix suffix
+			if len(instance.Values) > 0 && !strings.Contains(name, "${{") {
+				// Name was fully resolved from expressions, no suffix needed
+			} else if len(instance.Values) > 0 {
 				suffix := GetMatrixDisplayName(instance.Values)
 				name = fmt.Sprintf("%s (%s)", name, suffix)
+			}
+
+			// Resolve ${{ matrix.* }} in runs-on labels
+			resolvedJob := job
+			if len(instance.Values) > 0 {
+				resolvedRunsOn := make(StringOrSlice, len(job.RunsOn))
+				for ri, label := range job.RunsOn {
+					resolved := label
+					for mk, mv := range instance.Values {
+						placeholder := fmt.Sprintf("${{ matrix.%s }}", mk)
+						resolved = strings.ReplaceAll(resolved, placeholder, fmt.Sprintf("%v", mv))
+					}
+					resolvedRunsOn[ri] = resolved
+				}
+				resolvedJob.RunsOn = resolvedRunsOn
 			}
 
 			expanded[i] = ExpandedJob{
 				Key:          key,
 				Name:         name,
-				Job:          job,
+				Job:          resolvedJob,
 				MatrixValues: instance.Values,
 				MatrixIndex:  instance.Index,
 			}
