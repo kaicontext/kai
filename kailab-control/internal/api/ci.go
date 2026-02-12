@@ -954,8 +954,8 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 		contentHash := hex.EncodeToString(hash[:])
 
 		// Check if workflow exists and has changed
-		existing, err := h.db.GetWorkflowByRepoAndPath(repoID, path)
-		if err == nil && existing.ContentHash == contentHash {
+		existing, dbErr := h.db.GetWorkflowByRepoAndPath(repoID, path)
+		if dbErr == nil && existing.ContentHash == contentHash {
 			continue // No change
 		}
 
@@ -974,7 +974,7 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 
 		triggers := parsed.GetTriggerTypes()
 
-		if err == db.ErrNotFound {
+		if dbErr == db.ErrNotFound {
 			// Create new workflow
 			_, err = h.db.CreateWorkflow(repoID, path, parsed.Name, contentHash, parsedJSON, triggers)
 			if err != nil {
@@ -982,7 +982,7 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 			} else {
 				log.Printf("Created workflow %s for %s/%s", path, orgSlug, repoName)
 			}
-		} else if err == nil {
+		} else if dbErr == nil {
 			// Update existing workflow
 			err = h.db.UpdateWorkflow(existing.ID, parsed.Name, contentHash, parsedJSON, triggers, true)
 			if err != nil {
