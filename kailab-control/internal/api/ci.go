@@ -2,10 +2,10 @@ package api
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -933,10 +933,19 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 			continue
 		}
 
-		content, err := io.ReadAll(contentResp.Body)
+		var contentObj struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(contentResp.Body).Decode(&contentObj); err != nil {
+			contentResp.Body.Close()
+			log.Printf("Failed to decode content response for %s: %v", path, err)
+			continue
+		}
 		contentResp.Body.Close()
+
+		content, err := base64.StdEncoding.DecodeString(contentObj.Content)
 		if err != nil {
-			log.Printf("Failed to read workflow content for %s: %v", path, err)
+			log.Printf("Failed to base64 decode workflow content for %s: %v", path, err)
 			continue
 		}
 
