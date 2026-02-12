@@ -156,20 +156,22 @@ func (gs *GitSource) loadFiles() error {
 
 	var files []*filesource.FileInfo
 	err = tree.Files().ForEach(func(f *object.File) error {
-		// Only process TS/JS files
 		lang := detectLang(f.Name)
-		if lang == "" {
-			return nil
-		}
 
-		content, err := f.Contents()
+		reader, err := f.Reader()
+		if err != nil {
+			return fmt.Errorf("opening file %s: %w", f.Name, err)
+		}
+		defer reader.Close()
+
+		content, err := io.ReadAll(reader)
 		if err != nil {
 			return fmt.Errorf("reading file %s: %w", f.Name, err)
 		}
 
 		files = append(files, &filesource.FileInfo{
 			Path:    f.Name,
-			Content: []byte(content),
+			Content: content,
 			Lang:    lang,
 		})
 		return nil
@@ -228,26 +230,67 @@ func (r *Repository) DiffFiles(baseCommit, headCommit *object.Commit) (added, mo
 func detectLang(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".go":
-		return "go"
-	case ".json":
-		return "json"
+	// JavaScript/TypeScript
 	case ".ts", ".tsx":
 		return "ts"
-	case ".js", ".jsx":
+	case ".js", ".jsx", ".mjs", ".cjs":
 		return "js"
+	// Structured data
+	case ".json":
+		return "json"
 	case ".yaml", ".yml":
 		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".xml":
+		return "xml"
+	// Documentation
+	case ".md", ".markdown":
+		return "markdown"
+	case ".txt", ".text":
+		return "text"
+	// Config
+	case ".ini", ".cfg", ".conf":
+		return "ini"
+	case ".env":
+		return "env"
+	// Code
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".rb":
+		return "ruby"
+	case ".rs":
+		return "rust"
+	case ".java":
+		return "java"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".hpp", ".cc", ".cxx":
+		return "cpp"
+	case ".cs":
+		return "csharp"
+	case ".php":
+		return "php"
+	case ".swift":
+		return "swift"
+	case ".kt", ".kts":
+		return "kotlin"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
 	case ".sql":
 		return "sql"
+	case ".html", ".htm":
+		return "html"
+	case ".css", ".scss", ".sass", ".less":
+		return "css"
 	case ".proto":
 		return "proto"
 	case ".graphql", ".gql":
 		return "graphql"
-	case ".toml":
-		return "toml"
 	default:
-		return ""
+		return "blob"
 	}
 }
 
