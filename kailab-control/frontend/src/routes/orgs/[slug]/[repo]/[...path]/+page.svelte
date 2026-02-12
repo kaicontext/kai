@@ -1822,8 +1822,8 @@ kai push origin snap.latest</pre>
 												<!-- SVG source code -->
 												<div>
 													<p class="text-xs text-kai-text-muted mb-2">Source</p>
-													<div class="code-viewer bg-kai-bg rounded border border-kai-border overflow-auto" bind:this={codeViewerEl}>
-														<table class="w-full code-table">
+													<div class="code-viewer bg-kai-bg rounded border border-kai-border overflow-x-auto" bind:this={codeViewerEl}>
+														<table class="code-table">
 															<tbody>
 																{#each fileContent.split('\n') as line, i}
 																	{@const lineNum = i + 1}
@@ -1866,8 +1866,8 @@ kai push origin snap.latest</pre>
 											</div>
 										<!-- Regular code view -->
 										{:else}
-											<div class="code-viewer bg-kai-bg border-t border-kai-border" bind:this={codeViewerEl}>
-												<table class="w-full code-table">
+											<div class="code-viewer bg-kai-bg border-t border-kai-border overflow-x-auto" bind:this={codeViewerEl}>
+												<table class="code-table">
 													<tbody>
 														{#each fileContent.split('\n') as line, i}
 															{@const lineNum = i + 1}
