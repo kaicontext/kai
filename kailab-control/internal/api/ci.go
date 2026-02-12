@@ -853,7 +853,21 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 	}
 	defer resp.Body.Close()
 
-	// If that failed, try getting head snapshot from latest changeset
+	// If that failed, try snap.latest
+	if resp.StatusCode != http.StatusOK {
+		latestURL := fmt.Sprintf("%s/%s/%s/v1/files/snap.latest", shardURL, orgSlug, repoName)
+		latestResp, err := http.Get(latestURL)
+		if err == nil && latestResp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			resp = latestResp
+		} else {
+			if latestResp != nil {
+				latestResp.Body.Close()
+			}
+		}
+	}
+
+	// If still failed, try getting head snapshot from latest changeset
 	if resp.StatusCode != http.StatusOK {
 		csURL := fmt.Sprintf("%s/%s/%s/v1/changesets/latest", shardURL, orgSlug, repoName)
 		csResp, err := http.Get(csURL)
@@ -898,14 +912,10 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 	}
 
 	// Find workflow files
-	workflowFiles := make(map[string]string) // path -> contentDigest
+	workflowFiles := make(map[string]string) // path -> digest (file object digest)
 	for _, f := range filesResp.Files {
 		if strings.HasPrefix(f.Path, ".kailab/workflows/") && strings.HasSuffix(f.Path, ".yml") {
-			digest := f.ContentDigest
-			if digest == "" {
-				digest = f.Digest
-			}
-			workflowFiles[f.Path] = digest
+			workflowFiles[f.Path] = f.Digest
 		}
 	}
 
@@ -914,9 +924,9 @@ func (h *Handler) syncWorkflowsFromDataPlane(repoID, orgSlug, repoName, ref stri
 	}
 
 	// Fetch and sync each workflow file
-	for path, contentDigest := range workflowFiles {
-		// Fetch content
-		contentURL := fmt.Sprintf("%s/%s/%s/v1/content/%s", shardURL, orgSlug, repoName, contentDigest)
+	for path, digest := range workflowFiles {
+		// Fetch content via file object digest
+		contentURL := fmt.Sprintf("%s/%s/%s/v1/content/%s", shardURL, orgSlug, repoName, digest)
 		contentResp, err := http.Get(contentURL)
 		if err != nil {
 			log.Printf("Failed to fetch workflow content for %s: %v", path, err)
