@@ -15,13 +15,16 @@ type MatrixInstance struct {
 
 // ExpandMatrix expands a matrix strategy into individual job instances.
 func ExpandMatrix(strategy *Strategy) ([]MatrixInstance, error) {
-	if strategy == nil || len(strategy.Matrix.Values) == 0 {
+	if strategy == nil || (len(strategy.Matrix.Values) == 0 && len(strategy.Matrix.Include) == 0) {
 		// No matrix, return single instance with empty values
 		return []MatrixInstance{{Values: make(map[string]interface{}), Index: 0}}, nil
 	}
 
-	// Generate all combinations
-	combinations := generateCombinations(strategy.Matrix.Values)
+	// Generate all combinations from matrix values (may be empty for include-only matrices)
+	var combinations []map[string]interface{}
+	if len(strategy.Matrix.Values) > 0 {
+		combinations = generateCombinations(strategy.Matrix.Values)
+	}
 
 	// Apply includes
 	for _, include := range strategy.Matrix.Include {

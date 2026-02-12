@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 	"kailab-control/internal/store"
 	"kailab-control/internal/workflow"
 )
+
+// expressionPattern matches ${{ ... }} expressions in job names.
+var expressionPattern = regexp.MustCompile(`\$\{\{[^}]*\}\}`)
 
 // Config holds runner configuration.
 type Config struct {
@@ -296,7 +300,9 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		return fmt.Errorf("parse workflow: %w", err)
 	}
 
-	// Find the job definition
+	// Find the job definition by matching the display name back to the workflow.
+	// The display name may have been resolved from ${{ matrix.* }} expressions,
+	// so we try multiple matching strategies.
 	var jobDef *JobDefinition
 	for _, jd := range parsedWF.Jobs {
 		if jd.Name == job.Name || getJobDisplayName(&jd, "") == job.Name {
@@ -305,19 +311,36 @@ func (r *Runner) executeJob(ctx context.Context, claim *model.JobClaimResponse) 
 		}
 	}
 
-	// If we couldn't match by display name, try to match by key
+	// Try matching by key (case-insensitive prefix) or job name prefix
 	if jobDef == nil {
 		for key, jd := range parsedWF.Jobs {
-			if job.Name == key || containsPrefix(job.Name, key) {
+			if strings.EqualFold(job.Name, key) {
 				jdCopy := jd
 				jobDef = &jdCopy
 				break
+			}
+			// Check if display name starts with the key (case-insensitive)
+			if len(job.Name) > len(key) && strings.EqualFold(job.Name[:len(key)], key) {
+				jdCopy := jd
+				jobDef = &jdCopy
+				break
+			}
+			// Check if display name starts with the job's name field (before matrix suffix)
+			if jd.Name != "" {
+				// Strip ${{ ... }} expressions from the name for prefix matching
+				baseName := strings.TrimSpace(expressionPattern.ReplaceAllString(jd.Name, ""))
+				baseName = strings.TrimRight(baseName, " (")
+				if baseName != "" && strings.HasPrefix(job.Name, baseName) {
+					jdCopy := jd
+					jobDef = &jdCopy
+					break
+				}
 			}
 		}
 	}
 
 	if jobDef == nil {
-		return fmt.Errorf("job definition not found")
+		return fmt.Errorf("job definition not found for %q", job.Name)
 	}
 
 	// Apply job-level timeout. Keep the parent context for API calls (completeJob, etc.)
