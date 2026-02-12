@@ -53,6 +53,15 @@
 	 * @param {string} content - Markdown content
 	 * @returns {string} Sanitized HTML
 	 */
+	function base64ToUtf8(b64) {
+		const binaryStr = atob(b64);
+		const bytes = new Uint8Array(binaryStr.length);
+		for (let i = 0; i < binaryStr.length; i++) {
+			bytes[i] = binaryStr.charCodeAt(i);
+		}
+		return new TextDecoder().decode(bytes);
+	}
+
 	function safeMarkdown(content) {
 		return sanitizeHtml(marked(content));
 	}
@@ -990,7 +999,7 @@ kai push origin snap.latest`;
 				} else if (isSvgFile(file.path)) {
 					// Decode SVG to show the source as well
 					try {
-						fileContent = atob(data.content);
+						fileContent = base64ToUtf8(data.content);
 					} catch {
 						fileContent = '';
 					}
@@ -1004,7 +1013,7 @@ kai push origin snap.latest`;
 				} else {
 					// Decode from base64
 					try {
-						fileContent = atob(data.content);
+						fileContent = base64ToUtf8(data.content);
 					} catch {
 						fileContent = '(Binary file - cannot display)';
 					}

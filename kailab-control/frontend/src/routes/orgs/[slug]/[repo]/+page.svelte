@@ -25,8 +25,31 @@
 			.replace(/javascript:/gi, 'removed:');
 	}
 
+	function base64ToUtf8(b64) {
+		const binaryStr = atob(b64);
+		const bytes = new Uint8Array(binaryStr.length);
+		for (let i = 0; i < binaryStr.length; i++) {
+			bytes[i] = binaryStr.charCodeAt(i);
+		}
+		return new TextDecoder().decode(bytes);
+	}
+
 	function safeMarkdown(content) {
-		return sanitizeHtml(marked(content));
+		const renderer = new marked.Renderer();
+		const defaultImageRenderer = renderer.image.bind(renderer);
+		renderer.image = function({ href, title, text }) {
+			// Resolve relative image paths to raw content endpoint
+			if (href && !href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('data:')) {
+				// Strip leading ./ if present
+				const cleanPath = href.replace(/^\.\//, '');
+				const digest = fileDigestMap[cleanPath];
+				if (digest) {
+					href = `/${slug}/${repo}/v1/raw/${digest}`;
+				}
+			}
+			return defaultImageRenderer({ href, title, text });
+		};
+		return sanitizeHtml(marked(content, { renderer }));
 	}
 
 	function isReadme(path) {
@@ -43,6 +66,7 @@
 	let repoInfo = $state(null);
 	let latestSnapshot = $state(null);
 	let fileCount = $state(0);
+	let fileDigestMap = $state({});
 
 	onMount(async () => {
 		await loadUser();
@@ -89,6 +113,12 @@
 				const filesData = await api('GET', `/${slug}/${repo}/v1/files/${latestSnapshot}`);
 				if (filesData?.files) {
 					fileCount = filesData.files.length;
+					// Build path->digest map for resolving image URLs in markdown
+					const map = {};
+					for (const f of filesData.files) {
+						map[f.path] = f.digest;
+					}
+					fileDigestMap = map;
 					const readme = filesData.files.find(f => isReadme(f.path));
 					if (readme) {
 						readmeFile = readme;
@@ -96,7 +126,7 @@
 						const contentData = await api('GET', `/${slug}/${repo}/v1/content/${readme.digest}`);
 						if (contentData?.content) {
 							try {
-								readmeContent = atob(contentData.content);
+								readmeContent = base64ToUtf8(contentData.content);
 							} catch {
 								readmeContent = '';
 							}

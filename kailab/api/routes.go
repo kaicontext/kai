@@ -293,6 +293,7 @@ func NewRouter(reg *repo.Registry, cfg *config.Config) http.Handler {
 	// Files - use {ref...} pattern since ref names contain dots (e.g., snap.latest)
 	mux.Handle("GET /{tenant}/{repo}/v1/files/{ref...}", withMetrics("GET /{tenant}/{repo}/v1/files/{ref...}", withRepo(http.HandlerFunc(h.ListSnapshotFiles))))
 	mux.Handle("GET /{tenant}/{repo}/v1/content/{digest}", withMetrics("GET /{tenant}/{repo}/v1/content/{digest}", withRepo(http.HandlerFunc(h.GetFileContent))))
+	mux.Handle("GET /{tenant}/{repo}/v1/raw/{digest}", withMetrics("GET /{tenant}/{repo}/v1/raw/{digest}", withRepo(http.HandlerFunc(h.GetRawContent))))
 
 	// Diff
 	mux.Handle("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withMetrics("GET /{tenant}/{repo}/v1/diff/{base}/{head}", withRepo(http.HandlerFunc(h.GetFileDiff))))
@@ -1131,6 +1132,90 @@ func (h *Handler) GetFileContent(w http.ResponseWriter, r *http.Request) {
 		Content: base64.StdEncoding.EncodeToString(content),
 		Lang:    filePayload.Lang,
 	})
+}
+
+func (h *Handler) GetRawContent(w http.ResponseWriter, r *http.Request) {
+	rh := RepoFrom(r.Context())
+	if rh == nil {
+		writeError(w, http.StatusInternalServerError, "repo not in context", nil)
+		return
+	}
+
+	digestHex := r.PathValue("digest")
+	digest, err := hex.DecodeString(digestHex)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid digest", err)
+		return
+	}
+
+	fileContent, kind, err := pack.ExtractObjectFromDB(rh.DB, digest)
+	if err != nil {
+		if err == store.ErrObjectNotFound {
+			writeError(w, http.StatusNotFound, "file not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get file", err)
+		return
+	}
+
+	if kind != "File" {
+		writeError(w, http.StatusBadRequest, "digest does not point to a file", nil)
+		return
+	}
+
+	fileJSON := fileContent
+	if idx := indexOf(fileContent, '\n'); idx >= 0 {
+		fileJSON = fileContent[idx+1:]
+	}
+
+	var filePayload struct {
+		Path   string `json:"path"`
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(fileJSON, &filePayload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse file", err)
+		return
+	}
+
+	contentDigest, err := hex.DecodeString(filePayload.Digest)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invalid content digest", err)
+		return
+	}
+
+	content, _, err := pack.ExtractObjectFromDB(rh.DB, contentDigest)
+	if err != nil {
+		if err == store.ErrObjectNotFound {
+			writeError(w, http.StatusNotFound, "file content not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get content", err)
+		return
+	}
+
+	// Detect content type from file content and extension
+	ct := http.DetectContentType(content)
+	// For common extensions, override detection
+	path := strings.ToLower(filePayload.Path)
+	switch {
+	case strings.HasSuffix(path, ".svg"):
+		ct = "image/svg+xml"
+	case strings.HasSuffix(path, ".png"):
+		ct = "image/png"
+	case strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg"):
+		ct = "image/jpeg"
+	case strings.HasSuffix(path, ".gif"):
+		ct = "image/gif"
+	case strings.HasSuffix(path, ".webp"):
+		ct = "image/webp"
+	case strings.HasSuffix(path, ".ico"):
+		ct = "image/x-icon"
+	}
+
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.WriteHeader(http.StatusOK)
+	w.Write(content)
 }
 
 // indexOf returns the index of the first occurrence of b in data, or -1 if not found.
