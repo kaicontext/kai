@@ -38,9 +38,7 @@
 		const renderer = new marked.Renderer();
 		const defaultImageRenderer = renderer.image.bind(renderer);
 		renderer.image = function({ href, title, text }) {
-			// Resolve relative image paths to raw content endpoint
 			if (href && !href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('data:')) {
-				// Strip leading ./ if present
 				const cleanPath = href.replace(/^\.\//, '');
 				const digest = fileDigestMap[cleanPath];
 				if (digest) {
@@ -49,7 +47,28 @@
 			}
 			return defaultImageRenderer({ href, title, text });
 		};
+		renderer.code = function({ text, lang }) {
+			const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			const langClass = lang ? ` class="language-${lang}"` : '';
+			return `<div class="code-block-wrapper"><button class="copy-code-btn" title="Copy code"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button><pre><code${langClass}>${escaped}</code></pre></div>`;
+		};
 		return sanitizeHtml(marked(content, { renderer }));
+	}
+
+	function handleMarkdownClick(e) {
+		const btn = e.target.closest('.copy-code-btn');
+		if (!btn) return;
+		const wrapper = btn.closest('.code-block-wrapper');
+		const code = wrapper?.querySelector('code');
+		if (!code) return;
+		navigator.clipboard.writeText(code.textContent).then(() => {
+			btn.classList.add('copied');
+			btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+			setTimeout(() => {
+				btn.classList.remove('copied');
+				btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+			}, 2000);
+		});
 	}
 
 	function isReadme(path) {
@@ -225,7 +244,9 @@
 					</svg>
 					<span class="font-medium">{readmeFile?.path || 'README.md'}</span>
 				</div>
-				<div class="markdown-body p-6">
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div class="markdown-body p-6" onclick={handleMarkdownClick}>
 					{@html safeMarkdown(readmeContent)}
 				</div>
 			</div>

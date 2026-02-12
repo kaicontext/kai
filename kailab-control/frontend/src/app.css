@@ -489,6 +489,47 @@
 	font-family: ui-monospace, monospace;
 }
 
+.markdown-body .code-block-wrapper {
+	position: relative;
+	margin: 1em 0;
+}
+
+.markdown-body .code-block-wrapper pre {
+	margin: 0;
+}
+
+.markdown-body .copy-code-btn {
+	position: absolute;
+	top: 0.5em;
+	right: 0.5em;
+	background: transparent;
+	border: 1px solid var(--md-border);
+	border-radius: 4px;
+	padding: 4px;
+	cursor: pointer;
+	color: var(--md-text);
+	opacity: 0;
+	transition: opacity 0.15s;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.markdown-body .code-block-wrapper:hover .copy-code-btn {
+	opacity: 0.6;
+}
+
+.markdown-body .copy-code-btn:hover {
+	opacity: 1 !important;
+	background: var(--md-code-bg);
+}
+
+.markdown-body .copy-code-btn.copied {
+	opacity: 1 !important;
+	color: #22c55e;
+	border-color: #22c55e;
+}
+
 .markdown-body pre {
 	background: var(--md-pre-bg);
 	padding: 1em;
