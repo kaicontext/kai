@@ -1,11 +1,14 @@
 package runner
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -355,15 +358,6 @@ func (jp *JobPod) actionCheckout(ctx context.Context, stepDef *StepDefinition, j
 		ref = overrideRef
 	}
 
-	// Determine fetch depth
-	fetchDepth := "1"
-	if d, ok := stepDef.With["fetch-depth"]; ok && d != "" {
-		fetchDepth = d
-	}
-	if fetchDepth == "0" {
-		fetchDepth = "" // full clone
-	}
-
 	// Fall back to repo name if no clone_url
 	if cloneURL == "" && repo != "" {
 		cloneURL = repo
@@ -371,62 +365,142 @@ func (jp *JobPod) actionCheckout(ctx context.Context, stepDef *StepDefinition, j
 
 	fmt.Fprintf(logWriter, "Checking out %s @ %s\n", repo, sha)
 
-	depthArg := ""
-	if fetchDepth != "" {
-		depthArg = fmt.Sprintf("--depth %s", fetchDepth)
+	// Use Kai API checkout: fetch files via HTTP and stream tar into the pod
+	return jp.kaiCheckout(ctx, cloneURL, ref, logWriter)
+}
+
+// kaiCheckout fetches files from the Kai data plane API and extracts them into /workspace.
+func (jp *JobPod) kaiCheckout(ctx context.Context, baseURL, ref string, logWriter io.Writer) (*ExecutionResult, error) {
+	// Determine the snapshot ref to fetch
+	snapRef := "snap.latest"
+	if strings.HasPrefix(ref, "refs/heads/") {
+		branch := strings.TrimPrefix(ref, "refs/heads/")
+		snapRef = "snap." + branch
 	}
 
-	// Derive the branch/tag name from ref for checkout
-	refName := ref
-	refName = strings.TrimPrefix(refName, "refs/heads/")
-	refName = strings.TrimPrefix(refName, "refs/tags/")
+	// Fetch file list from data plane
+	filesURL := fmt.Sprintf("%s/v1/files/%s", baseURL, snapRef)
+	fmt.Fprintf(logWriter, "Fetching file list from %s\n", snapRef)
 
-	script := fmt.Sprintf(`
-set -e
-echo "==> Checkout: %s"
-echo "Ref: %s  SHA: %s"
+	resp, err := http.Get(filesURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch file list: %w", err)
+	}
+	defer resp.Body.Close()
 
-# Install git if not available
-if ! command -v git &> /dev/null; then
-    echo "Installing git..."
-    apt-get update -qq && apt-get install -y -qq git ca-certificates > /dev/null 2>&1
-fi
+	// If the branch-specific snap doesn't exist, fall back to snap.latest
+	if resp.StatusCode == http.StatusNotFound && snapRef != "snap.latest" {
+		resp.Body.Close()
+		snapRef = "snap.latest"
+		filesURL = fmt.Sprintf("%s/v1/files/%s", baseURL, snapRef)
+		fmt.Fprintf(logWriter, "Falling back to %s\n", snapRef)
+		resp, err = http.Get(filesURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch file list: %w", err)
+		}
+		defer resp.Body.Close()
+	}
 
-# Clone the repository
-cd /workspace
-if [ -d ".git" ]; then
-    echo "Repository already checked out, fetching..."
-    git fetch origin %s %s
-    git checkout %s || git checkout FETCH_HEAD
-else
-    echo "Cloning %s..."
-    git clone %s --branch %s %s . 2>&1 || {
-        # If branch clone fails, try cloning default and checking out SHA
-        git clone %s %s . 2>&1
-        git fetch origin %s 2>&1 || true
-        git checkout %s 2>&1 || git checkout %s 2>&1
-    }
-fi
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch file list: HTTP %d", resp.StatusCode)
+	}
 
-# If we have a specific SHA, check it out
-if [ -n "%s" ] && [ "%s" != "" ]; then
-    git checkout %s 2>/dev/null || true
-fi
+	var filesResp struct {
+		Files []struct {
+			Path   string `json:"path"`
+			Digest string `json:"digest"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&filesResp); err != nil {
+		return nil, fmt.Errorf("failed to parse file list: %w", err)
+	}
 
-echo "Checked out $(git rev-parse HEAD)"
-echo "Checkout complete"
-`, repo, ref, sha,
-		refName, depthArg,
-		refName,
-		cloneURL,
-		cloneURL, refName, depthArg,
-		cloneURL, depthArg,
-		refName,
-		sha, refName,
-		sha, sha,
-		sha)
+	fmt.Fprintf(logWriter, "Downloading %d files...\n", len(filesResp.Files))
 
-	return jp.executeCommand(ctx, script, "bash", nil, "", logWriter)
+	// Build a tar archive with all file contents
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	for _, f := range filesResp.Files {
+		rawURL := fmt.Sprintf("%s/v1/raw/%s", baseURL, f.Digest)
+		rawResp, err := httpClient.Get(rawURL)
+		if err != nil {
+			fmt.Fprintf(logWriter, "Warning: failed to fetch %s: %v\n", f.Path, err)
+			continue
+		}
+		content, err := io.ReadAll(rawResp.Body)
+		rawResp.Body.Close()
+		if err != nil {
+			fmt.Fprintf(logWriter, "Warning: failed to read %s: %v\n", f.Path, err)
+			continue
+		}
+
+		tw.WriteHeader(&tar.Header{
+			Name: f.Path,
+			Mode: 0644,
+			Size: int64(len(content)),
+		})
+		tw.Write(content)
+	}
+	tw.Close()
+
+	fmt.Fprintf(logWriter, "Extracting %d files to /workspace (%d bytes)\n", len(filesResp.Files), tarBuf.Len())
+
+	// Stream the tar into the pod and extract it
+	return jp.streamTarIntoPod(ctx, tarBuf.Bytes(), "/workspace", logWriter)
+}
+
+// streamTarIntoPod pipes a tar archive into the pod and extracts it at the given directory.
+func (jp *JobPod) streamTarIntoPod(ctx context.Context, tarData []byte, destDir string, logWriter io.Writer) (*ExecutionResult, error) {
+	cmd := []string{"tar", "-xf", "-", "-C", destDir}
+
+	req := jp.executor.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(jp.Name).
+		Namespace(jp.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "job",
+			Command:   cmd,
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(jp.executor.config, "POST", req.URL())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	multiOut := io.MultiWriter(&stdout, logWriter)
+	multiErr := io.MultiWriter(&stderr, logWriter)
+
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  bytes.NewReader(tarData),
+		Stdout: multiOut,
+		Stderr: multiErr,
+	})
+
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(interface{ ExitStatus() int }); ok {
+			exitCode = exitErr.ExitStatus()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	if exitCode == 0 {
+		fmt.Fprintf(logWriter, "Checkout complete\n")
+	}
+
+	return &ExecutionResult{
+		ExitCode: exitCode,
+		Output:   stdout.String(),
+	}, nil
 }
 
 func (jp *JobPod) actionSetupGo(ctx context.Context, stepDef *StepDefinition, logWriter io.Writer) (*ExecutionResult, error) {
