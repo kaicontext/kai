@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,30 @@ import (
 	"kailab-control/internal/model"
 	"kailab-control/internal/workflow"
 )
+
+// qualifyShardURL converts a short Kubernetes hostname to a FQDN so that
+// CI runner pods in the kailab-ci namespace can resolve services in the
+// kailab namespace. e.g. "http://kailab:7447" -> "http://kailab.kailab.svc.cluster.local:7447"
+func qualifyShardURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	// If the hostname already contains a dot, it's already qualified
+	if strings.Contains(host, ".") {
+		return rawURL
+	}
+	// Qualify with the kailab namespace FQDN
+	port := u.Port()
+	fqdn := host + ".kailab.svc.cluster.local"
+	if port != "" {
+		u.Host = fqdn + ":" + port
+	} else {
+		u.Host = fqdn
+	}
+	return u.String()
+}
 
 // ----- Workflow Types -----
 
@@ -1180,11 +1205,11 @@ func (h *Handler) ClaimJob(w http.ResponseWriter, r *http.Request) {
 	org, _ := h.db.GetOrgByID(repo.OrgID)
 	secrets, _ := h.db.ListRepoSecrets(repo.ID, org.ID)
 
-	// Build clone URL from shard
-	shardURL := h.cfg.Shards["default"]
+	// Build clone URL from shard (use FQDN for cross-namespace access from CI runners)
+	shardURL := qualifyShardURL(h.cfg.Shards["default"])
 	if repo.ShardHint != "" {
 		if u, ok := h.cfg.Shards[repo.ShardHint]; ok {
-			shardURL = u
+			shardURL = qualifyShardURL(u)
 		}
 	}
 	cloneURL := fmt.Sprintf("%s/%s/%s", shardURL, org.Slug, repo.Name)
