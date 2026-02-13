@@ -180,12 +180,22 @@ func (h *GitHandler) ReceivePack(repoPath string, io GitIO) error {
 	// Trigger webhooks asynchronously
 	if h.webhookNotifier != nil && len(updatedRefs) > 0 {
 		go h.webhookNotifier.NotifyPush(tenant+"/"+name, updatedRefs)
-		// Trigger CI for each updated ref
+		// Trigger CI for branch push refs only (snap.* refs)
+		repoPath := tenant + "/" + name
 		for _, ref := range updatedRefs {
-			// Get the SHA for this ref
+			if !strings.HasPrefix(ref, "snap.") {
+				continue
+			}
 			sha := getRefSHA(handle.DB, ref)
-			go h.webhookNotifier.NotifyCI(tenant+"/"+name, "push", ref, sha, map[string]interface{}{
-				"refs": updatedRefs,
+			// Convert snap ref to refs/heads/ format for workflow matching
+			// snap.latest is the default ref used by kai-cli (equivalent to main branch)
+			branchName := strings.TrimPrefix(ref, "snap.")
+			if branchName == "latest" {
+				branchName = "main"
+			}
+			gitRef := "refs/heads/" + branchName
+			go h.webhookNotifier.NotifyCI(repoPath, "push", gitRef, sha, map[string]interface{}{
+				"ref": ref,
 			})
 		}
 	}

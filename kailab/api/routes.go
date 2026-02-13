@@ -192,8 +192,12 @@ func (h *Handler) notifyPushCI(rh *repo.Handle, refs []string) {
 		}
 		sha := fmt.Sprintf("%x", ref.Target)
 
-		// Convert snap.main to refs/heads/main format for workflow matching
+		// Convert snap ref to refs/heads/ format for workflow matching
+		// snap.latest is the default ref used by kai-cli (equivalent to main branch)
 		branchName := strings.TrimPrefix(refName, "snap.")
+		if branchName == "latest" {
+			branchName = "main"
+		}
 		gitRef := "refs/heads/" + branchName
 
 		go func(repo, gitRef, sha string, payload map[string]interface{}) {

@@ -270,7 +270,7 @@
 
 	/* List items */
 	.list-item {
-		@apply flex justify-between items-center px-4 py-3 border-b border-kai-border last:border-b-0 transition-colors duration-150;
+		@apply flex justify-between items-center px-4 py-3 border-b border-kai-border last:border-b-0 transition-colors duration-150 list-none;
 	}
 
 	.list-item:hover {
