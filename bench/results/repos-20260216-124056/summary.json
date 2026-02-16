@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "generatedAt": "2026-02-16T10:41:16.596727+00:00",
+  "environment": {
+    "timestamp": "2026-02-16T10:40:58Z",
+    "os": "Darwin",
+    "os_version": "24.3.0",
+    "arch": "arm64",
+    "cpu": "Apple M3 Pro",
+    "cpu_cores": "11",
+    "go_version": "go1.25.6",
+    "node_version": "v24.2.0",
+    "npm_version": "11.3.0",
+    "pnpm_version": "10.24.0",
+    "yarn_version": "unknown",
+    "kai_version": "kai version 0.9.4",
+    "kai_commit": "f83766b989d43e738e964dd8b2855ad9e797d98a",
+    "kai_branch": "main",
+    "kai_dirty": true,
+    "benchmark_params": {
+      "iterations": 1,
+      "warmup": 0
+    }
+  },
+  "iterations": 1,
+  "repos": {
+    "graphql-js": {
+      "size_class": "medium",
+      "git_range": "b34a4cdc6d391c45eb005aa21145dbfc3ae2b0c6..3f8f27a39d95920c93c0d65a1d3eb739b56a7e21",
+      "verdicts": [
+        "safe"
+      ],
+      "accuracy": {
+        "min": 1.0,
+        "max": 1.0,
+        "mean": 1.0
+      },
+      "tests_total": 1960,
+      "tests_selected": 1125,
+      "tests_reduced_pct": 42.6,
+      "full_duration_s": {
+        "median": 2.102,
+        "p90": 2.102,
+        "mean": 2.102,
+        "stddev": 0,
+        "min": 2.102,
+        "max": 2.102
+      },
+      "selective_duration_s": {
+        "median": 2.216,
+        "p90": 2.216,
+        "mean": 2.216,
+        "stddev": 0,
+        "min": 2.216,
+        "max": 2.216
+      },
+      "time_saved_pct": -5.4,
+      "false_negatives": 0
+    }
+  },
+  "aggregate": {
+    "all_safe": true,
+    "total_false_negatives": 0,
+    "mean_accuracy": 1.0,
+    "mean_tests_reduced_pct": 42.6,
+    "mean_time_saved_pct": -5.4,
+    "repos_tested": 1,
+    "total_iterations": 1
+  }
+}

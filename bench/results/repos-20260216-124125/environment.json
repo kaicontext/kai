@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-02-16T10:41:28Z",
+  "os": "Darwin",
+  "os_version": "24.3.0",
+  "arch": "arm64",
+  "cpu": "Apple M3 Pro",
+  "cpu_cores": "11",
+  "go_version": "go1.25.6",
+  "node_version": "v24.2.0",
+  "npm_version": "11.3.0",
+  "pnpm_version": "10.24.0",
+  "yarn_version": "unknown",
+  "kai_version": "kai version 0.9.4",
+  "kai_commit": "f83766b989d43e738e964dd8b2855ad9e797d98a",
+  "kai_branch": "main",
+  "kai_dirty": true,
+  "benchmark_params": {
+    "iterations": 1,
+    "warmup": 0
+  }
+}

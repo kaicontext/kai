@@ -196,6 +196,12 @@ func extractImports(node *sitter.Node, content []byte) []*Import {
 			if imp != nil {
 				imports = append(imports, imp)
 			}
+		case "export_statement":
+			// Re-export: export { x } from './y' or export * from './y'
+			imp := parseReexportSource(n, content)
+			if imp != nil {
+				imports = append(imports, imp)
+			}
 		case "call_expression":
 			// Check for dynamic import: import("./foo")
 			imp := parseDynamicImport(n, content)
@@ -422,6 +428,36 @@ func parseRequireCall(node *sitter.Node, content []byte) *Import {
 	}
 
 	return nil
+}
+
+// parseReexportSource extracts the source path from a re-export statement.
+// Handles:
+//   - export { a, b } from './foo'
+//   - export * from './foo'
+//   - export { default as Foo } from './foo'
+//
+// Skips plain exports like `export const x = ...` (no from clause = no string child).
+func parseReexportSource(node *sitter.Node, content []byte) *Import {
+	// A re-export has a `string` child containing the source path.
+	// Plain exports (export const x, export function f) do not have one.
+	var source string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "string" {
+			source = strings.Trim(child.Content(content), "\"'`")
+			break
+		}
+	}
+	if source == "" {
+		return nil
+	}
+
+	return &Import{
+		Source:     source,
+		IsRelative: strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/"),
+		Named:      make(map[string]string),
+		Range:      nodeRange(node),
+	}
 }
 
 // extractExports finds exported symbol names.

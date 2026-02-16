@@ -1,0 +1,285 @@
+# Correctness CI for Kai
+# Proves that Kai is safe and deterministic on every PR/commit.
+# This is the quality gate that protects the core promise: "safe selective CI."
+
+name: Correctness
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # 1) Unit + regression tests (graph, selection, shadow, flaky, CLI output)
+  regression-tests-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run regression test suite
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_" \
+            -v -count=1 -timeout 120s 2>&1 | tee /tmp/regression.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-log-linux
+          path: /tmp/regression.log
+          retention-days: 14
+
+  regression-tests-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run regression test suite
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_" \
+            -v -count=1 -timeout 120s 2>&1 | tee /tmp/regression.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-log-macos
+          path: /tmp/regression.log
+          retention-days: 14
+
+  # 2) Determinism checks — same input twice must produce identical output
+  determinism:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Build kai binary
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go build -o /tmp/kai ./cmd/kai
+
+      - name: Create fixture repo
+        run: |
+          mkdir -p /tmp/fixture/src /tmp/fixture/tests
+          cat > /tmp/fixture/src/utils.ts << 'TSEOF'
+          export function add(a: number, b: number) { return a + b; }
+          export function multiply(a: number, b: number) { return a * b; }
+          TSEOF
+          cat > /tmp/fixture/src/app.ts << 'TSEOF'
+          import { add, multiply } from './utils';
+          export const sum = add(1, 2);
+          export const product = multiply(3, 4);
+          TSEOF
+          cat > /tmp/fixture/src/helper.ts << 'TSEOF'
+          import { add } from './utils';
+          export function increment(x: number) { return add(x, 1); }
+          TSEOF
+          cat > /tmp/fixture/tests/app.test.ts << 'TSEOF'
+          import { sum, product } from '../src/app';
+          test('sum', () => expect(sum).toBe(3));
+          test('product', () => expect(product).toBe(12));
+          TSEOF
+          cat > /tmp/fixture/tests/helper.test.ts << 'TSEOF'
+          import { increment } from '../src/helper';
+          test('increment', () => expect(increment(5)).toBe(6));
+          TSEOF
+
+      - name: Run kai analyze — pass 1
+        run: |
+          cp -r /tmp/fixture /tmp/run1
+          cd /tmp/run1
+          /tmp/kai init
+          /tmp/kai capture .
+          # Export graph state
+          sqlite3 .kai/db.sqlite "SELECT kind, payload FROM nodes ORDER BY kind, payload" > /tmp/nodes1.txt
+          sqlite3 .kai/db.sqlite "SELECT src, type, dst FROM edges ORDER BY src, type, dst" > /tmp/edges1.txt
+
+      - name: Run kai analyze — pass 2
+        run: |
+          cp -r /tmp/fixture /tmp/run2
+          cd /tmp/run2
+          /tmp/kai init
+          /tmp/kai capture .
+          sqlite3 .kai/db.sqlite "SELECT kind, payload FROM nodes ORDER BY kind, payload" > /tmp/nodes2.txt
+          sqlite3 .kai/db.sqlite "SELECT src, type, dst FROM edges ORDER BY src, type, dst" > /tmp/edges2.txt
+
+      - name: Assert graph determinism
+        run: |
+          echo "=== Comparing nodes ==="
+          diff /tmp/nodes1.txt /tmp/nodes2.txt || { echo "FAIL: node nondeterminism detected"; exit 1; }
+          echo "PASS: nodes identical"
+
+          echo "=== Comparing edges ==="
+          diff /tmp/edges1.txt /tmp/edges2.txt || { echo "FAIL: edge nondeterminism detected"; exit 1; }
+          echo "PASS: edges identical"
+
+      - name: Upload determinism artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: determinism-dumps
+          path: |
+            /tmp/nodes1.txt
+            /tmp/nodes2.txt
+            /tmp/edges1.txt
+            /tmp/edges2.txt
+          retention-days: 14
+
+  # 3) Shadow-mode correctness — verify 0 false negatives on fixture repos
+  shadow-correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run shadow mode regression tests
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestShadow_|TestSelection_|TestFalseNeg_" \
+            -v -count=1 -timeout 120s 2>&1 | tee /tmp/shadow.log
+
+      - name: Assert zero false negatives
+        run: |
+          # Grep for FALSE NEGATIVE in test output — any hit means failure
+          if grep -q "FALSE NEGATIVE" /tmp/shadow.log; then
+            echo "FAIL: false negatives detected in shadow mode tests"
+            grep "FALSE NEGATIVE" /tmp/shadow.log
+            exit 1
+          fi
+          echo "PASS: 0 false negatives"
+
+      - name: Upload shadow log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-correctness-log
+          path: /tmp/shadow.log
+          retention-days: 14
+
+  # 4) Flakiness classification — verify flaky script is labeled flaky, not false negative
+  flaky-classification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run flaky detection tests
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestFlaky_" \
+            -v -count=1 -timeout 60s 2>&1 | tee /tmp/flaky.log
+
+      - name: Upload flaky log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-classification-log
+          path: /tmp/flaky.log
+          retention-days: 14
+
+  # 5) Golden file verification — ensure CLI output schemas haven't drifted
+  golden-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run CLI output + graph golden tests
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestCLI_|TestGraph_DeterministicSnapshot|TestGraph_ContentAddressedStability" \
+            -v -count=1 -timeout 60s
+
+  # 6) Performance guard — ensure no perf regressions
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Run performance guard tests
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go test ./cmd/kai/ \
+            -run "TestPerf_" \
+            -v -count=1 -timeout 120s 2>&1 | tee /tmp/perf.log
+
+      - name: Upload perf log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-log
+          path: /tmp/perf.log
+          retention-days: 14
+
+  # Gate — all correctness checks must pass before merge
+  correctness-gate:
+    runs-on: ubuntu-latest
+    needs:
+      - regression-tests-linux
+      - regression-tests-macos
+      - determinism
+      - shadow-correctness
+      - flaky-classification
+      - golden-files
+      - performance
+    steps:
+      - name: All correctness checks passed
+        run: echo "All correctness checks passed. Safe to merge."

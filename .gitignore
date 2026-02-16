@@ -41,3 +41,8 @@ kailab/data/
 Thumbs.db
 .kai/
 kailab-control/internal/api/web/_app/
+
+# Benchmark repo caches and artifacts
+bench/.repo-cache/
+bench/__pycache__/
+bench/results/*/kai

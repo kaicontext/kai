@@ -1,0 +1,4 @@
+repo,baseline_median_ms,baseline_runs,kai_median_ms,kai_adjusted_ms,kai_runs,time_reduction_pct,tests_total,tests_selected,test_reduction_pct,fallback_rate,false_negative_count,accuracy,confidence,safe_verdicts
+graphql-js,0,0,2278,2278,1,-7.6,1960,0,100.0,1.0,0,1.0,0.8,1/1
+valibot,0,0,2004,2004,1,24.3,2778,0,100.0,1.0,0,1.0,0.7,1/1
+AGGREGATE,,,,,2,8.4,,,100.0,1.0,0,,,

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,7 @@ import (
 	"kai/internal/review"
 	"kai/internal/snapshot"
 	"kai/internal/status"
+	"kai/internal/telemetry"
 	"kai/internal/util"
 	"kai/internal/workspace"
 )
@@ -64,6 +66,9 @@ const (
 
 // Version is the current kai CLI version
 var Version = "0.9.4"
+
+// verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
+var verbose bool
 
 var rootCmd = &cobra.Command{
 	Use:     "kai",
@@ -515,6 +520,12 @@ var (
 	ciFallbackExitCode int
 	// validate-plan flags
 	ciValidateStrict bool
+	// ci comment flags
+	ciCommentReport string
+	ciCommentToken  string
+	ciCommentRepo   string
+	ciCommentPR     int
+	ciCommentDryRun bool
 )
 
 var changesetCmd = &cobra.Command{
@@ -864,6 +875,15 @@ var shadowGitRef string
 var shadowSnapRef string
 var shadowUpdateRef string
 
+// shadow run flags
+var shadowFullCmd string
+var shadowKaiCmd string
+var shadowRetries int
+var shadowOutJSON string
+var shadowOutMD string
+var shadowSkipFullOnFail bool
+var shadowResultFormat string
+
 var shadowCmd = &cobra.Command{
 	Use:   "shadow",
 	Short: "Shadow Git in Kai (import/parity/drift)",
@@ -888,6 +908,23 @@ var shadowDriftCmd = &cobra.Command{
 	Short: "Detect drift between Git ref and Kai snapshot",
 	Args:  cobra.NoArgs,
 	RunE:  runShadowDrift,
+}
+
+var shadowRunCmd = &cobra.Command{
+	Use:   "run --git-range <base..head> --full <cmd> --kai <cmd>",
+	Short: "Run selective vs full test suites and compare results",
+	Long: `Run both selective (Kai-planned) and full test suites, then compare.
+
+Answers: "If we had trusted Kai's plan, would we have missed a failure?"
+
+The --kai command can include {{tests}} which will be replaced with the
+space-joined list of test targets from the CI plan.
+
+Examples:
+  kai shadow run --git-range main..feature --full "npm test" --kai "npm test -- {{tests}}"
+  kai shadow run --git-range HEAD~1..HEAD --full "go test ./..." --kai "go test {{tests}}" --format go`,
+	Args: cobra.NoArgs,
+	RunE: runShadowRun,
 }
 
 // Reference commands
@@ -1526,7 +1563,98 @@ var (
 	modulesDryRun    bool
 )
 
+var telemetryCmd = &cobra.Command{
+	Use:   "telemetry",
+	Short: "Manage anonymous usage telemetry",
+}
+
+var telemetryEnableCmd = &cobra.Command{
+	Use:   "enable",
+	Short: "Enable anonymous usage telemetry",
+	RunE:  runTelemetryEnable,
+}
+
+var telemetryDisableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Disable anonymous usage telemetry",
+	RunE:  runTelemetryDisable,
+}
+
+var telemetryStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show telemetry status",
+	RunE:  runTelemetryStatus,
+}
+
+func runTelemetryEnable(cmd *cobra.Command, args []string) error {
+	if err := telemetry.Enable(); err != nil {
+		return fmt.Errorf("enabling telemetry: %w", err)
+	}
+	cfg, _ := telemetry.LoadConfig()
+	fmt.Println("Telemetry enabled.")
+	fmt.Printf("  Install ID: %s\n", cfg.InstallID)
+	fmt.Println("  No sensitive data is collected (no paths, code, usernames, or repo names).")
+	fmt.Println("  Disable anytime with: kai telemetry disable")
+	return nil
+}
+
+func runTelemetryDisable(cmd *cobra.Command, args []string) error {
+	if err := telemetry.Disable(); err != nil {
+		return fmt.Errorf("disabling telemetry: %w", err)
+	}
+	fmt.Println("Telemetry disabled.")
+	return nil
+}
+
+func runTelemetryStatus(cmd *cobra.Command, args []string) error {
+	cfg, err := telemetry.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Enabled {
+		fmt.Println("Telemetry: enabled")
+	} else {
+		fmt.Println("Telemetry: disabled")
+	}
+	if cfg.InstallID != "" {
+		fmt.Printf("  Install ID:    %s\n", cfg.InstallID)
+	}
+	fmt.Printf("  Level:         %s\n", cfg.Level)
+	if cfg.CreatedAt != "" {
+		fmt.Printf("  Created:       %s\n", cfg.CreatedAt)
+	}
+	if cfg.LastUploadAt != "" {
+		fmt.Printf("  Last upload:   %s\n", cfg.LastUploadAt)
+	}
+	size, _ := telemetry.SpoolSize()
+	fmt.Printf("  Spool size:    %d bytes\n", size)
+	fmt.Printf("  Config:        %s\n", telemetry.ConfigPath())
+
+	// Show effective state considering env overrides
+	effective := telemetry.IsEnabled()
+	if effective != cfg.Enabled {
+		if effective {
+			fmt.Println("  (overridden to ENABLED by KAI_TELEMETRY=1)")
+		} else {
+			fmt.Println("  (overridden to DISABLED by environment)")
+		}
+	}
+	return nil
+}
+
 func init() {
+	telemetry.SetVersion(Version)
+
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose debug output")
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if !verbose {
+			verbose = os.Getenv("KAI_VERBOSE") == "1" || os.Getenv("KAI_VERBOSE") == "true"
+		}
+	}
+	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
+		_ = telemetry.FlushIfNeeded()
+	}
+
 	snapshotCreateCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
 	snapshotCreateCmd.Flags().StringVar(&dirPath, "dir", "", "Path to directory (creates snapshot without Git)")
 	snapshotCreateCmd.Flags().StringVar(&snapshotGitRef, "git", "", "Git ref to snapshot (explicit mode)")
@@ -1694,6 +1822,20 @@ func init() {
 	shadowCmd.AddCommand(shadowImportCmd)
 	shadowCmd.AddCommand(shadowParityCmd)
 	shadowCmd.AddCommand(shadowDriftCmd)
+	shadowCmd.AddCommand(shadowRunCmd)
+
+	shadowRunCmd.Flags().StringVar(&shadowGitRange, "git-range", "", "Git range BASE..HEAD")
+	shadowRunCmd.Flags().StringVar(&shadowGitRepo, "repo", ".", "Path to Git repository")
+	shadowRunCmd.Flags().StringVar(&shadowFullCmd, "full", "", "Command to run full test suite")
+	shadowRunCmd.Flags().StringVar(&shadowKaiCmd, "kai", "", "Command to run selective tests (use {{tests}} for test list)")
+	shadowRunCmd.Flags().IntVar(&shadowRetries, "retries", 0, "Number of retries for flaky detection")
+	shadowRunCmd.Flags().StringVar(&shadowOutJSON, "out", "", "Path to write JSON report")
+	shadowRunCmd.Flags().StringVar(&shadowOutMD, "summary", "", "Path to write Markdown summary")
+	shadowRunCmd.Flags().BoolVar(&shadowSkipFullOnFail, "skip-full-on-fail", false, "Skip full run if selective fails")
+	shadowRunCmd.Flags().StringVar(&shadowResultFormat, "format", "auto", "Test result format: auto, junit, jest, pytest, go")
+	shadowRunCmd.MarkFlagRequired("git-range")
+	shadowRunCmd.MarkFlagRequired("full")
+	shadowRunCmd.MarkFlagRequired("kai")
 
 	shadowImportCmd.Flags().StringVar(&shadowGitRange, "git-range", "", "Git range BASE..HEAD")
 	shadowImportCmd.Flags().StringVar(&shadowGitRepo, "repo", ".", "Path to Git repository")
@@ -1773,6 +1915,13 @@ func init() {
 	ciCmd.AddCommand(ciAnnotatePlanCmd)
 	ciCmd.AddCommand(ciValidatePlanCmd)
 	ciValidatePlanCmd.Flags().BoolVar(&ciValidateStrict, "strict", false, "Validate optional fields as well")
+	ciCmd.AddCommand(ciCommentCmd)
+	ciCommentCmd.Flags().StringVar(&ciCommentReport, "report", "", "Path to shadow report JSON")
+	ciCommentCmd.Flags().StringVar(&ciCommentToken, "token", "", "GitHub API token (default: $GITHUB_TOKEN)")
+	ciCommentCmd.Flags().StringVar(&ciCommentRepo, "repo", "", "GitHub repo owner/name (default: $GITHUB_REPOSITORY)")
+	ciCommentCmd.Flags().IntVar(&ciCommentPR, "pr", 0, "PR number (default: auto-detect from $GITHUB_EVENT_PATH)")
+	ciCommentCmd.Flags().BoolVar(&ciCommentDryRun, "dry-run", false, "Print comment to stdout instead of posting")
+	ciCommentCmd.MarkFlagRequired("report")
 	ciPlanCmd.Flags().StringVar(&ciStrategy, "strategy", "auto", "Selection strategy: auto, symbols, imports, coverage")
 	ciPlanCmd.Flags().StringVar(&ciRiskPolicy, "risk-policy", "expand", "Risk policy: expand, warn, fail")
 	ciPlanCmd.Flags().StringVar(&ciOutFile, "out", "", "Output file for plan JSON")
@@ -1890,6 +2039,7 @@ func init() {
 	pruneCmd.GroupID = groupAdvanced
 	completionCmd.GroupID = groupAdvanced
 	remoteLogCmd.GroupID = groupAdvanced
+	telemetryCmd.GroupID = groupAdvanced
 	rootCmd.AddCommand(snapshotCmd)
 	rootCmd.AddCommand(snapCmd)
 	rootCmd.AddCommand(analyzeCmd)
@@ -1907,6 +2057,12 @@ func init() {
 	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(remoteLogCmd)
+
+	// Add telemetry subcommands
+	telemetryCmd.AddCommand(telemetryEnableCmd)
+	telemetryCmd.AddCommand(telemetryDisableCmd)
+	telemetryCmd.AddCommand(telemetryStatusCmd)
+	rootCmd.AddCommand(telemetryCmd)
 
 	// Add auth subcommands
 	authCmd.AddCommand(authLoginCmd)
@@ -1945,11 +2101,22 @@ func shortID(s string) string {
 	return s
 }
 
+// debugf prints a timestamped debug message to stderr when verbose mode is active.
+func debugf(format string, args ...any) {
+	if !verbose {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[kai debug] %s %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+}
+
 // skipModulesFile is set by clone to skip creating kai.modules.yaml
 var skipModulesFile bool
 var initExplain bool
 
 func runInit(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("init")
+	defer te.Finish()
+
 	// Show explain if requested
 	if initExplain {
 		cwd, _ := os.Getwd()
@@ -1958,6 +2125,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create .kai directory
+	debugf("creating .kai directory at %s", kaiDir)
 	if err := os.MkdirAll(kaiDir, 0755); err != nil {
 		return fmt.Errorf("creating .kai directory: %w", err)
 	}
@@ -1967,6 +2135,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(objPath, 0755); err != nil {
 		return fmt.Errorf("creating objects directory: %w", err)
 	}
+	debugf("database path: %s", filepath.Join(kaiDir, dbFile))
 
 	// Write default kai.modules.yaml in project root (not in .kai) only if it doesn't exist
 	// This file is meant to be committed to version control and shared with the team
@@ -2448,6 +2617,9 @@ func runSnap(cmd *cobra.Command, args []string) error {
 // 3. Analyze calls (build call graph)
 // This is the recommended starting point for new users.
 func runCapture(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("capture")
+	defer te.Finish()
+
 	// Determine path to capture
 	capturePath := "."
 	if len(args) > 0 {
@@ -2456,6 +2628,10 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	db, err := openDB()
 	if err != nil {
+		if te != nil {
+			te.Result = "error"
+			te.ErrorClass = "db_open"
+		}
 		return err
 	}
 	defer db.Close()
@@ -2469,6 +2645,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 	moduleCount := len(matcher.GetAllModules())
 	fmt.Printf("found %d modules\n", moduleCount)
+	debugf("loaded %d modules", moduleCount)
 
 	// Show explanation if requested
 	if captureExplain {
@@ -2480,8 +2657,13 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("Step 1/3: Creating snapshot...")
 	fmt.Printf("Capturing directory: %s\n", capturePath)
+	phaseStart := time.Now()
 	source, err := dirio.OpenDirectory(capturePath)
 	if err != nil {
+		if te != nil {
+			te.Result = "error"
+			te.ErrorClass = "dir_open"
+		}
 		return fmt.Errorf("opening directory: %w", err)
 	}
 
@@ -2489,22 +2671,38 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	files, err := source.GetFiles()
 	if err != nil {
 		fmt.Println("failed")
+		if te != nil {
+			te.Result = "error"
+			te.ErrorClass = "get_files"
+		}
 		return fmt.Errorf("getting files: %w", err)
 	}
 	fmt.Printf("found %d files\n", len(files))
+	debugf("capture: %d files found in %s", len(files), capturePath)
 
 	fmt.Print("Creating snapshot... ")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
 		fmt.Println("failed")
+		if te != nil {
+			te.Result = "error"
+			te.ErrorClass = "snapshot_create"
+		}
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
 	fmt.Println("done")
+	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
+	if te != nil {
+		te.SetPhase("snapshot", time.Since(phaseStart).Milliseconds())
+		te.Stats["files"] = int64(len(files))
+		te.Stats["modules"] = int64(moduleCount)
+	}
 
 	// Step 2: Analyze symbols
 	fmt.Println()
 	fmt.Println("Step 2/3: Analyzing symbols...")
+	phaseStart = time.Now()
 	progress := func(current, total int, filename string) {
 		display := filename
 		if len(display) > 40 {
@@ -2522,10 +2720,14 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Print("\033[K")
 		fmt.Println()
 	}
+	if te != nil {
+		te.SetPhase("symbols", time.Since(phaseStart).Milliseconds())
+	}
 
 	// Step 3: Analyze calls (build call graph)
 	fmt.Println()
 	fmt.Println("Step 3/3: Building call graph...")
+	phaseStart = time.Now()
 	callProgress := func(current, total int, filename string) {
 		display := filename
 		if len(display) > 40 {
@@ -2542,6 +2744,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Print("\rBuilding call graph... done")
 		fmt.Print("\033[K")
 		fmt.Println()
+	}
+	if te != nil {
+		te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
 	}
 
 	// Check if this is the first scan (no snap.latest ref exists)
@@ -2566,6 +2771,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	// Update refs - like git commit, capture always updates snap.latest
 	fmt.Print("Updating refs... ")
+	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
 	autoRefMgr := ref.NewAutoRefManager(db)
 
 	// Always update snap.latest (like git commit updates HEAD)
@@ -2574,6 +2780,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
 	} else {
 		fmt.Println("done")
+		debugf("refs updated successfully")
 	}
 
 	// Auto-create changeset if there are changes
@@ -2896,6 +3103,9 @@ func createSnapshotFromDir(db *graph.DB, dir string) ([]byte, error) {
 }
 
 func runSnapshot(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("snapshot")
+	defer te.Finish()
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -2909,6 +3119,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("found %d modules\n", len(matcher.GetAllModules()))
+	debugf("loaded %d modules", len(matcher.GetAllModules()))
 
 	var source filesource.FileSource
 
@@ -2988,6 +3199,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("found %d files\n", len(files))
 
+	debugf("snapshot: %d files read", len(files))
 	fmt.Print("Creating snapshot... ")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
@@ -2996,6 +3208,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
 	fmt.Println("done")
+	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
 
 	// Auto-analyze symbols for better intent generation
 	fmt.Printf("Analyzing symbols... ")
@@ -3032,6 +3245,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 
 	// Update auto-refs
 	fmt.Print("Updating refs... ")
+	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
 	autoRefMgr := ref.NewAutoRefManager(db)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
 		fmt.Println("failed")
@@ -3484,6 +3698,7 @@ type CIProvenance struct {
 	GeneratedAt     string   `json:"generatedAt"`          // ISO8601 timestamp
 	Analyzers       []string `json:"analyzers"`            // Which analyzers ran
 	PolicyHash      string   `json:"policyHash,omitempty"` // Hash of ci-policy.yaml if used
+	EnvHash         string   `json:"envHash,omitempty"`    // Hash of tracked environment variables
 }
 
 // DetectorVersion is the current version of the dynamic import detector
@@ -3545,6 +3760,92 @@ type CIPrediction struct {
 	FalsePositives []string `json:"falsePositives,omitempty"` // Tests selected but didn't need to run
 }
 
+// ShadowVerdict is the outcome of a shadow comparison run
+type ShadowVerdict string
+
+const (
+	ShadowVerdictSafe         ShadowVerdict = "safe"
+	ShadowVerdictMissed       ShadowVerdict = "missed"
+	ShadowVerdictFallback     ShadowVerdict = "fallback"
+	ShadowVerdictFlakySuspect ShadowVerdict = "flaky_suspect"
+	ShadowVerdictSkipped      ShadowVerdict = "skipped"
+)
+
+// ShadowReport is the full output of a shadow comparison run
+type ShadowReport struct {
+	Version      int              `json:"version"`
+	GeneratedAt  string           `json:"generatedAt"`
+	KaiVersion   string           `json:"kaiVersion"`
+	GitRange     string           `json:"gitRange"`
+	Plan         *CIPlan          `json:"plan"`
+	Verdict      ShadowVerdict    `json:"verdict"`
+	SelectiveRun *ShadowRunResult `json:"selectiveRun"`
+	FullRun      *ShadowRunResult `json:"fullRun,omitempty"`
+	Metrics      ShadowMetrics    `json:"metrics"`
+	Flaky        ShadowFlakyInfo  `json:"flaky"`
+	Fallback     ShadowFallbackInfo `json:"fallback"`
+}
+
+// TestFailureDetail captures a failed test with its error message
+type TestFailureDetail struct {
+	Name         string `json:"name"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
+// FlakyTestDetail captures per-test flaky classification
+type FlakyTestDetail struct {
+	Name           string  `json:"name"`
+	ErrorMessage   string  `json:"errorMessage,omitempty"`
+	FailCount      int     `json:"failCount"`
+	TotalRetries   int     `json:"totalRetries"`
+	Classification string  `json:"classification"` // "flaky", "real", "inconclusive"
+	Confidence     float64 `json:"confidence"`      // 0.0-1.0
+}
+
+// FlakyHistoryRecord is appended to .kai/flaky-tests.jsonl
+type FlakyHistoryRecord struct {
+	Timestamp string            `json:"timestamp"`
+	GitRange  string            `json:"gitRange"`
+	Tests     []FlakyTestDetail `json:"tests"`
+}
+
+// ShadowRunResult captures the result of a single test command execution
+type ShadowRunResult struct {
+	Command     string              `json:"command"`
+	ExitCode    int                 `json:"exitCode"`
+	DurationS   float64             `json:"durationS"`
+	TotalTests  int                 `json:"totalTests"`
+	Passed      int                 `json:"passed"`
+	FailedTests []TestFailureDetail `json:"failedTests"`
+	Skipped     int                 `json:"skipped"`
+}
+
+// ShadowMetrics captures comparison metrics between selective and full runs
+type ShadowMetrics struct {
+	TestsReduced    int     `json:"testsReduced"`
+	TestsReducedPct float64 `json:"testsReducedPct"`
+	TimeSavedS      float64 `json:"timeSavedS"`
+	TimeSavedPct    float64 `json:"timeSavedPct"`
+	FalseNegatives  int     `json:"falseNegatives"`
+	FalsePositives  int     `json:"falsePositives"`
+	Accuracy        float64 `json:"accuracy"`
+}
+
+// ShadowFlakyInfo captures flaky test detection results
+type ShadowFlakyInfo struct {
+	Detected   bool              `json:"detected"`
+	FlakyTests []FlakyTestDetail `json:"flakyTests,omitempty"`
+	Retries    int               `json:"retries"`
+	RealTests  []FlakyTestDetail `json:"realTests,omitempty"`
+}
+
+// ShadowFallbackInfo captures fallback trigger information
+type ShadowFallbackInfo struct {
+	Triggered  bool    `json:"triggered"`
+	Reason     string  `json:"reason,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
 // CIPolicyConfig defines risk thresholds and behavior for CI test selection
 // Loaded from kai.ci-policy.yaml in repo root
 type CIPolicyConfig struct {
@@ -3568,6 +3869,10 @@ type CIPolicyConfig struct {
 
 	// Contracts configures contract/schema change detection
 	Contracts CIPolicyContracts `yaml:"contracts" json:"contracts"`
+
+	// EnvVars lists environment variable names whose values affect test outcomes.
+	// A hash of their current values is recorded in provenance for drift detection.
+	EnvVars []string `yaml:"envVars" json:"envVars,omitempty"`
 }
 
 // CIPolicyDynamicImports configures dynamic import handling
@@ -3734,6 +4039,7 @@ func loadCIPolicy() (CIPolicyConfig, string, error) {
 		if err == nil {
 			usedPath = ciPolicyFileFallback
 		} else if os.IsNotExist(err) {
+			debugf("ci policy: using defaults (no policy file found)")
 			return policy, "", nil // Use defaults, no hash
 		}
 	}
@@ -3750,7 +4056,26 @@ func loadCIPolicy() (CIPolicyConfig, string, error) {
 	hash := sha256.Sum256(data)
 	policyHash := hex.EncodeToString(hash[:8]) // First 8 bytes as hex
 
+	debugf("ci policy: loaded from %s (hash: %s)", usedPath, policyHash)
 	return policy, policyHash, nil
+}
+
+// computeEnvHash produces a stable hash of the environment variables listed
+// in the CI policy. Returns "" if no env vars are configured.
+func computeEnvHash(vars []string) string {
+	if len(vars) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(vars))
+	copy(sorted, vars)
+	sort.Strings(sorted)
+
+	h := sha256.New()
+	for _, name := range sorted {
+		val := os.Getenv(name)
+		fmt.Fprintf(h, "%s=%s\n", name, val)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // Structural risk type constants
@@ -4520,6 +4845,9 @@ func getAllTestFiles(files []*graph.Node) []string {
 }
 
 func runCIPlan(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("ci_plan")
+	defer te.Finish()
+
 	var db *graph.DB
 	var err error
 	var baseSnapshotID, headSnapshotID []byte
@@ -4675,6 +5003,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("getting changed files: %w", err)
 	}
+	debugf("ci plan: %d changed files", len(changedFiles))
 
 	// Check panic switch first
 	panicSwitch := checkPanicSwitch()
@@ -4684,6 +5013,11 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading CI policy: %w", err)
 	}
+	envHash := computeEnvHash(ciPolicy.EnvVars)
+	if envHash != "" {
+		debugf("ci plan: env hash=%s (%d vars)", envHash, len(ciPolicy.EnvVars))
+	}
+	debugf("ci plan: strategy=%s safety-mode=%s risk-policy=%s", ciStrategy, ciSafetyMode, ciRiskPolicy)
 
 	// Build provenance info
 	var changesetHex, baseHex, headHex string
@@ -4747,6 +5081,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 			GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
 			Analyzers:       analyzersUsed, // Will be populated as we analyze
 			PolicyHash:      policyHash,
+			EnvHash:         envHash,
 		},
 		Prediction: CIPrediction{},
 	}
@@ -5204,6 +5539,7 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		confidence := calculateConfidence(risks, len(affectedTargets), len(changedFiles))
 		plan.Safety.Confidence = confidence
 		plan.Confidence = confidence // Also set top-level confidence
+		debugf("ci plan: %d risks found, confidence=%.2f, %d targets affected", len(risks), confidence, len(affectedTargets))
 
 		// Check if we should expand for safety
 		shouldExpand, expansionReasons := shouldExpandForSafety(ciSafetyMode, risks, confidence, ciPolicy)
@@ -5277,6 +5613,8 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
+
+		debugf("ci plan: mode=%s risk=%s targets=%d", plan.Mode, plan.Risk, len(plan.Targets.Run))
 
 		// Adjust risk level based on safety analysis
 		if len(risks) > 0 && plan.Risk == "low" {
@@ -5579,6 +5917,9 @@ func printExplainTable(plan CIPlan) {
 	}
 	if plan.Provenance.PolicyHash != "" {
 		fmt.Printf("║   Policy Hash: %-61s║\n", plan.Provenance.PolicyHash)
+	}
+	if plan.Provenance.EnvHash != "" {
+		fmt.Printf("║   Env Hash: %-64s║\n", plan.Provenance.EnvHash)
 	}
 	if len(plan.Provenance.Analyzers) > 0 {
 		fmt.Printf("║   Analyzers: %-63s║\n", strings.Join(plan.Provenance.Analyzers, ", "))
@@ -6384,6 +6725,30 @@ func appendMissRecord(record MissRecord) error {
 	return err
 }
 
+// appendFlakyRecord appends a flaky test record to the history log
+func appendFlakyRecord(record FlakyHistoryRecord) error {
+	kaiPath := filepath.Join(".", kaiDir)
+	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	flakyFile := filepath.Join(kaiPath, "flaky-tests.jsonl")
+
+	f, err := os.OpenFile(flakyFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	_, err = f.WriteString(string(data) + "\n")
+	return err
+}
+
 // runCIExplainDynamicImports scans files for dynamic imports and explains their impact
 func runCIExplainDynamicImports(cmd *cobra.Command, args []string) error {
 	// Default to current directory
@@ -6831,6 +7196,11 @@ func createSnapshotFromGitRef(db *graph.DB, repoPath, gitRef string) ([]byte, er
 		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed for %s: %v\n", gitRef, err)
 	}
 
+	// Build call graph (needed for CI plan to find affected tests via IMPORTS/TESTS edges)
+	if err := creator.AnalyzeCalls(snapshotID, func(current, total int, filename string) {}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: call graph analysis failed for %s: %v\n", gitRef, err)
+	}
+
 	return snapshotID, nil
 }
 
@@ -7027,7 +7397,13 @@ func openDB() (*graph.DB, error) {
 	}
 	dbPath := filepath.Join(kaiDir, dbFile)
 	objPath := filepath.Join(kaiDir, objectsDir)
-	return graph.Open(dbPath, objPath)
+	debugf("opening database: %s", dbPath)
+	db, err := graph.Open(dbPath, objPath)
+	if err != nil {
+		return nil, err
+	}
+	debugf("database opened successfully")
+	return db, nil
 }
 
 // applyDBSchema applies the database schema to a fresh database.
@@ -7110,11 +7486,17 @@ func loadMatcher() (*module.Matcher, error) {
 		return nil, err
 	}
 	if len(matcher.GetAllModules()) > 0 {
+		debugf("modules: loaded %d modules from %s", len(matcher.GetAllModules()), modulesRulesPath)
 		return matcher, nil
 	}
 
 	// Fall back to legacy location (kai.modules.yaml in project root)
-	return module.LoadRulesOrEmpty(modulesFile)
+	m, err := module.LoadRulesOrEmpty(modulesFile)
+	if err != nil {
+		return nil, err
+	}
+	debugf("modules: loaded %d modules from %s", len(m.GetAllModules()), modulesFile)
+	return m, nil
 }
 
 // getCurrentWorkspace reads the current workspace name from .kai/workspace
@@ -7482,6 +7864,9 @@ func runLog(cmd *cobra.Command, args []string) error {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("status")
+	defer te.Finish()
+
 	// Check if Kai is initialized
 	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
 		fmt.Println("Not a Kai repository (run 'kai init' to initialize)")
@@ -7583,6 +7968,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runDiff(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("diff")
+	defer te.Finish()
+
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -9704,6 +10092,9 @@ func interactivePushOnboarding(remoteName string) (*remote.Client, error) {
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("push")
+	defer te.Finish()
+
 	// Show explain if requested
 	if pushExplain {
 		remoteName := "origin"
@@ -9766,6 +10157,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check server health
+	debugf("push: connecting to %s", client.BaseURL)
 	if err := client.Health(); err != nil {
 		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
 	}
@@ -9885,6 +10277,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 		reviewsToPush = allReviews
 	}
+
+	debugf("push: %d refs, %d reviews to sync", len(refsToSync), len(reviewsToPush))
 
 	// Track pre-computed pack objects for UUID-based nodes (workspace, review)
 	// Key: content-addressed digest hex, Value: pre-built PackObject
@@ -10389,6 +10783,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 }
 
 func runFetch(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("fetch")
+	defer te.Finish()
+
 	// Show explain if requested
 	if fetchExplain {
 		remoteName := "origin"
@@ -10427,6 +10824,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check server health
+	debugf("fetch: connecting to %s", client.BaseURL)
 	if err := client.Health(); err != nil {
 		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
 	}
@@ -10464,6 +10862,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	debugf("fetch: %d refs from remote", len(remoteRefs))
 	if len(remoteRefs) == 0 {
 		fmt.Println("No refs to fetch.")
 		return nil
@@ -13544,5 +13943,1283 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Updated successfully!")
 	fmt.Println("Run 'kai --version' to verify.")
+	return nil
+}
+
+// ========== Shadow Run Implementation ==========
+
+// JUnit XML types for parsing test results
+type junitTestSuites struct {
+	XMLName    xml.Name         `xml:"testsuites"`
+	TestSuites []junitTestSuite `xml:"testsuite"`
+}
+
+type junitTestSuite struct {
+	XMLName   xml.Name        `xml:"testsuite"`
+	Name      string          `xml:"name,attr"`
+	Tests     int             `xml:"tests,attr"`
+	Failures  int             `xml:"failures,attr"`
+	Errors    int             `xml:"errors,attr"`
+	Skipped   int             `xml:"skipped,attr"`
+	TestCases []junitTestCase `xml:"testcase"`
+}
+
+type junitTestCase struct {
+	Name      string        `xml:"name,attr"`
+	ClassName string        `xml:"classname,attr"`
+	Failure   *junitFailure `xml:"failure"`
+	Error     *junitError   `xml:"error"`
+	Skipped   *junitSkipped `xml:"skipped"`
+}
+
+type junitFailure struct {
+	Message string `xml:"message,attr"`
+}
+
+type junitError struct {
+	Message string `xml:"message,attr"`
+}
+
+type junitSkipped struct{}
+
+// parseJUnitXML parses JUnit XML test results
+func parseJUnitXML(data []byte) (total int, failed []TestFailureDetail, err error) {
+	extractMsg := func(tc junitTestCase) string {
+		if tc.Failure != nil && tc.Failure.Message != "" {
+			return tc.Failure.Message
+		}
+		if tc.Error != nil && tc.Error.Message != "" {
+			return tc.Error.Message
+		}
+		return ""
+	}
+
+	// Try <testsuites> root
+	var suites junitTestSuites
+	if err := xml.Unmarshal(data, &suites); err == nil && len(suites.TestSuites) > 0 {
+		for _, suite := range suites.TestSuites {
+			for _, tc := range suite.TestCases {
+				total++
+				if tc.Failure != nil || tc.Error != nil {
+					name := tc.Name
+					if tc.ClassName != "" {
+						name = tc.ClassName + "::" + tc.Name
+					}
+					failed = append(failed, TestFailureDetail{Name: name, ErrorMessage: extractMsg(tc)})
+				}
+			}
+		}
+		return total, failed, nil
+	}
+
+	// Try single <testsuite> root
+	var suite junitTestSuite
+	if err := xml.Unmarshal(data, &suite); err == nil && len(suite.TestCases) > 0 {
+		for _, tc := range suite.TestCases {
+			total++
+			if tc.Failure != nil || tc.Error != nil {
+				name := tc.Name
+				if tc.ClassName != "" {
+					name = tc.ClassName + "::" + tc.Name
+				}
+				failed = append(failed, TestFailureDetail{Name: name, ErrorMessage: extractMsg(tc)})
+			}
+		}
+		return total, failed, nil
+	}
+
+	return 0, nil, fmt.Errorf("not valid JUnit XML")
+}
+
+// extractTestResultsJest parses Jest JSON output
+func extractTestResultsJest(data []byte) (total int, failed []TestFailureDetail, err error) {
+	var result struct {
+		NumTotalTests  int `json:"numTotalTests"`
+		NumPassedTests int `json:"numPassedTests"`
+		TestResults    []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"testResults"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, nil, err
+	}
+	if len(result.TestResults) == 0 {
+		return 0, nil, fmt.Errorf("no test results found")
+	}
+	total = result.NumTotalTests
+	if total == 0 {
+		total = len(result.TestResults)
+	}
+	for _, tr := range result.TestResults {
+		if tr.Status == "failed" {
+			failed = append(failed, TestFailureDetail{Name: tr.Name, ErrorMessage: tr.Message})
+		}
+	}
+	return total, failed, nil
+}
+
+// extractTestResultsPytest parses pytest JSON output
+func extractTestResultsPytest(data []byte) (total int, failed []TestFailureDetail, err error) {
+	var result struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Tests []struct {
+			NodeID  string `json:"nodeid"`
+			Outcome string `json:"outcome"`
+			Call    struct {
+				Longrepr string `json:"longrepr"`
+			} `json:"call"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, nil, err
+	}
+	if len(result.Tests) == 0 {
+		return 0, nil, fmt.Errorf("no test results found")
+	}
+	total = result.Summary.Total
+	if total == 0 {
+		total = len(result.Tests)
+	}
+	for _, t := range result.Tests {
+		if t.Outcome == "failed" {
+			failed = append(failed, TestFailureDetail{Name: t.NodeID, ErrorMessage: t.Call.Longrepr})
+		}
+	}
+	return total, failed, nil
+}
+
+// extractTestResultsGo parses Go test JSON output (go test -json)
+func extractTestResultsGo(data []byte) (total int, failed []TestFailureDetail, err error) {
+	testsSeen := make(map[string]string)   // pkg/Test -> last action
+	testOutput := make(map[string]string)  // pkg/Test -> accumulated output
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Action  string `json:"Action"`
+			Package string `json:"Package"`
+			Test    string `json:"Test"`
+			Output  string `json:"Output"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		if ev.Test == "" {
+			continue
+		}
+		key := ev.Package + "/" + ev.Test
+		if ev.Action == "output" && ev.Output != "" {
+			testOutput[key] += ev.Output
+		}
+		if ev.Action == "pass" || ev.Action == "fail" || ev.Action == "skip" {
+			testsSeen[key] = ev.Action
+		}
+	}
+	if len(testsSeen) == 0 {
+		return 0, nil, fmt.Errorf("no Go test events found")
+	}
+	var failedNames []string
+	for key, action := range testsSeen {
+		total++
+		if action == "fail" {
+			failedNames = append(failedNames, key)
+		}
+	}
+	sort.Strings(failedNames)
+	for _, name := range failedNames {
+		failed = append(failed, TestFailureDetail{Name: name, ErrorMessage: testOutput[name]})
+	}
+	return total, failed, nil
+}
+
+// extractTestResults parses test output in the specified format
+func extractTestResults(data []byte, format string) (total int, failed []TestFailureDetail, err error) {
+	switch format {
+	case "junit":
+		return parseJUnitXML(data)
+	case "jest":
+		return extractTestResultsJest(data)
+	case "pytest":
+		return extractTestResultsPytest(data)
+	case "go":
+		return extractTestResultsGo(data)
+	case "auto", "":
+		// Try JUnit XML first
+		if t, f, err := parseJUnitXML(data); err == nil && t > 0 {
+			return t, f, nil
+		}
+		// Try Jest
+		if t, f, err := extractTestResultsJest(data); err == nil && t > 0 {
+			return t, f, nil
+		}
+		// Try pytest
+		if t, f, err := extractTestResultsPytest(data); err == nil && t > 0 {
+			return t, f, nil
+		}
+		// Try Go
+		if t, f, err := extractTestResultsGo(data); err == nil && t > 0 {
+			return t, f, nil
+		}
+		return 0, nil, fmt.Errorf("could not detect test result format")
+	default:
+		return 0, nil, fmt.Errorf("unknown format: %s", format)
+	}
+}
+
+// runTestCommand executes a test command and parses results
+func runTestCommand(cmdStr string, tests []string, format string) (*ShadowRunResult, error) {
+	// Substitute {{tests}} placeholder
+	if len(tests) > 0 {
+		cmdStr = strings.ReplaceAll(cmdStr, "{{tests}}", strings.Join(tests, " "))
+	} else {
+		cmdStr = strings.ReplaceAll(cmdStr, "{{tests}}", "")
+	}
+
+	result := &ShadowRunResult{
+		Command:     cmdStr,
+		FailedTests: []TestFailureDetail{},
+	}
+
+	start := time.Now()
+	cmd := exec.Command("sh", "-c", cmdStr)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	err := cmd.Run()
+	result.DurationS = time.Since(start).Seconds()
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			return result, fmt.Errorf("executing command: %w", err)
+		}
+	}
+
+	output := buf.Bytes()
+
+	// Try to find result files first
+	resultFiles := []string{"junit.xml", "test-results.xml", "test-results.json"}
+	for _, rf := range resultFiles {
+		if data, err := os.ReadFile(rf); err == nil {
+			if total, failed, err := extractTestResults(data, format); err == nil && total > 0 {
+				result.TotalTests = total
+				result.FailedTests = failed
+				result.Passed = total - len(failed)
+				return result, nil
+			}
+		}
+	}
+
+	// Parse stdout/stderr
+	if total, failed, err := extractTestResults(output, format); err == nil && total > 0 {
+		result.TotalTests = total
+		result.FailedTests = failed
+		result.Passed = total - len(failed)
+		return result, nil
+	}
+
+	// Fall back to exit code only
+	if result.ExitCode != 0 {
+		result.FailedTests = []TestFailureDetail{{Name: "(exit code " + strconv.Itoa(result.ExitCode) + ")"}}
+	}
+
+	return result, nil
+}
+
+// detectFlakyTests re-runs failed tests and classifies each as flaky or real.
+// If cmdStr contains {{tests}}, only the failed tests are rerun (targeted).
+// Otherwise the full command is rerun.
+func detectFlakyTests(cmdStr string, failedTests []TestFailureDetail, retries int, format string) (flaky []FlakyTestDetail, real []FlakyTestDetail) {
+	if retries <= 0 || len(failedTests) == 0 {
+		return nil, nil
+	}
+
+	// Build targeted command if possible
+	failedNames := make([]string, len(failedTests))
+	errorMsgs := make(map[string]string)
+	for i, f := range failedTests {
+		failedNames[i] = f.Name
+		errorMsgs[f.Name] = f.ErrorMessage
+	}
+
+	targeted := strings.Contains(cmdStr, "{{tests}}")
+	runCmd := cmdStr
+	if targeted {
+		runCmd = strings.ReplaceAll(cmdStr, "{{tests}}", strings.Join(failedNames, " "))
+	}
+
+	// Track per-test failure counts across retries
+	failCounts := make(map[string]int)
+	completedRetries := 0
+
+	for i := 0; i < retries; i++ {
+		fmt.Fprintf(os.Stderr, "  Flaky detection retry %d/%d...\n", i+1, retries)
+		result, err := runTestCommand(runCmd, nil, format)
+		if err != nil {
+			continue
+		}
+		completedRetries++
+		for _, f := range result.FailedTests {
+			failCounts[f.Name]++
+			// Keep the latest error message
+			if f.ErrorMessage != "" {
+				errorMsgs[f.Name] = f.ErrorMessage
+			}
+		}
+	}
+
+	if completedRetries == 0 {
+		return nil, nil
+	}
+
+	// Classify each originally-failed test
+	for _, name := range failedNames {
+		count := failCounts[name]
+		detail := FlakyTestDetail{
+			Name:         name,
+			ErrorMessage: errorMsgs[name],
+			FailCount:    count,
+			TotalRetries: completedRetries,
+		}
+		if count == 0 {
+			detail.Classification = "flaky"
+			detail.Confidence = 1.0
+		} else if count < completedRetries {
+			detail.Classification = "flaky"
+			detail.Confidence = 1.0 - float64(count)/float64(completedRetries)
+		} else {
+			detail.Classification = "real"
+			detail.Confidence = 1.0
+		}
+
+		if detail.Classification == "flaky" {
+			flaky = append(flaky, detail)
+		} else {
+			real = append(real, detail)
+		}
+	}
+
+	return flaky, real
+}
+
+// computeShadowMetrics computes comparison metrics between selective and full runs
+func computeShadowMetrics(selective, full *ShadowRunResult, plan *CIPlan, flakyTests []FlakyTestDetail) ShadowMetrics {
+	flakySet := make(map[string]bool)
+	for _, f := range flakyTests {
+		flakySet[f.Name] = true
+	}
+
+	// Targets selected by the plan
+	selectedSet := make(map[string]bool)
+	for _, t := range plan.Targets.Run {
+		selectedSet[t] = true
+	}
+
+	// False negatives: tests that failed in full but weren't selected (excluding flaky)
+	var falseNegatives int
+	for _, f := range full.FailedTests {
+		if !flakySet[f.Name] && !selectedSet[f.Name] {
+			falseNegatives++
+		}
+	}
+
+	// False positives: tests selected that passed in full run
+	// (not directly measurable from failed lists, approximate)
+	falsePositives := 0
+
+	testsReduced := full.TotalTests - selective.TotalTests
+	var testsReducedPct float64
+	if full.TotalTests > 0 {
+		testsReducedPct = float64(testsReduced) / float64(full.TotalTests) * 100
+	}
+
+	timeSaved := full.DurationS - selective.DurationS
+	var timeSavedPct float64
+	if full.DurationS > 0 {
+		timeSavedPct = timeSaved / full.DurationS * 100
+	}
+
+	var accuracy float64
+	nonFlakyFailed := 0
+	for _, f := range full.FailedTests {
+		if !flakySet[f.Name] {
+			nonFlakyFailed++
+		}
+	}
+	if nonFlakyFailed > 0 {
+		accuracy = 1.0 - float64(falseNegatives)/float64(nonFlakyFailed)
+	} else {
+		accuracy = 1.0 // No real failures = perfect accuracy
+	}
+
+	return ShadowMetrics{
+		TestsReduced:    testsReduced,
+		TestsReducedPct: testsReducedPct,
+		TimeSavedS:      timeSaved,
+		TimeSavedPct:    timeSavedPct,
+		FalseNegatives:  falseNegatives,
+		FalsePositives:  falsePositives,
+		Accuracy:        accuracy,
+	}
+}
+
+var ciCommentCmd = &cobra.Command{
+	Use:   "comment --report <shadow-report.json>",
+	Short: "Post a CI summary comment on a GitHub Pull Request",
+	Long: `Reads a shadow report JSON and posts a formatted summary as a PR comment.
+
+Auto-detects GitHub context from environment variables:
+  GITHUB_TOKEN       - API token for authentication
+  GITHUB_REPOSITORY  - owner/repo
+  GITHUB_EVENT_PATH  - event payload (to extract PR number)
+  GITHUB_EVENT_NAME  - must be "pull_request" for auto-posting
+
+Use --dry-run to print the comment to stdout without posting.
+
+Examples:
+  kai ci comment --report shadow-report.json
+  kai ci comment --report shadow-report.json --dry-run
+  kai ci comment --report shadow-report.json --token $TOKEN --repo owner/name --pr 42`,
+	Args: cobra.NoArgs,
+	RunE: runCIComment,
+}
+
+func runCIComment(cmd *cobra.Command, args []string) error {
+	// Read the shadow report
+	data, err := os.ReadFile(ciCommentReport)
+	if err != nil {
+		return fmt.Errorf("reading report: %w", err)
+	}
+
+	var report ShadowReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return fmt.Errorf("parsing report: %w", err)
+	}
+
+	// Format the comment
+	comment := formatPRComment(report)
+
+	// Dry run: print to stdout
+	if ciCommentDryRun {
+		fmt.Println(comment)
+		return nil
+	}
+
+	// Resolve GitHub context
+	token := ciCommentToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	repo := ciCommentRepo
+	if repo == "" {
+		repo = os.Getenv("GITHUB_REPOSITORY")
+	}
+	prNum := ciCommentPR
+	if prNum == 0 {
+		prNum = detectPRNumber()
+	}
+
+	// If not in a PR context, just print to stdout
+	if token == "" || repo == "" || prNum == 0 {
+		if os.Getenv("GITHUB_EVENT_NAME") == "push" {
+			fmt.Fprintf(os.Stderr, "Push event detected, skipping PR comment.\n")
+			return nil
+		}
+		if token == "" {
+			fmt.Fprintf(os.Stderr, "No GitHub token available, printing to stdout.\n")
+		} else if prNum == 0 {
+			fmt.Fprintf(os.Stderr, "No PR number detected, printing to stdout.\n")
+		}
+		fmt.Println(comment)
+		return nil
+	}
+
+	// Post or update the comment
+	if err := postOrUpdateGitHubComment(token, repo, prNum, comment); err != nil {
+		// Non-fatal: print to stdout as fallback
+		fmt.Fprintf(os.Stderr, "Warning: could not post GitHub comment: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Printing to stdout instead.\n")
+		fmt.Println(comment)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Posted Kai CI summary to PR #%d\n", prNum)
+	return nil
+}
+
+const kaiCommentMarker = "<!-- kai-ci-summary -->"
+
+func formatPRComment(report ShadowReport) string {
+	var b strings.Builder
+
+	b.WriteString(kaiCommentMarker + "\n")
+	b.WriteString("## Kai CI Summary\n\n")
+
+	// Verdict banner
+	switch report.Verdict {
+	case ShadowVerdictSafe:
+		b.WriteString("**Safe** — No missed failures\n\n")
+	case ShadowVerdictMissed:
+		b.WriteString("**False negative detected** — Kai would have missed a failing test.\n")
+		b.WriteString("Full suite required.\n\n")
+	case ShadowVerdictFallback:
+		reason := report.Fallback.Reason
+		if reason == "" {
+			reason = "risk threshold exceeded"
+		}
+		b.WriteString(fmt.Sprintf("**Fallback triggered:** %s\n", reason))
+		b.WriteString("Full suite executed to preserve safety.\n\n")
+	case ShadowVerdictFlakySuspect:
+		b.WriteString("**Flaky tests detected** — results may be unreliable\n\n")
+	default:
+		b.WriteString(fmt.Sprintf("**Verdict:** %s\n\n", report.Verdict))
+	}
+
+	// CI Time
+	b.WriteString("**CI Time**\n")
+	if report.FullRun != nil {
+		b.WriteString(fmt.Sprintf("Full Suite: %s\n", formatDuration(report.FullRun.DurationS)))
+	}
+	if report.SelectiveRun != nil {
+		b.WriteString(fmt.Sprintf("Kai Plan: %s\n", formatDuration(report.SelectiveRun.DurationS)))
+	}
+	if report.Metrics.TimeSavedPct > 0 {
+		b.WriteString(fmt.Sprintf("Savings: **%.0f%%**\n", report.Metrics.TimeSavedPct))
+	} else if report.Metrics.TimeSavedPct < 0 {
+		b.WriteString(fmt.Sprintf("Overhead: **%.0f%%**\n", -report.Metrics.TimeSavedPct))
+	}
+	b.WriteString("\n")
+
+	// Test Selection
+	b.WriteString("**Test Selection**\n")
+	if report.FullRun != nil {
+		b.WriteString(fmt.Sprintf("Total Tests: %s\n", formatNumber(report.FullRun.TotalTests)))
+	}
+	if report.SelectiveRun != nil {
+		b.WriteString(fmt.Sprintf("Selected: %s\n", formatNumber(report.SelectiveRun.TotalTests)))
+	}
+	if report.Metrics.TestsReducedPct > 0 {
+		b.WriteString(fmt.Sprintf("Reduction: **%.0f%%**\n", report.Metrics.TestsReducedPct))
+	}
+	b.WriteString("\n")
+
+	// Safety details
+	b.WriteString("**Safety**\n")
+	if report.Plan != nil {
+		confLabel := "Low"
+		if report.Plan.Confidence >= 0.8 {
+			confLabel = "High"
+		} else if report.Plan.Confidence >= 0.5 {
+			confLabel = "Medium"
+		}
+		b.WriteString(fmt.Sprintf("Confidence: %s (%.0f%%)\n", confLabel, report.Plan.Confidence*100))
+	}
+	b.WriteString(fmt.Sprintf("False Negatives: %d\n", report.Metrics.FalseNegatives))
+	b.WriteString(fmt.Sprintf("Fallback: %s\n", boolYesNo(report.Fallback.Triggered)))
+	b.WriteString("\n")
+
+	// Flaky tests (if any)
+	if report.Flaky.Detected && len(report.Flaky.FlakyTests) > 0 {
+		b.WriteString("<details>\n<summary>Flaky tests detected</summary>\n\n")
+		for _, t := range report.Flaky.FlakyTests {
+			b.WriteString(fmt.Sprintf("- `%s` (failed %d/%d retries)\n", t.Name, t.FailCount, t.TotalRetries))
+		}
+		b.WriteString("\n</details>\n\n")
+	}
+
+	// Footer
+	kaiVer := report.KaiVersion
+	if kaiVer == "" {
+		kaiVer = Version
+	}
+	b.WriteString(fmt.Sprintf("_Kai %s_\n", kaiVer))
+
+	return b.String()
+}
+
+func formatDuration(seconds float64) string {
+	if seconds >= 60 {
+		m := int(seconds) / 60
+		s := int(seconds) % 60
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%.1fs", seconds)
+}
+
+func formatNumber(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%d,%03d", n/1000, n%1000)
+	}
+	return strconv.Itoa(n)
+}
+
+func boolYesNo(v bool) string {
+	if v {
+		return "Yes"
+	}
+	return "No"
+}
+
+func detectPRNumber() int {
+	eventPath := os.Getenv("GITHUB_EVENT_PATH")
+	if eventPath == "" {
+		return 0
+	}
+	data, err := os.ReadFile(eventPath)
+	if err != nil {
+		return 0
+	}
+	var event struct {
+		PullRequest struct {
+			Number int `json:"number"`
+		} `json:"pull_request"`
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return 0
+	}
+	if event.PullRequest.Number > 0 {
+		return event.PullRequest.Number
+	}
+	return event.Number
+}
+
+func postOrUpdateGitHubComment(token, repo string, prNum int, body string) error {
+	apiBase := "https://api.github.com"
+
+	// List existing comments to find one with our marker
+	listURL := fmt.Sprintf("%s/repos/%s/issues/%d/comments?per_page=100", apiBase, repo, prNum)
+
+	req, err := http.NewRequest("GET", listURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("listing comments: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("listing comments: HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var comments []struct {
+		ID   int    `json:"id"`
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&comments); err != nil {
+		return fmt.Errorf("parsing comments: %w", err)
+	}
+
+	// Find existing Kai comment
+	var existingID int
+	for _, c := range comments {
+		if strings.Contains(c.Body, kaiCommentMarker) {
+			existingID = c.ID
+			break
+		}
+	}
+
+	payload, _ := json.Marshal(map[string]string{"body": body})
+
+	if existingID > 0 {
+		// Update existing comment
+		updateURL := fmt.Sprintf("%s/repos/%s/issues/comments/%d", apiBase, repo, existingID)
+		req, err = http.NewRequest("PATCH", updateURL, bytes.NewReader(payload))
+	} else {
+		// Create new comment
+		createURL := fmt.Sprintf("%s/repos/%s/issues/%d/comments", apiBase, repo, prNum)
+		req, err = http.NewRequest("POST", createURL, bytes.NewReader(payload))
+	}
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("posting comment: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("posting comment: HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// writeShadowJSON writes the shadow report as JSON
+func writeShadowJSON(report ShadowReport, path string) error {
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// writeShadowMarkdown writes a markdown summary of the shadow report
+func writeShadowMarkdown(report ShadowReport, path string) error {
+	var b strings.Builder
+
+	verdictEmoji := map[ShadowVerdict]string{
+		ShadowVerdictSafe:         "OK",
+		ShadowVerdictMissed:       "MISS",
+		ShadowVerdictFallback:     "FALLBACK",
+		ShadowVerdictFlakySuspect: "FLAKY",
+		ShadowVerdictSkipped:      "SKIP",
+	}
+
+	b.WriteString("# Shadow Run Report\n\n")
+	b.WriteString(fmt.Sprintf("**Verdict:** %s %s\n\n", verdictEmoji[report.Verdict], report.Verdict))
+	b.WriteString(fmt.Sprintf("- **Git Range:** `%s`\n", report.GitRange))
+	b.WriteString(fmt.Sprintf("- **Generated:** %s\n", report.GeneratedAt))
+	b.WriteString(fmt.Sprintf("- **Kai Version:** %s\n\n", report.KaiVersion))
+
+	b.WriteString("## Metrics\n\n")
+	b.WriteString("| Metric | Value |\n")
+	b.WriteString("|--------|-------|\n")
+	b.WriteString(fmt.Sprintf("| Tests reduced | %d (%.1f%%) |\n", report.Metrics.TestsReduced, report.Metrics.TestsReducedPct))
+	b.WriteString(fmt.Sprintf("| Time saved | %.1fs (%.1f%%) |\n", report.Metrics.TimeSavedS, report.Metrics.TimeSavedPct))
+	b.WriteString(fmt.Sprintf("| False negatives | %d |\n", report.Metrics.FalseNegatives))
+	b.WriteString(fmt.Sprintf("| Accuracy | %.1f%% |\n\n", report.Metrics.Accuracy*100))
+
+	if report.SelectiveRun != nil {
+		b.WriteString("## Selective Run\n\n")
+		b.WriteString(fmt.Sprintf("- **Command:** `%s`\n", report.SelectiveRun.Command))
+		b.WriteString(fmt.Sprintf("- **Exit code:** %d\n", report.SelectiveRun.ExitCode))
+		b.WriteString(fmt.Sprintf("- **Duration:** %.1fs\n", report.SelectiveRun.DurationS))
+		b.WriteString(fmt.Sprintf("- **Tests:** %d total, %d passed, %d failed\n\n", report.SelectiveRun.TotalTests, report.SelectiveRun.Passed, len(report.SelectiveRun.FailedTests)))
+	}
+
+	if report.FullRun != nil {
+		b.WriteString("## Full Run\n\n")
+		b.WriteString(fmt.Sprintf("- **Command:** `%s`\n", report.FullRun.Command))
+		b.WriteString(fmt.Sprintf("- **Exit code:** %d\n", report.FullRun.ExitCode))
+		b.WriteString(fmt.Sprintf("- **Duration:** %.1fs\n", report.FullRun.DurationS))
+		b.WriteString(fmt.Sprintf("- **Tests:** %d total, %d passed, %d failed\n\n", report.FullRun.TotalTests, report.FullRun.Passed, len(report.FullRun.FailedTests)))
+	}
+
+	if report.Flaky.Detected {
+		b.WriteString("## Flaky Tests\n\n")
+		for _, t := range report.Flaky.FlakyTests {
+			b.WriteString(fmt.Sprintf("- `%s` — %s (confidence: %.0f%%, failed %d/%d retries)\n",
+				t.Name, t.Classification, t.Confidence*100, t.FailCount, t.TotalRetries))
+			if t.ErrorMessage != "" {
+				// Show first line of error message
+				msg := t.ErrorMessage
+				if idx := strings.Index(msg, "\n"); idx > 0 {
+					msg = msg[:idx]
+				}
+				if len(msg) > 120 {
+					msg = msg[:120] + "..."
+				}
+				b.WriteString(fmt.Sprintf("  > %s\n", msg))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if len(report.Flaky.RealTests) > 0 {
+		b.WriteString("## Real Failures\n\n")
+		for _, t := range report.Flaky.RealTests {
+			b.WriteString(fmt.Sprintf("- `%s` (failed %d/%d retries)\n", t.Name, t.FailCount, t.TotalRetries))
+			if t.ErrorMessage != "" {
+				msg := t.ErrorMessage
+				if idx := strings.Index(msg, "\n"); idx > 0 {
+					msg = msg[:idx]
+				}
+				if len(msg) > 120 {
+					msg = msg[:120] + "..."
+				}
+				b.WriteString(fmt.Sprintf("  > %s\n", msg))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if report.Metrics.FalseNegatives > 0 && report.FullRun != nil {
+		selectedSet := make(map[string]bool)
+		if report.Plan != nil {
+			for _, t := range report.Plan.Targets.Run {
+				selectedSet[t] = true
+			}
+		}
+		b.WriteString("## False Negatives (Missed Failures)\n\n")
+		for _, f := range report.FullRun.FailedTests {
+			if !selectedSet[f.Name] {
+				b.WriteString(fmt.Sprintf("- `%s`\n", f.Name))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if report.Fallback.Triggered {
+		b.WriteString("## Fallback\n\n")
+		b.WriteString(fmt.Sprintf("- **Reason:** %s\n", report.Fallback.Reason))
+		b.WriteString(fmt.Sprintf("- **Confidence:** %.0f%%\n\n", report.Fallback.Confidence*100))
+	}
+
+	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+// printShadowSummary prints a summary to stderr
+func printShadowSummary(report ShadowReport) {
+	verdictSymbol := map[ShadowVerdict]string{
+		ShadowVerdictSafe:         "[SAFE]",
+		ShadowVerdictMissed:       "[MISSED]",
+		ShadowVerdictFallback:     "[FALLBACK]",
+		ShadowVerdictFlakySuspect: "[FLAKY]",
+		ShadowVerdictSkipped:      "[SKIPPED]",
+	}
+
+	fmt.Fprintf(os.Stderr, "\n╔══════════════════════════════════════╗\n")
+	fmt.Fprintf(os.Stderr, "║  Shadow Run: %-23s ║\n", verdictSymbol[report.Verdict])
+	fmt.Fprintf(os.Stderr, "╠══════════════════════════════════════╣\n")
+	fmt.Fprintf(os.Stderr, "║  Tests reduced: %4d (%5.1f%%)        ║\n", report.Metrics.TestsReduced, report.Metrics.TestsReducedPct)
+	fmt.Fprintf(os.Stderr, "║  Time saved:   %5.1fs (%5.1f%%)       ║\n", report.Metrics.TimeSavedS, report.Metrics.TimeSavedPct)
+	fmt.Fprintf(os.Stderr, "║  False negatives: %d                 ║\n", report.Metrics.FalseNegatives)
+	fmt.Fprintf(os.Stderr, "║  Accuracy: %5.1f%%                    ║\n", report.Metrics.Accuracy*100)
+	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════╝\n\n")
+}
+
+// generateCIPlanFromGitRange creates an ephemeral CI plan from a git range
+func generateCIPlanFromGitRange(gitRange, repoPath string) (*CIPlan, func(), error) {
+	parts := strings.Split(gitRange, "..")
+	if len(parts) != 2 {
+		return nil, nil, fmt.Errorf("invalid --git-range format: expected BASE..HEAD (e.g., main..feature)")
+	}
+	gitBase, gitHead := parts[0], parts[1]
+
+	// Create temp database
+	tmpDir, err := os.MkdirTemp("", "kai-ci-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	dbPath := filepath.Join(tmpDir, "db.sqlite")
+	objDir := filepath.Join(tmpDir, "objects")
+	os.MkdirAll(objDir, 0755)
+	db, err := graph.Open(dbPath, objDir)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("creating temp database: %w", err)
+	}
+
+	if err := applyDBSchema(db); err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("applying schema: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Creating snapshot from git ref: %s\n", gitBase)
+	baseSnapshotID, err := createSnapshotFromGitRef(db, repoPath, gitBase)
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("creating base snapshot: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Creating snapshot from git ref: %s\n", gitHead)
+	headSnapshotID, err := createSnapshotFromGitRef(db, repoPath, gitHead)
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("creating head snapshot: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Creating changeset...\n")
+	changesetID, err := createChangesetFromSnapshots(db, baseSnapshotID, headSnapshotID, "")
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("creating changeset: %w", err)
+	}
+
+	matcher, _ := loadMatcher()
+	if matcher == nil {
+		matcher = module.NewMatcher(nil)
+	}
+	creator := snapshot.NewCreator(db, matcher)
+
+	changedFiles, err := getChangedFiles(db, creator, baseSnapshotID, headSnapshotID)
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("getting changed files: %w", err)
+	}
+
+	panicSwitch := checkPanicSwitch()
+	ciPolicy, policyHash, err := loadCIPolicy()
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("loading CI policy: %w", err)
+	}
+	envHash := computeEnvHash(ciPolicy.EnvVars)
+
+	var changesetHex, baseHex, headHex string
+	if changesetID != nil {
+		changesetHex = util.BytesToHex(changesetID)
+	}
+	if baseSnapshotID != nil {
+		baseHex = util.BytesToHex(baseSnapshotID)
+	}
+	if headSnapshotID != nil {
+		headHex = util.BytesToHex(headSnapshotID)
+	}
+
+	analyzersUsed := []string{}
+
+	plan := CIPlan{
+		Version:    1,
+		Mode:       "selective",
+		Risk:       "low",
+		SafetyMode: "shadow",
+		Confidence: 1.0,
+		Targets: CITargets{
+			Run:      []string{},
+			Skip:     []string{},
+			Full:     []string{},
+			Tags:     make(map[string][]string),
+			Fallback: false,
+		},
+		Impact: CIImpact{
+			FilesChanged:    changedFiles,
+			SymbolsChanged:  []CISymbolChange{},
+			ModulesAffected: []string{},
+			Uncertainty:     []string{},
+		},
+		Policy: CIPolicy{
+			Strategy:     "auto",
+			Expanded:     false,
+			FallbackUsed: "",
+		},
+		Safety: CISafety{
+			StructuralRisks:  []StructuralRisk{},
+			Confidence:       1.0,
+			RecommendFull:    false,
+			PanicSwitch:      panicSwitch,
+			AutoExpanded:     false,
+			ExpansionReasons: []string{},
+		},
+		Uncertainty: CIUncertainty{
+			Score:   0,
+			Sources: []string{},
+		},
+		ExpansionLog: []string{},
+		Provenance: CIProvenance{
+			Changeset:       changesetHex,
+			Base:            baseHex,
+			Head:            headHex,
+			KaiVersion:      Version,
+			DetectorVersion: DetectorVersion,
+			GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+			Analyzers:       analyzersUsed,
+			PolicyHash:      policyHash,
+			EnvHash:         envHash,
+		},
+		Prediction: CIPrediction{},
+	}
+
+	files, err := creator.GetSnapshotFiles(headSnapshotID)
+	if err != nil {
+		db.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	allTestFiles := getAllTestFiles(files)
+
+	if panicSwitch {
+		plan.Mode = "full"
+		plan.Targets.Run = allTestFiles
+		plan.Safety.RecommendFull = true
+		plan.Safety.RecommendReason = "Panic switch activated"
+	} else if len(changedFiles) == 0 {
+		plan.Mode = "skip"
+	} else {
+		affectedTargets := make(map[string]bool)
+		filePathByID := make(map[string]string)
+		for _, f := range files {
+			path, _ := f.Payload["path"].(string)
+			idHex := util.BytesToHex(f.ID)
+			filePathByID[idHex] = path
+		}
+
+		// Use import graph
+		analyzersUsed = append(analyzersUsed, "imports@1")
+		for _, changedPath := range changedFiles {
+			testsEdges, _ := db.GetEdgesToByPath(changedPath, graph.EdgeTests)
+			for _, e := range testsEdges {
+				srcHex := util.BytesToHex(e.Src)
+				if path, ok := filePathByID[srcHex]; ok {
+					affectedTargets[path] = true
+				} else if srcNode, err := db.GetNode(e.Src); err == nil && srcNode != nil {
+					if srcPath, ok := srcNode.Payload["path"].(string); ok {
+						affectedTargets[srcPath] = true
+					}
+				}
+			}
+			importsEdges, _ := db.GetEdgesToByPath(changedPath, graph.EdgeImports)
+			for _, e := range importsEdges {
+				srcHex := util.BytesToHex(e.Src)
+				if path, ok := filePathByID[srcHex]; ok {
+					if parse.IsTestFile(path) {
+						affectedTargets[path] = true
+					}
+				} else if srcNode, err := db.GetNode(e.Src); err == nil && srcNode != nil {
+					if srcPath, ok := srcNode.Payload["path"].(string); ok {
+						if parse.IsTestFile(srcPath) {
+							affectedTargets[srcPath] = true
+						}
+					}
+				}
+			}
+		}
+
+		// Also check coverage if enabled
+		if ciPolicy.Coverage.Enabled {
+			coverageMap := loadOrCreateCoverageMap()
+			for _, changedPath := range changedFiles {
+				if parse.IsTestFile(changedPath) {
+					continue
+				}
+				entries, hasCoverage := coverageMap.Entries[changedPath]
+				if !hasCoverage {
+					for mapPath, mapEntries := range coverageMap.Entries {
+						if strings.HasSuffix(mapPath, changedPath) || strings.HasSuffix(changedPath, mapPath) {
+							entries = mapEntries
+							hasCoverage = true
+							break
+						}
+					}
+				}
+				if hasCoverage {
+					for _, entry := range entries {
+						if entry.HitCount >= ciPolicy.Coverage.MinHits && entry.TestID != "aggregate" && entry.TestID != "" {
+							affectedTargets[entry.TestID] = true
+						}
+					}
+				}
+			}
+		}
+
+		for t := range affectedTargets {
+			plan.Targets.Run = append(plan.Targets.Run, t)
+		}
+		sort.Strings(plan.Targets.Run)
+
+		plan.Targets.Full = allTestFiles
+		plan.Prediction = CIPrediction{
+			SelectiveTests: len(plan.Targets.Run),
+			FullTests:      len(allTestFiles),
+		}
+		if len(allTestFiles) > 0 {
+			plan.Prediction.PredictedSavings = float64(len(allTestFiles)-len(plan.Targets.Run)) / float64(len(allTestFiles)) * 100
+		}
+
+		confidence := 1.0
+		if len(plan.Targets.Run) == 0 && len(changedFiles) > 0 {
+			confidence = 0.5
+			plan.Risk = "medium"
+		}
+		plan.Safety.Confidence = confidence
+		plan.Confidence = confidence
+		plan.Provenance.Analyzers = analyzersUsed
+	}
+
+	db.Close()
+
+	return &plan, cleanup, nil
+}
+
+// runShadowRun is the main orchestration function for shadow run
+func runShadowRun(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("shadow_run")
+	defer te.Finish()
+
+	fmt.Fprintf(os.Stderr, "Generating CI plan from git range: %s\n", shadowGitRange)
+	plan, cleanup, err := generateCIPlanFromGitRange(shadowGitRange, shadowGitRepo)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		return fmt.Errorf("generating CI plan: %w", err)
+	}
+
+	te.SetPhase("plan", 0)
+
+
+	// Check fallback
+	fallbackInfo := ShadowFallbackInfo{}
+	if plan.Safety.RecommendFull {
+		fallbackInfo.Triggered = true
+		fallbackInfo.Reason = plan.Safety.RecommendReason
+		fallbackInfo.Confidence = plan.Safety.Confidence
+	}
+
+	// Run selective tests
+	fmt.Fprintf(os.Stderr, "Running selective tests (%d targets)...\n", len(plan.Targets.Run))
+	selectiveResult, err := runTestCommand(shadowKaiCmd, plan.Targets.Run, shadowResultFormat)
+	if err != nil {
+		return fmt.Errorf("running selective tests: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Selective: exit=%d duration=%.1fs tests=%d failed=%d\n",
+		selectiveResult.ExitCode, selectiveResult.DurationS, selectiveResult.TotalTests, len(selectiveResult.FailedTests))
+
+	// Short-circuit if selective fails and --skip-full-on-fail
+	if shadowSkipFullOnFail && selectiveResult.ExitCode != 0 {
+		report := ShadowReport{
+			Version:      1,
+			GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+			KaiVersion:   Version,
+			GitRange:     shadowGitRange,
+			Plan:         plan,
+			Verdict:      ShadowVerdictSafe,
+			SelectiveRun: selectiveResult,
+			Metrics:      ShadowMetrics{Accuracy: 1.0},
+			Flaky:        ShadowFlakyInfo{},
+			Fallback:     fallbackInfo,
+		}
+		if shadowOutJSON != "" {
+			if err := writeShadowJSON(report, shadowOutJSON); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not write JSON report: %v\n", err)
+			}
+		}
+		if shadowOutMD != "" {
+			if err := writeShadowMarkdown(report, shadowOutMD); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not write markdown summary: %v\n", err)
+			}
+		}
+		printShadowSummary(report)
+		te.SetPhase("verdict_"+string(report.Verdict), 0)
+		return nil
+	}
+
+	// Run full tests
+	fmt.Fprintf(os.Stderr, "Running full test suite...\n")
+	fullResult, err := runTestCommand(shadowFullCmd, nil, shadowResultFormat)
+	if err != nil {
+		return fmt.Errorf("running full tests: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Full: exit=%d duration=%.1fs tests=%d failed=%d\n",
+		fullResult.ExitCode, fullResult.DurationS, fullResult.TotalTests, len(fullResult.FailedTests))
+
+	// Detect flaky tests if there are failures and retries requested
+	var flakyDetails, realDetails []FlakyTestDetail
+	if len(fullResult.FailedTests) > 0 && shadowRetries > 0 {
+		fmt.Fprintf(os.Stderr, "Detecting flaky tests (%d retries)...\n", shadowRetries)
+		flakyDetails, realDetails = detectFlakyTests(shadowFullCmd, fullResult.FailedTests, shadowRetries, shadowResultFormat)
+		if len(flakyDetails) > 0 {
+			fmt.Fprintf(os.Stderr, "  Found %d flaky tests, %d real failures\n", len(flakyDetails), len(realDetails))
+		}
+	}
+
+	// Compute metrics
+	metrics := computeShadowMetrics(selectiveResult, fullResult, plan, flakyDetails)
+
+	// Determine verdict
+	verdict := ShadowVerdictSafe
+	if metrics.FalseNegatives > 0 {
+		verdict = ShadowVerdictMissed
+	} else if len(flakyDetails) > 0 {
+		verdict = ShadowVerdictFlakySuspect
+	} else if fallbackInfo.Triggered {
+		verdict = ShadowVerdictFallback
+	}
+
+	flakyInfo := ShadowFlakyInfo{
+		Detected:   len(flakyDetails) > 0,
+		FlakyTests: flakyDetails,
+		RealTests:  realDetails,
+		Retries:    shadowRetries,
+	}
+
+	// Persist flaky history
+	if len(flakyDetails) > 0 {
+		_ = appendFlakyRecord(FlakyHistoryRecord{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			GitRange:  shadowGitRange,
+			Tests:     flakyDetails,
+		})
+	}
+
+	report := ShadowReport{
+		Version:      1,
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+		KaiVersion:   Version,
+		GitRange:     shadowGitRange,
+		Plan:         plan,
+		Verdict:      verdict,
+		SelectiveRun: selectiveResult,
+		FullRun:      fullResult,
+		Metrics:      metrics,
+		Flaky:        flakyInfo,
+		Fallback:     fallbackInfo,
+	}
+
+	// Write reports
+	if shadowOutJSON != "" {
+		if err := writeShadowJSON(report, shadowOutJSON); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write JSON report: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "JSON report written to %s\n", shadowOutJSON)
+		}
+	}
+	if shadowOutMD != "" {
+		if err := writeShadowMarkdown(report, shadowOutMD); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not write markdown summary: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Markdown summary written to %s\n", shadowOutMD)
+		}
+	}
+
+	printShadowSummary(report)
+	te.SetPhase("verdict_"+string(verdict), 0)
+
+	// Record misses for learning data
+	if verdict == ShadowVerdictMissed {
+		selectedSet := make(map[string]bool)
+		for _, t := range plan.Targets.Run {
+			selectedSet[t] = true
+		}
+		var missedTests []string
+		var failedNames []string
+		for _, f := range fullResult.FailedTests {
+			failedNames = append(failedNames, f.Name)
+			if !selectedSet[f.Name] {
+				missedTests = append(missedTests, f.Name)
+			}
+		}
+		_ = appendMissRecord(MissRecord{
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+			PlanProvenance: plan.Provenance,
+			FailedTests:    failedNames,
+			SelectedTests:  plan.Targets.Run,
+			MissedTests:    missedTests,
+		})
+		return fmt.Errorf("shadow run verdict: missed (%d false negatives)", metrics.FalseNegatives)
+	}
+
 	return nil
 }

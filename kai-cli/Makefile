@@ -1,4 +1,4 @@
-.PHONY: build test fmt clean
+.PHONY: build test fmt clean bench
 
 build:
 	CGO_ENABLED=1 go build -o kai ./cmd/kai
@@ -12,6 +12,9 @@ fmt:
 clean:
 	rm -f kai
 	rm -rf testdata/repo/.kai
+
+bench: build
+	../bench/run.sh -k ./kai --skip-build
 
 # Run the demo workflow
 demo: build

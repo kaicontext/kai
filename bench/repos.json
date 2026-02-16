@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "name": "graphql-js",
+      "url": "https://github.com/graphql/graphql-js.git",
+      "head_commit": "3f8f27a39d95920c93c0d65a1d3eb739b56a7e21",
+      "base_commit": "b34a4cdc6d391c45eb005aa21145dbfc3ae2b0c6",
+      "install": "npm install",
+      "full_test": "npx mocha --reporter json --full-trace src/**/__tests__/**/*-test.ts > test-results.json 2>/dev/null",
+      "kai_test": "npx mocha --reporter json --full-trace {{tests}} > test-results.json 2>/dev/null",
+      "format": "jest",
+      "timeout_s": 120,
+      "size_class": "medium"
+    },
+    {
+      "name": "valibot",
+      "url": "https://github.com/fabian-hiller/valibot.git",
+      "head_commit": "f1f505dbba64e420f6e715d37a3f0c7795ffc8fb",
+      "base_commit": "418ca8372bf9ab59d2232ef80be501320f9085c2",
+      "install": "pnpm install",
+      "full_test": "cd library && npx vitest run --reporter=json --outputFile=test-results.json",
+      "kai_test": "cd library && npx vitest run --reporter=json --outputFile=test-results.json {{tests}}",
+      "format": "jest",
+      "timeout_s": 180,
+      "size_class": "large",
+      "strip_prefix": "library/"
+    }
+  ]
+}

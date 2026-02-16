@@ -3,6 +3,7 @@
 
 stages:
   - test
+  - correctness
   - build
   - release
   - deploy
@@ -61,6 +62,99 @@ test:kailab-control:
   script:
     - cd kailab-control
     - go test ./...
+
+# Correctness: regression tests (graph, selection, shadow, flaky, CLI, perf)
+correctness:regression:
+  stage: correctness
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev git
+  script:
+    - cd kai-cli
+    - CGO_ENABLED=1 go test ./cmd/kai/
+      -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_"
+      -v -count=1 -timeout 120s 2>&1 | tee /tmp/regression.log
+  artifacts:
+    when: always
+    paths:
+      - /tmp/regression.log
+    expire_in: 2 weeks
+
+# Correctness: determinism (same input twice = identical graph)
+correctness:determinism:
+  stage: correctness
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev git sqlite
+  script:
+    - cd kai-cli
+    - CGO_ENABLED=1 go build -o /tmp/kai ./cmd/kai
+    - mkdir -p /tmp/fixture/src /tmp/fixture/tests
+    - |
+      cat > /tmp/fixture/src/utils.ts << 'EOF'
+      export function add(a: number, b: number) { return a + b; }
+      export function multiply(a: number, b: number) { return a * b; }
+      EOF
+    - |
+      cat > /tmp/fixture/src/app.ts << 'EOF'
+      import { add, multiply } from './utils';
+      export const sum = add(1, 2);
+      export const product = multiply(3, 4);
+      EOF
+    - |
+      cat > /tmp/fixture/tests/app.test.ts << 'EOF'
+      import { sum, product } from '../src/app';
+      test('sum', () => expect(sum).toBe(3));
+      test('product', () => expect(product).toBe(12));
+      EOF
+    - cp -r /tmp/fixture /tmp/run1 && cd /tmp/run1 && /tmp/kai init && /tmp/kai capture .
+    - sqlite3 /tmp/run1/.kai/db.sqlite "SELECT kind, payload FROM nodes ORDER BY kind, payload" > /tmp/nodes1.txt
+    - sqlite3 /tmp/run1/.kai/db.sqlite "SELECT src, type, dst FROM edges ORDER BY src, type, dst" > /tmp/edges1.txt
+    - cp -r /tmp/fixture /tmp/run2 && cd /tmp/run2 && /tmp/kai init && /tmp/kai capture .
+    - sqlite3 /tmp/run2/.kai/db.sqlite "SELECT kind, payload FROM nodes ORDER BY kind, payload" > /tmp/nodes2.txt
+    - sqlite3 /tmp/run2/.kai/db.sqlite "SELECT src, type, dst FROM edges ORDER BY src, type, dst" > /tmp/edges2.txt
+    - diff /tmp/nodes1.txt /tmp/nodes2.txt || { echo "FAIL: node nondeterminism"; exit 1; }
+    - diff /tmp/edges1.txt /tmp/edges2.txt || { echo "FAIL: edge nondeterminism"; exit 1; }
+    - echo "PASS: determinism verified"
+  artifacts:
+    when: always
+    paths:
+      - /tmp/nodes1.txt
+      - /tmp/nodes2.txt
+      - /tmp/edges1.txt
+      - /tmp/edges2.txt
+    expire_in: 2 weeks
+
+# Correctness: shadow mode — 0 false negatives
+correctness:shadow:
+  stage: correctness
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev git
+  script:
+    - cd kai-cli
+    - CGO_ENABLED=1 go test ./cmd/kai/
+      -run "TestShadow_|TestSelection_|TestFalseNeg_"
+      -v -count=1 -timeout 120s 2>&1 | tee /tmp/shadow.log
+    - "! grep -q 'FALSE NEGATIVE' /tmp/shadow.log || { echo 'FAIL: false negatives detected'; exit 1; }"
+    - echo "PASS: 0 false negatives"
+  artifacts:
+    when: always
+    paths:
+      - /tmp/shadow.log
+    expire_in: 2 weeks
+
+# Correctness: flaky classification
+correctness:flaky:
+  stage: correctness
+  image: golang:1.24-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev
+  script:
+    - cd kai-cli
+    - CGO_ENABLED=1 go test ./cmd/kai/
+      -run "TestFlaky_"
+      -v -count=1 -timeout 60s
 
 # Build kailab (data plane)
 build:kailab:

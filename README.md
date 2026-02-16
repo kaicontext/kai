@@ -4191,10 +4191,16 @@ make build
 
 ## License
 
-GPLv3 License - See LICENSE file for details.
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
 ---
 
+## Architecture
+
+Kai is open-core: the CLI and core engine are Apache 2.0, while Kai Cloud adds hosted infrastructure features. See [What's Open Source vs What's in Kai Cloud](docs/architecture-boundary.md) for the full breakdown.
+
 ## Contributing
 
-Contributions are welcome! Please read the contributing guidelines and submit pull requests to the main repository.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and how to submit changes.
