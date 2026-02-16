@@ -70,7 +70,7 @@ check_file() {
 
 # Find source files, excluding vendor/node_modules/testdata/generated
 find_sources() {
-    find kai-core kai-cli kailab kailab-control/internal kailab-control/cmd \
+    find kai-core kai-cli \
         -type f \( -name '*.go' -o -name '*.sh' \) \
         ! -path '*/vendor/*' \
         ! -path '*/node_modules/*' \

@@ -44,7 +44,5 @@ This policy covers the Kai open-source repository, including:
 
 - `kai-cli` (CLI binary)
 - `kai-core` (core engine)
-- `kailab` (data plane)
-- `kailab-control` (control plane)
 
 Third-party dependencies are not directly in scope, but we appreciate reports about vulnerable dependencies.

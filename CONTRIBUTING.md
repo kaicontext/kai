@@ -21,14 +21,6 @@ CGO_ENABLED=1 go build ./cmd/kai
 # Core library
 cd kai-core
 CGO_ENABLED=1 go build ./...
-
-# Data plane
-cd kailab
-CGO_ENABLED=1 go build ./cmd/kailab
-
-# Control plane
-cd kailab-control
-go build ./cmd/kailab-control
 ```
 
 ### Run Tests
@@ -37,8 +29,6 @@ go build ./cmd/kailab-control
 # All tests
 cd kai-cli && CGO_ENABLED=1 go test ./...
 cd kai-core && CGO_ENABLED=1 go test ./...
-cd kailab && CGO_ENABLED=1 go test ./...
-cd kailab-control && go test ./...
 
 # Regression suite only
 cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
@@ -54,9 +44,9 @@ cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
 ```
 kai-cli/           CLI binary (commands, CI plan, shadow mode)
 kai-core/          Core engine (tree-sitter parsing, graph, snapshots)
-kailab/            Data plane (git protocol, object storage)
-kailab-control/    Control plane (auth, orgs, CI runner)
 bench/             Benchmark harness
+docs/              Open-core boundary, licensing, and architecture docs
+scripts/           Enforcement and utility scripts
 ```
 
 ## Making Changes
@@ -98,14 +88,6 @@ Added export_statement case with parseReexportSource helper.
   cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ -run "TestFalseNeg_" -v
   ```
 
-### Database Migrations
-
-If your change modifies the schema:
-
-1. Add a numbered migration in `internal/db/schema/` (e.g., `0005_feature.sql`)
-2. Create both SQLite (`*.sql`) and PostgreSQL (`*_pg.sql`) versions
-3. Use `INTEGER` for timestamps (Unix seconds)
-4. Use `newUUID()` for IDs
 
 ## Developer Certificate of Origin (DCO)
 

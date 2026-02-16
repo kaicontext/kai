@@ -1,4 +1,0 @@
-# Copy to terraform.tfvars and fill in values
-zone_id    = "your-cloudflare-zone-id"
-domain     = "example.com"
-ingress_ip = "34.30.21.207"

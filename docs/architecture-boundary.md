@@ -8,7 +8,6 @@ The entire Kai CLI and core engine are open source under Apache 2.0. This includ
 |-----------|-------------|---------|
 | `kai-core` | Tree-sitter parsing, semantic graph, diffing, merging, change detection, intent generation | Apache 2.0 |
 | `kai-cli` | All CLI commands (`capture`, `diff`, `review`, `ci plan`, `workspace`), local SQLite graph store, Git integration | Apache 2.0 |
-| `kailab` | Data plane server (Git protocol, object storage, refs, pack files) | Apache 2.0 |
 
 ### What you can do with OSS Kai
 
@@ -52,12 +51,6 @@ We believe the core engine should be open so that:
 - Local-only workflows will never require a Kai Cloud account
 - The `store.Store` interface is a stable API — alternative storage backends will always be supported
 
-## Self-hosting
-
-You can run your own Kailab data plane server for team collaboration without Kai Cloud. The `kailab` server handles Git protocol, object storage, and refs. See the deployment docs for setup instructions.
-
-The control plane (`kailab-control`) provides auth, org management, and CI orchestration. It can also be self-hosted but requires PostgreSQL and optionally Kubernetes for CI runner support.
-
 ## Architecture
 
 ```
@@ -74,14 +67,8 @@ The control plane (`kailab-control`) provides auth, org management, and CI orche
 └──────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────┐
-│  kailab (Apache 2.0)                     │
-│  Data plane: Git protocol, storage       │
-│  Self-hostable                           │
-└──────────────────────────────────────────┘
-
-┌──────────────────────────────────────────┐
-│  Kai Cloud (Proprietary)                 │
-│  Hosted infra, analytics, enterprise     │
+│  Kai Cloud (Proprietary — separate repo) │
+│  Data plane, control plane, hosted infra │
 │  Optional — OSS works without it         │
 └──────────────────────────────────────────┘
 ```

@@ -23,11 +23,6 @@ kai-cli/testdata/repo
 
 # Project binaries
 kai-cli/kai
-kailab/kailabd
-
-# Kailab data
-kailab/.kailab/
-kailab/data/
 
 # IDE and editor
 .idea/
@@ -40,7 +35,6 @@ kailab/data/
 .DS_Store
 Thumbs.db
 .kai/
-kailab-control/internal/api/web/_app/
 
 # Benchmark repo caches and artifacts
 bench/.repo-cache/

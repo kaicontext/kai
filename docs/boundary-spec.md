@@ -1,8 +1,8 @@
-# Boundary Spec: OSS vs SaaS Module Map
+# Boundary Spec: OSS vs Proprietary Module Map
 
 ## Module Classification
 
-### OSS (Apache 2.0)
+### OSS (Apache 2.0) — This Repository
 
 #### kai-core/ — Pure semantic engine
 - `cas/` — Content-addressable storage (BLAKE3 hashing, canonical JSON)
@@ -33,7 +33,7 @@
 - `internal/module/` — Module matching
 - `internal/parse/` — Parser wrapper
 - `internal/ref/` — Named reference management
-- `internal/remote/` — HTTP client for Kailab servers
+- `internal/remote/` — HTTP client for remote servers
 - `internal/review/` — Review creation and management
 - `internal/signing/` — SSH signing
 - `internal/snapshot/` — Snapshot creation
@@ -42,47 +42,37 @@
 
 **Constraints:** All core commands work offline. Remote features are opt-in.
 
-#### kailab/ — Self-hostable data plane
-- `api/` — HTTP API (push, fetch, refs, objects, diffs)
-- `cmd/kailabd/` — Server binary
-- `data/` — On-disk repository storage
-- `pack/` — Pack file handling
-- `repo/` — Repository management
-- `sshserver/` — SSH Git protocol handler
-- `store/` — Storage implementation
+### Proprietary — Separate Repository (kai-server)
 
-### SaaS (Proprietary — Kai Cloud)
+All server infrastructure lives in a separate private repository:
 
-These features live in separate closed-source infrastructure:
+- **kailab/** — Data plane (Git protocol, object storage, SSH server)
+- **kailab-control/** — Control plane (auth, orgs, repos, CI runner, web UI)
+- **deploy/** — Kubernetes, CloudBuild, Cloudflare configs
 
-| Feature | Why closed |
-|---------|-----------|
+| Feature | Why it's separate |
+|---------|------------------|
+| Data plane server | Multi-tenant infrastructure |
+| Control plane (auth, orgs) | SaaS-specific |
+| CI runner (Kubernetes) | Managed compute |
 | Hosted multi-repo graph index | Multi-tenant persistent storage |
-| Cross-branch artifact reuse | Shared cache across users/branches |
 | Org-wide analytics dashboards | Aggregated org data |
-| Risk scoring + policy engine | ML models trained on org history |
 | Enterprise RBAC/SSO/audit | Multi-tenant auth compliance |
-
-### Hybrid — kailab-control/
-
-The control plane contains both OSS-compatible and cloud-specific code:
-
-- **OSS-friendly:** Auth service, org/repo management, workflow parser, basic CI runner
-- **Cloud-specific:** GCS storage backend, Kubernetes runner orchestration, shard routing
-
-Future work: Extract cloud-specific backends behind interfaces so the control plane can run in a minimal self-hosted configuration without GCS or Kubernetes.
 
 ## Boundary Enforcement
 
-### Current state (already clean)
+### Structural enforcement
 
-1. **kai-core has zero network dependencies** — go.mod contains only tree-sitter, BLAKE3, doublestar, yaml
-2. **kai-cli does not import kailab or kailab-control** — communicates via HTTP only
+1. **Server code is not in this repository** — kailab, kailab-control, deploy are in a separate private repo
+2. **kai-core has zero network dependencies** — go.mod contains only tree-sitter, BLAKE3, doublestar, yaml
 3. **Cloud URLs are configurable** — `KAI_SERVER` env var or `kai remote set`
 4. **Telemetry is opt-in** — disabled by default in CI, controlled via `KAI_TELEMETRY`
 
-### CI enforcement (planned)
+### CI enforcement
 
-- Lint check: forbid `net/http` imports in kai-core
-- Lint check: forbid kailab/kailab-control imports in kai-cli Go packages
-- Lint check: forbid hardcoded cloud URLs in kai-core
+`scripts/check-core-purity.sh` runs in CI and fails if:
+- Server/cloud directories exist in this repo
+- `net/http` appears in kai-core imports
+- Cloud SDK dependencies appear in kai-core/go.mod
+- Cloud URLs are hardcoded in kai-core
+- Proprietary concepts (tenant, org_id, sso, rbac, billing) appear in kai-core
