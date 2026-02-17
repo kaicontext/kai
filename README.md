@@ -97,6 +97,10 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 Kai is open-core: the CLI and core engine are Apache 2.0, while Kai Cloud adds hosted infrastructure features. See [What's Open Source vs What's in Kai Cloud](docs/architecture-boundary.md) for the full breakdown.
 
+## Roadmap
+
+See what we're working on: [Kai Roadmap](https://github.com/orgs/kailayerhq/projects/1)
+
 ## Community
 
 Join the conversation:
