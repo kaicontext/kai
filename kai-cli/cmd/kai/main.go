@@ -491,6 +491,7 @@ var (
 	ciExplain    bool   // Output human-readable explanation
 	ciGitRange   string // BASE..HEAD format for git-based CI plan
 	ciGitRepo    string // Git repo path for --git-range
+	ciNoFast     bool   // Skip fast path, force full snapshot
 	ciPlanFile   string
 	ciSection    string
 	// detect-runtime-risk flags
@@ -1929,6 +1930,7 @@ func init() {
 	ciPlanCmd.Flags().BoolVar(&ciExplain, "explain", false, "Output human-readable explanation table instead of JSON")
 	ciPlanCmd.Flags().StringVar(&ciGitRange, "git-range", "", "Git range BASE..HEAD to create changeset from (e.g., main..feature)")
 	ciPlanCmd.Flags().StringVar(&ciGitRepo, "repo", ".", "Path to Git repository (used with --git-range)")
+	ciPlanCmd.Flags().BoolVar(&ciNoFast, "no-fast", false, "Skip fast diff-only path and force full snapshot")
 	ciPrintCmd.Flags().StringVar(&ciPlanFile, "plan", "plan.json", "Path to plan file")
 	ciPrintCmd.Flags().StringVar(&ciSection, "section", "summary", "Section to display: targets, impact, summary")
 	// detect-runtime-risk flags
@@ -14801,6 +14803,219 @@ func printShadowSummary(report ShadowReport) {
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════╝\n\n")
 }
 
+// extractAllTestFilesFromCoverage collects unique test file paths from coverage map entries.
+func extractAllTestFilesFromCoverage(cm *CoverageMap) []string {
+	seen := make(map[string]bool)
+	for _, entries := range cm.Entries {
+		for _, entry := range entries {
+			if entry.TestID != "" && entry.TestID != "aggregate" {
+				seen[entry.TestID] = true
+			}
+		}
+	}
+	// Also include coverage map keys that are test files
+	for path := range cm.Entries {
+		if parse.IsTestFile(path) {
+			seen[path] = true
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for t := range seen {
+		result = append(result, t)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// generateCIPlanFast creates a CI plan using git diff + coverage map, skipping full snapshots.
+func generateCIPlanFast(gitBase, gitHead, repoPath string, coverageMap *CoverageMap) (*CIPlan, func(), error) {
+	start := time.Now()
+
+	// Open repo and resolve refs
+	repo, err := gitio.Open(repoPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening repo: %w", err)
+	}
+	baseCommit, err := repo.ResolveRef(gitBase)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving base ref %s: %w", gitBase, err)
+	}
+	headCommit, err := repo.ResolveRef(gitHead)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving head ref %s: %w", gitHead, err)
+	}
+
+	// Git diff — no file reading needed
+	added, modified, deleted, err := repo.DiffFiles(baseCommit, headCommit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("computing diff: %w", err)
+	}
+	changedFiles := make([]string, 0, len(added)+len(modified)+len(deleted))
+	changedFiles = append(changedFiles, added...)
+	changedFiles = append(changedFiles, modified...)
+	changedFiles = append(changedFiles, deleted...)
+
+	if len(changedFiles) == 0 {
+		plan := CIPlan{
+			Version:    1,
+			Mode:       "skip",
+			Risk:       "low",
+			SafetyMode: "shadow",
+			Confidence: 1.0,
+			Targets:    CITargets{Run: []string{}, Skip: []string{}, Full: []string{}, Tags: make(map[string][]string)},
+			Impact:     CIImpact{FilesChanged: []string{}, SymbolsChanged: []CISymbolChange{}, ModulesAffected: []string{}, Uncertainty: []string{}},
+			Policy:     CIPolicy{Strategy: "coverage-fast"},
+			Safety:     CISafety{StructuralRisks: []StructuralRisk{}, Confidence: 1.0, ExpansionReasons: []string{}},
+			Uncertainty: CIUncertainty{Sources: []string{}},
+			ExpansionLog: []string{},
+			Provenance: CIProvenance{
+				KaiVersion:      Version,
+				DetectorVersion: DetectorVersion,
+				GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+				Analyzers:       []string{"coverage-fast@1"},
+			},
+		}
+		elapsed := time.Since(start)
+		fmt.Fprintf(os.Stderr, "Fast path: 0 changed files, skip (%.1fs)\n", elapsed.Seconds())
+		return &plan, func() {}, nil
+	}
+
+	// Load CI policy for MinHits threshold
+	ciPolicy, policyHash, err := loadCIPolicy()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading CI policy: %w", err)
+	}
+	envHash := computeEnvHash(ciPolicy.EnvVars)
+	panicSwitch := checkPanicSwitch()
+
+	// Get all test files from coverage map
+	allTestFiles := extractAllTestFilesFromCoverage(coverageMap)
+
+	// Look up changed files in coverage map
+	affectedTargets := make(map[string]bool)
+	filesWithCoverage := 0
+	filesWithoutCoverage := 0
+
+	for _, path := range changedFiles {
+		if parse.IsTestFile(path) {
+			affectedTargets[path] = true // Changed test always runs
+			continue
+		}
+		entries, has := coverageMap.Entries[path]
+		if !has {
+			// Try suffix matching (same logic as existing full path)
+			for mapPath, mapEntries := range coverageMap.Entries {
+				if strings.HasSuffix(mapPath, path) || strings.HasSuffix(path, mapPath) {
+					entries = mapEntries
+					has = true
+					break
+				}
+			}
+		}
+		if has {
+			filesWithCoverage++
+			for _, entry := range entries {
+				if entry.TestID != "aggregate" && entry.TestID != "" {
+					if entry.HitCount >= ciPolicy.Coverage.MinHits {
+						affectedTargets[entry.TestID] = true
+					}
+				}
+			}
+		} else {
+			filesWithoutCoverage++
+		}
+	}
+
+	// Build the plan
+	plan := CIPlan{
+		Version:    1,
+		Mode:       "selective",
+		Risk:       "low",
+		SafetyMode: "shadow",
+		Confidence: 1.0,
+		Targets: CITargets{
+			Run:  []string{},
+			Skip: []string{},
+			Full: allTestFiles,
+			Tags: make(map[string][]string),
+		},
+		Impact: CIImpact{
+			FilesChanged:    changedFiles,
+			SymbolsChanged:  []CISymbolChange{},
+			ModulesAffected: []string{},
+			Uncertainty:     []string{},
+		},
+		Policy: CIPolicy{
+			Strategy: "coverage-fast",
+		},
+		Safety: CISafety{
+			StructuralRisks:  []StructuralRisk{},
+			Confidence:       1.0,
+			PanicSwitch:      panicSwitch,
+			ExpansionReasons: []string{},
+		},
+		Uncertainty: CIUncertainty{
+			Sources: []string{},
+		},
+		ExpansionLog: []string{},
+		Provenance: CIProvenance{
+			KaiVersion:      Version,
+			DetectorVersion: DetectorVersion,
+			GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+			Analyzers:       []string{"coverage-fast@1"},
+			PolicyHash:      policyHash,
+			EnvHash:         envHash,
+		},
+	}
+
+	if panicSwitch {
+		plan.Mode = "full"
+		plan.Targets.Run = allTestFiles
+		plan.Safety.RecommendFull = true
+		plan.Safety.RecommendReason = "Panic switch activated"
+	} else {
+		for t := range affectedTargets {
+			plan.Targets.Run = append(plan.Targets.Run, t)
+		}
+		sort.Strings(plan.Targets.Run)
+
+		plan.Prediction = CIPrediction{
+			SelectiveTests: len(plan.Targets.Run),
+			FullTests:      len(allTestFiles),
+		}
+		if len(allTestFiles) > 0 {
+			plan.Prediction.PredictedSavings = float64(len(allTestFiles)-len(plan.Targets.Run)) / float64(len(allTestFiles)) * 100
+		}
+
+		// Safety: lower confidence if changed files have no coverage
+		confidence := 1.0
+		if filesWithoutCoverage > 0 {
+			// Scale confidence down based on uncovered files
+			coveredRatio := float64(filesWithCoverage) / float64(filesWithCoverage+filesWithoutCoverage)
+			confidence = 0.5 + 0.5*coveredRatio
+			if confidence < 0.7 {
+				plan.Risk = "medium"
+			}
+			plan.Safety.StructuralRisks = append(plan.Safety.StructuralRisks, StructuralRisk{
+				Type:        "uncovered-files",
+				Description: fmt.Sprintf("%d changed files have no coverage data", filesWithoutCoverage),
+			})
+		}
+		if len(plan.Targets.Run) == 0 && len(changedFiles) > 0 {
+			confidence = 0.5
+			plan.Risk = "medium"
+		}
+		plan.Safety.Confidence = confidence
+		plan.Confidence = confidence
+	}
+
+	elapsed := time.Since(start)
+	fmt.Fprintf(os.Stderr, "Fast path: %d changed files, %d tests selected (%.1fs)\n",
+		len(changedFiles), len(plan.Targets.Run), elapsed.Seconds())
+
+	return &plan, func() {}, nil
+}
+
 // generateCIPlanFromGitRange creates an ephemeral CI plan from a git range
 func generateCIPlanFromGitRange(gitRange, repoPath string) (*CIPlan, func(), error) {
 	parts := strings.Split(gitRange, "..")
@@ -14808,6 +15023,18 @@ func generateCIPlanFromGitRange(gitRange, repoPath string) (*CIPlan, func(), err
 		return nil, nil, fmt.Errorf("invalid --git-range format: expected BASE..HEAD (e.g., main..feature)")
 	}
 	gitBase, gitHead := parts[0], parts[1]
+
+	// Fast path: use git diff + coverage map when available
+	coverageMap := loadOrCreateCoverageMap()
+	hasCoverage := coverageMap != nil && len(coverageMap.Entries) > 0
+	if hasCoverage && !ciNoFast {
+		plan, cleanup, err := generateCIPlanFast(gitBase, gitHead, repoPath, coverageMap)
+		if err == nil {
+			return plan, cleanup, nil
+		}
+		// Fast path failed, fall through to full snapshot
+		fmt.Fprintf(os.Stderr, "Fast path failed (%v), falling back to full snapshot\n", err)
+	}
 
 	// Create temp database
 	tmpDir, err := os.MkdirTemp("", "kai-ci-*")
