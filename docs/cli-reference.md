@@ -1,0 +1,3273 @@
+# Kai CLI Reference
+
+Detailed documentation for all Kai commands, concepts, and workflows.
+
+---
+
+## Key Concepts
+
+### Snapshots
+A **snapshot** is a semantic capture of your codebase at a specific Git ref (branch, tag, or commit). Unlike a Git commit which stores file diffs, a snapshot stores:
+- Supported source/config files with their content hashes (e.g., .go, .ts/.tsx, .js/.jsx, .json, .yaml/.yml, .sql, .proto, .graphql/.gql, .toml)
+- Parsed symbol information (functions, classes, variables)
+- Module associations based on path patterns
+
+### Symbols
+**Symbols** are the semantic units extracted from your code:
+- **Functions**: Named functions, arrow functions, methods
+- **Classes**: Class declarations with their methods
+- **Variables**: Constants and variable declarations
+
+Each symbol includes its name, kind, source range, and signature.
+
+### ChangeSets
+A **changeset** represents the semantic difference between two snapshots:
+- Which files were modified
+- Which symbols were affected
+- What types of changes occurred
+- Which modules are impacted
+
+### Change Types
+Kai classifies changes into semantic categories:
+
+**Code-Level Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `FUNCTION_ADDED` | New function defined | Added `validateToken()` |
+| `FUNCTION_REMOVED` | Function deleted | Removed `legacyAuth()` |
+| `CONDITION_CHANGED` | Logic/comparison operators or boundaries changed | `if (x > 100)` → `if (x > 50)` |
+| `CONSTANT_UPDATED` | Literal values (numbers, strings) changed | `const TIMEOUT = 3600` → `1800` |
+| `API_SURFACE_CHANGED` | Function signatures or exports changed | `login(user)` → `login(user, token)` |
+
+**File-Level Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `FILE_ADDED` | New file created | Added `auth/mfa.ts` |
+| `FILE_DELETED` | File removed | Removed `deprecated/old.ts` |
+| `FILE_CONTENT_CHANGED` | Non-parseable file modified | Binary or unsupported file changed |
+
+**JSON Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `JSON_FIELD_ADDED` | New key added to JSON | Added `"timeout": 30` to config |
+| `JSON_FIELD_REMOVED` | Key removed from JSON | Removed `"legacy"` field |
+| `JSON_VALUE_CHANGED` | Value changed for existing key | `"version": "1.0"` → `"2.0"` |
+| `JSON_ARRAY_CHANGED` | Array elements modified | Dependencies array changed |
+
+**YAML Changes:**
+
+| Change Type | Description | Example |
+|-------------|-------------|---------|
+| `YAML_KEY_ADDED` | New key added to YAML | Added `replicas: 3` |
+| `YAML_KEY_REMOVED` | Key removed from YAML | Removed deprecated config |
+| `YAML_VALUE_CHANGED` | Value changed for existing key | `port: 8080` → `port: 3000` |
+
+### Modules
+**Modules** are logical groupings of files defined by path patterns. They help organize changes by feature area (e.g., "Auth", "Billing", "Profile").
+
+### Intent
+An **intent** is a human-readable sentence summarizing what a changeset accomplishes, like "Update Auth login" or "Modify Billing invoice calculation".
+
+### Workspaces
+A **workspace** is a lightweight, mutable branch-like overlay on top of immutable snapshots. Workspaces allow you to:
+- Accumulate multiple staged changes (as ChangeSets)
+- Isolate work without affecting the main snapshot lineage
+- Integrate (merge) changes back into a target snapshot
+
+Workspaces have three states: `active` (can stage changes), `shelved` (frozen), and `closed` (permanent).
+
+---
+
+## Kai vs Git
+
+| Feature | Kai | Git |
+|---------|-----|-----|
+| **Push / fetch latency** | < 100 ms globally | Depends on repo size / RTT |
+| **Change understanding** | Semantic (functions, classes, intent) | Line-based diffs |
+| **Storage model** | Content-addressed SQLite + zstd segments | Packfiles with delta compression |
+| **Merge conflicts** | AST-aware semantic merge | Text-based 3-way merge |
+| **History queries** | "What changed this function?" | `git log -p --follow` |
+| **Repository size scaling** | O(1) push/fetch via negotiation | O(repo size) for clone |
+
+Kai is designed to complement Git, not replace it. Use Git for your source of truth and Kai for semantic analysis, faster remote sync, and intent-based workflows.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- **Go 1.22+** (uses Go 1.24 features)
+- **Git** (optional - only needed for Git-based snapshots)
+- **C compiler** (required for CGO dependencies)
+
+#### Ubuntu/Debian
+
+```bash
+sudo apt-get update && sudo apt-get install -y gcc
+```
+
+#### macOS
+
+Xcode Command Line Tools (usually pre-installed):
+```bash
+xcode-select --install
+```
+
+#### Fedora/RHEL
+
+```bash
+sudo dnf install gcc
+```
+
+### Building from Source
+
+```bash
+# Clone or navigate to the kai directory
+cd kai/kai-cli
+
+# Build the CLI binary
+make build
+
+# Or build directly with Go
+CGO_ENABLED=1 go build -o kai ./cmd/kai
+
+# Verify installation
+./kai --help
+```
+
+### Optional: Add to PATH
+
+```bash
+# Add to your shell profile for global access
+export PATH="$PATH:/path/to/kai/kai-cli"
+
+# Or move/symlink to a directory in your PATH
+sudo ln -s /path/to/kai/kai-cli/kai /usr/local/bin/kai
+```
+
+---
+
+## Workflow Examples
+
+### The 4-Command Mental Model
+
+Kai's core workflow:
+
+```bash
+kai capture        # Snapshot your code
+kai diff           # See what changed
+kai review open    # Commit & review
+kai ci plan        # Get selective test plan
+```
+
+That's it. **Semantic commits + safe selective CI.**
+
+### Full Workflow Example
+
+```bash
+# 1. Navigate to your project and initialize
+cd your-project
+kai init
+
+# 2. Capture your project (creates baseline)
+kai capture
+
+# 3. Make changes to your code...
+
+# 4. See what changed semantically
+kai diff
+
+# 5. Capture changes and open review
+kai capture
+kai review open --title "Fix login bug"
+
+# 6. Preview CI impact (which tests to run)
+kai ci plan --explain
+
+# 7. Complete the review
+kai review approve <id>
+kai review close <id> --state merged
+```
+
+That's it! You now have semantic diffs, change classification, and selective CI.
+
+**How snapshots work:** Each `kai capture` creates a snapshot and updates `snap.latest`. After capture, `kai status` shows clean (like `git status` after `git commit`). Use `kai review open` to create a review for your changes.
+
+Use `--explain` on any command to learn what concepts are involved:
+```bash
+kai capture --explain     # Shows: Snapshot, Symbols, Modules
+kai diff --explain     # Shows: Snapshot, ChangeTypes
+kai ci plan --explain  # Shows: ChangeSet, CallGraph, Strategy
+```
+
+### Git branch review (main vs feature)
+
+Use this when you want the review to match a specific branch diff (like a GitLab MR).
+
+```bash
+git fetch origin
+git checkout main
+git reset --hard origin/main
+kai snapshot create --git main --repo .
+
+git checkout feat/my-branch
+git reset --hard origin/feat/my-branch
+kai snapshot create --git feat/my-branch --repo .
+
+kai ref set snap.main @snap:prev
+kai ref set snap.feat/my-branch @snap:last
+kai changeset create snap.main snap.feat/my-branch
+kai review open @cs:last --title "My change"
+```
+
+Notes:
+- `kai snapshot create --git` requires local refs. Use `git fetch` and local branch names (not `origin/main`).
+- `kai review open` without a changeset uses `@snap:prev → @snap:last`. Use `@cs:last` for explicit branch diffs.
+
+### Detailed Workflow (Advanced)
+
+For more control, here's the step-by-step approach:
+
+```bash
+# Create a snapshot of your main branch
+kai snapshot create --git main
+# Output: Created snapshot: abc123...
+
+# Create a snapshot of your feature branch
+kai snapshot create --git feature-branch
+# Output: Created snapshot: def456...
+
+# Analyze symbols in both snapshots
+kai analyze symbols abc123...
+kai analyze symbols def456...
+
+# Create a changeset between them
+kai changeset create abc123... def456...
+# Output: Created changeset: ghi789...
+
+# Generate an intent sentence
+kai intent render ghi789...
+# Output: Intent: Update Auth login
+
+# View the full changeset as JSON
+kai dump ghi789... --json
+```
+
+---
+
+## Human-Friendly References
+
+You don't need to juggle 64-character BLAKE3 hashes! Kai provides multiple ways to reference snapshots and changesets using human-readable handles.
+
+### Short IDs
+
+Use the first 8-12 hex characters of any ID. Kai will resolve it if unambiguous:
+
+```bash
+# Instead of the full 64-char ID:
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+
+# Use a short prefix:
+kai analyze symbols d9ec9902
+```
+
+If the prefix is ambiguous, Kai shows matching candidates:
+
+```
+ambiguous prefix '4a2556c0' matches:
+  Snapshot 4a2556c086b1... created 2024-12-02 14:32Z
+  ChangeSet 4a2556c0f31a... intent="Update Auth login"
+provide more characters or use a ref
+```
+
+### Named References (Refs)
+
+Create and use named pointers like Git does:
+
+```bash
+# Create refs
+kai ref set snap.main d9ec9902
+kai ref set snap.feature 4a2556c0
+kai ref set cs.login_fix 90cd7264
+
+# List all refs
+kai ref list
+
+# Use refs in any command
+kai analyze symbols snap.main
+kai changeset create snap.main snap.feature
+kai intent render cs.login_fix
+kai dump cs.login_fix --json
+
+# Delete refs
+kai ref del cs.login_fix
+```
+
+### Auto-Updated Refs
+
+Kai automatically maintains helpful refs:
+
+| Ref | Updated When | Points To |
+|-----|--------------|-----------|
+| `snap.latest` | Creating a snapshot | The most recent snapshot |
+| `cs.latest` | Creating a changeset | The most recent changeset |
+| `ws.<name>.base` | Creating a workspace | The workspace's base snapshot |
+| `ws.<name>.head` | Staging changes | The workspace's head snapshot |
+
+```bash
+# Use auto-refs in commands
+kai analyze symbols snap.latest
+kai changeset create @snap:prev @snap:last
+kai intent render cs.latest
+```
+
+### Selectors
+
+Use selector syntax for dynamic references:
+
+| Selector | Meaning |
+|----------|---------|
+| `@snap:last` | The most recent snapshot |
+| `@snap:prev` | The second-most recent snapshot |
+| `@cs:last` | The most recent changeset |
+| `@cs:prev` | The second-most recent changeset |
+| `@cs:last~2` | Two changesets back (relative navigation) |
+| `@ws:name:head` | The head snapshot of workspace "name" |
+| `@ws:name:base` | The base snapshot of workspace "name" |
+
+```bash
+# Common workflow using selectors
+kai snapshot create --git main --repo .
+kai snapshot create --git feature --repo .
+kai analyze symbols @snap:last
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+kai dump @cs:last --json
+```
+
+### Pick Command
+
+Search and select nodes interactively:
+
+```bash
+# List recent snapshots
+kai pick Snapshot
+
+# Filter by substring
+kai pick Snapshot --filter auth
+
+# List changesets without interactive selection
+kai pick ChangeSet --no-ui
+
+# Output format shows ID, kind-specific info
+#   %-4s  %-16s  %s
+1     d9ec990243e5...  main (git)
+2     4a2556c086b1...  feature (git)
+```
+
+### Shell Completion
+
+Enable tab completion for refs, selectors, and short IDs:
+
+```bash
+# Bash
+source <(kai completion bash)
+# Add to ~/.bashrc for persistence
+
+# Zsh
+source <(kai completion zsh)
+# Add to ~/.zshrc for persistence
+
+# Fish
+kai completion fish | source
+# Or save to ~/.config/fish/completions/kai.fish
+
+# PowerShell
+kai completion powershell | Out-String | Invoke-Expression
+```
+
+With completion enabled, pressing Tab will suggest:
+- Named refs (`snap.main`, `cs.latest`)
+- Selectors (`@snap:last`, `@cs:prev`)
+- Recent short IDs
+
+### Complete Example Without Long IDs
+
+```bash
+# Initialize and create snapshots
+kai init
+kai snapshot create --git main --repo .
+kai snapshot create --git feature --repo .
+
+# Analyze using selectors
+kai analyze symbols @snap:last
+kai analyze symbols @snap:prev
+
+# Create and inspect changeset
+kai changeset create @snap:prev @snap:last
+kai intent render @cs:last
+kai dump @cs:last --json
+
+# Name important refs
+kai ref set snap.main @snap:prev
+kai ref set snap.feature @snap:last
+kai ref set cs.feature_changes @cs:last
+
+# Use your named refs
+kai changeset create snap.main snap.feature
+kai checkout snap.main --dir ./restore
+```
+
+---
+
+## Complete Workflow Tutorial
+
+This tutorial walks through a real-world example using the included test repository.
+
+### Step 1: Understanding the Test Repository
+
+The `testdata/repo` directory contains a sample TypeScript project with two branches:
+
+**main branch** (before):
+```typescript
+// auth/session.ts
+export function isSessionExpired(createdAt: number): boolean {
+  const age = (now - createdAt) / 1000;
+  if (age > 3600) {  // 1 hour
+    return true;
+  }
+  return false;
+}
+
+// auth/constants.ts
+export const TIMEOUT = 3600;
+
+// auth/login.ts
+export function login(user: User, device: string): boolean {
+  // ...
+}
+```
+
+**feature branch** (after):
+```typescript
+// auth/session.ts - CONDITION_CHANGED
+if (age > 1800) {  // Changed from 3600 to 1800 (30 minutes)
+
+// auth/constants.ts - CONSTANT_UPDATED
+export const TIMEOUT = 1800;  // Changed from 3600
+
+// auth/login.ts - API_SURFACE_CHANGED
+export function login(user: User, device: string, ip: string): boolean {
+  // Added 'ip' parameter
+}
+```
+
+### Step 2: Initialize Kai
+
+```bash
+cd testdata/repo
+kai init
+```
+
+**What happens:**
+- Creates `.kai/` directory
+- Initializes SQLite database with schema
+- Creates `objects/` directory for content storage
+- Copies default rule files to `rules/`
+- Creates `AGENTS.md` guide for AI assistants
+
+**Output:**
+```
+Initialized Kai in .kai/
+```
+
+**Directory structure created:**
+```
+.kai/
+├── AGENTS.md          # AI agent guide
+├── db.sqlite          # SQLite database
+├── objects/           # Content-addressed file storage
+└── rules/
+    ├── modules.yaml       # Module definitions
+    └── changetypes.yaml   # Change type rules
+```
+
+### Step 3: Create Snapshots
+
+Create a snapshot of the main branch:
+
+```bash
+kai snapshot create --git main --repo .
+```
+
+**Output:**
+```
+Created snapshot: d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+```
+
+Create a snapshot of the feature branch:
+
+```bash
+kai snapshot create --git feature --repo .
+```
+
+**Output:**
+```
+Created snapshot: 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
+```
+
+**What happens during snapshot creation:**
+1. Resolves the Git ref to a commit
+2. Reads all TypeScript/JavaScript files from the commit tree
+3. Computes BLAKE3 hash of each file's content
+4. Stores file content in `objects/<hash>`
+5. Creates File nodes in the database
+6. Maps files to modules based on path patterns
+7. Creates the Snapshot node with metadata
+
+### Step 4: Analyze Symbols
+
+Extract symbols from each snapshot:
+
+```bash
+# Analyze main branch snapshot
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+
+# Analyze feature branch snapshot
+kai analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
+```
+
+**Output:**
+```
+Symbol analysis complete
+```
+
+**What happens during symbol analysis:**
+1. Retrieves all files in the snapshot
+2. Parses each file using Tree-sitter (JavaScript grammar)
+3. Extracts function declarations, class declarations, and variable declarations
+4. Creates Symbol nodes with:
+   - `fqName`: Fully qualified name (e.g., `User.greet`)
+   - `kind`: function, class, or variable
+   - `range`: Source code location (line/column)
+   - `signature`: Function signature or declaration
+5. Creates DEFINES_IN edges linking symbols to files
+
+### Step 5: Create a ChangeSet
+
+Compare the two snapshots:
+
+```bash
+kai changeset create \
+  d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc \
+  4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d39a3
+```
+
+**Output:**
+```
+Created changeset: 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
+Changed files: 3
+Change types detected: 9
+Affected modules: [Auth]
+```
+
+**What happens during changeset creation:**
+1. Compares file digests between snapshots to find changed files
+2. For each changed file:
+   - Reads before/after content
+   - Parses both versions with Tree-sitter
+   - Runs change type detectors
+3. Creates ChangeType nodes with evidence
+4. Maps changed files to affected modules
+5. Creates edges:
+   - `MODIFIES`: ChangeSet → File, ChangeSet → Symbol
+   - `HAS`: ChangeSet → ChangeType
+   - `AFFECTS`: ChangeSet → Module
+
+### Step 6: Render Intent
+
+Generate a human-readable intent sentence:
+
+```bash
+kai intent render 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203
+```
+
+**Output:**
+```
+Intent: Update Auth TIMEOUT
+```
+
+**How intent is generated:**
+1. Analyzes change types to determine verb:
+   - `API_SURFACE_CHANGED` → "Update"
+   - `CONDITION_CHANGED` → "Modify"
+   - `CONSTANT_UPDATED` → "Update"
+2. Identifies primary affected module (Auth)
+3. Finds most prominent symbol or path area (TIMEOUT)
+4. Combines: `<Verb> <Module> <Symbol>`
+
+**Override with custom intent:**
+```bash
+kai intent render 90cd72... --edit "Reduce session timeout to 30 minutes"
+```
+
+### Step 7: Dump ChangeSet as JSON
+
+View the complete changeset data:
+
+```bash
+kai dump 90cd726437a465b9602cfd7abc0bba7e1150726486013b3951539b04b72de203 --json
+```
+
+This outputs a structured JSON document containing:
+- The changeset node with its payload
+- All related nodes (files, symbols, change types, modules)
+- All edges connecting them
+
+---
+
+## Command Reference
+
+### `kai init`
+
+Initialize Kai in the current directory.
+
+```bash
+kai init
+```
+
+**Creates:**
+- `.kai/db.sqlite` - SQLite database with WAL mode
+- `.kai/objects/` - Content-addressed storage directory
+- `.kai/rules/modules.yaml` - Module definitions
+- `.kai/rules/changetypes.yaml` - Change type rules
+- `.kai/AGENTS.md` - AI agent guide for understanding Kai commands
+
+**Notes:**
+- Run this once per project
+- Must be run from within a Git repository (or specify `--repo`)
+- Safe to run multiple times (idempotent)
+
+---
+
+### `kai snapshot`
+
+Create a semantic snapshot from a Git ref or directory.
+
+```bash
+kai snapshot [git-ref] [flags]
+```
+
+**Arguments:**
+- `[git-ref]` - Branch name, tag, or commit hash (required for Git mode)
+
+**Flags:**
+- `--repo <path>` - Path to Git repository (default: current directory)
+- `--dir <path>` - Path to directory (creates snapshot without Git)
+
+**Examples:**
+```bash
+# Snapshot from Git ref
+kai snapshot create --git main --repo .
+
+# Snapshot from directory (no Git required)
+kai snapshot create --dir ./src
+
+# Snapshot a specific commit
+kai snapshot create --git abc123def456
+
+# Snapshot a tag
+kai snapshot create --git v1.2.3 --repo /path/to/repo
+```
+
+**Output:**
+```
+Created snapshot: <64-character-hex-id>
+```
+
+**Supported file types:**
+- `.ts`, `.tsx` - TypeScript
+- `.js`, `.jsx` - JavaScript
+- `.py` - Python
+- `.json` - JSON
+- `.yaml`, `.yml` - YAML
+- `.sql` - SQL schemas
+
+---
+
+### `kai snap`
+
+Quick directory snapshot without Git.
+
+```bash
+kai snap [path]
+```
+
+**Arguments:**
+- `[path]` - Directory path (default: current directory)
+
+**Examples:**
+```bash
+# Snapshot current directory
+kai snap
+
+# Snapshot specific path
+kai snap src/
+
+# Snapshot build output
+kai snap ./build
+```
+
+This is a shortcut for `kai snapshot create --dir <path>`. It:
+- Never reads Git
+- Includes uncommitted changes
+- Works without a Git repository
+- Is ideal for workspaces, CI, and local development
+
+---
+
+### `kai analyze symbols`
+
+Extract symbols from all files in a snapshot.
+
+```bash
+kai analyze symbols <snapshot-id>
+```
+
+**Arguments:**
+- `<snapshot-id>` - Hex ID of the snapshot to analyze
+
+**Examples:**
+```bash
+kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa00fc
+```
+
+**Output:**
+```
+Symbol analysis complete
+```
+
+**Extracted symbols:**
+| Symbol Type | Examples |
+|-------------|----------|
+| Functions | `function foo()`, `const bar = () => {}`, `async function baz()` |
+| Classes | `class User {}`, `class extends Component {}` |
+| Methods | `greet() {}`, `static create() {}`, `async fetch() {}` |
+| Variables | `const X = 1`, `let y = "str"`, `var z = []` |
+
+**Symbol properties:**
+- `fqName` - Fully qualified name (e.g., `ClassName.methodName`)
+- `kind` - `function`, `class`, or `variable`
+- `range` - Start and end positions `{start: [line, col], end: [line, col]}`
+- `signature` - Declaration signature (e.g., `function login(user, device)`)
+
+---
+
+### `kai analyze calls`
+
+Build a call graph for JavaScript/TypeScript files.
+
+```bash
+kai analyze calls <snapshot-id>
+```
+
+**Arguments:**
+- `<snapshot-id>` - Hex ID of the snapshot to analyze
+
+**Examples:**
+```bash
+kai analyze calls @snap:last
+kai analyze calls d9ec990243e5...
+```
+
+**What it creates:**
+- `File --IMPORTS--> File` (import dependencies)
+- `File --CALLS--> File` (function call relationships)
+- `File --TESTS--> File` (test file to source file mapping)
+
+**Enables:**
+- Finding all callers of a function
+- Determining which tests cover a file
+- Running only affected tests after changes
+
+---
+
+### `kai changeset create`
+
+Create a changeset between two snapshots.
+
+```bash
+kai changeset create <base-snapshot-id> <head-snapshot-id>
+```
+
+**Arguments:**
+- `<base-snapshot-id>` - The "before" snapshot (typically main branch)
+- `<head-snapshot-id>` - The "after" snapshot (typically feature branch)
+
+**Examples:**
+```bash
+kai changeset create abc123... def456...
+```
+
+**Output:**
+```
+Created changeset: <64-character-hex-id>
+Changed files: 3
+Change types detected: 5
+Affected modules: [Auth, Billing]
+```
+
+**Change detection process:**
+1. Files are compared by content hash (not line-by-line diff)
+2. Modified files are parsed with Tree-sitter
+3. AST nodes are compared to detect semantic changes
+4. Changes are classified into types with evidence
+
+---
+
+### `kai intent render`
+
+Generate or set an intent sentence for a changeset.
+
+```bash
+kai intent render <changeset-id> [flags]
+```
+
+**Arguments:**
+- `<changeset-id>` - Hex ID of the changeset
+
+**Flags:**
+- `--edit "<text>"` - Manually set the intent text instead of generating
+
+**Examples:**
+```bash
+# Auto-generate intent
+kai intent render abc123...
+# Output: Intent: Update Auth login
+
+# Manually set intent
+kai intent render abc123... --edit "Fix session expiration bug"
+# Output: Intent: Fix session expiration bug
+```
+
+**Auto-generation rules:**
+| Priority | Change Type | Verb |
+|----------|-------------|------|
+| 1 | `API_SURFACE_CHANGED` | "Update" |
+| 2 | `CONDITION_CHANGED` | "Modify" |
+| 3 | `CONSTANT_UPDATED` | "Update" |
+
+---
+
+### `kai dump`
+
+Output changeset data as structured JSON.
+
+```bash
+kai dump <changeset-id> [flags]
+```
+
+**Arguments:**
+- `<changeset-id>` - Hex ID of the changeset
+
+**Flags:**
+- `--json` - Output as JSON (currently the only format)
+
+**Examples:**
+```bash
+# Output to terminal
+kai dump abc123... --json
+
+# Save to file
+kai dump abc123... --json > changeset.json
+
+# Pretty print with jq
+kai dump abc123... --json | jq .
+```
+
+**Output structure:**
+```json
+{
+  "changeset": {
+    "id": "...",
+    "kind": "ChangeSet",
+    "payload": {
+      "base": "<base-snapshot-id>",
+      "head": "<head-snapshot-id>",
+      "intent": "Update Auth login",
+      "title": "",
+      "description": ""
+    }
+  },
+  "nodes": [
+    { "id": "...", "kind": "File", "payload": {...} },
+    { "id": "...", "kind": "Symbol", "payload": {...} },
+    { "id": "...", "kind": "ChangeType", "payload": {...} },
+    { "id": "...", "kind": "Module", "payload": {...} }
+  ],
+  "edges": [
+    { "src": "...", "type": "MODIFIES", "dst": "..." },
+    { "src": "...", "type": "HAS", "dst": "..." },
+    { "src": "...", "type": "AFFECTS", "dst": "..." }
+  ]
+}
+```
+
+---
+
+### `kai status`
+
+Show Kai status and pending changes since last snapshot.
+
+```bash
+kai status [flags]
+```
+
+**Flags:**
+- `--dir <path>` - Directory to check for changes (default: current directory)
+
+**Example:**
+```bash
+kai status --dir ./src
+```
+
+**Output:**
+```
+Kai initialized
+
+Snapshots:  3
+Changesets: 1
+
+Latest snapshot: a1b2c3d4e5f6
+  Source: abc123... (directory)
+  Date:   2024-12-02 14:30:45
+
+Changes since last snapshot:
+
+  Added (1):
+    + auth/newfile.ts
+
+  Modified (2):
+    ~ auth/login.ts
+    ~ billing/invoice.ts
+```
+
+---
+
+### `kai log`
+
+Show chronological log of snapshots and changesets.
+
+```bash
+kai log [flags]
+```
+
+**Flags:**
+- `-n, --limit <count>` - Number of entries to show (default: 10)
+
+**Example:**
+```bash
+kai log -n 5
+```
+
+---
+
+### `kai ws create`
+
+Create a new workspace (branch) based on a snapshot.
+
+```bash
+kai ws create --name <name> --base <snapshot-id> [flags]
+```
+
+**Flags:**
+- `--name <name>` - Workspace name (required)
+- `--base <snapshot-id>` - Base snapshot ID (required)
+- `--desc <description>` - Optional description
+
+**Example:**
+```bash
+kai ws create --name feature/auth --base abc123...
+```
+
+---
+
+### `kai ws list`
+
+List all workspaces.
+
+```bash
+kai ws list
+```
+
+**Output:**
+```
+NAME                  STATUS      BASE          HEAD          CHANGESETS
+feature/auth          active      a1b2c3d4e5f6  d4e5f6a1b2c3  2
+bugfix/login          shelved     a1b2c3d4e5f6  a1b2c3d4e5f6  0
+```
+
+---
+
+### `kai ws stage`
+
+Stage changes from a directory into a workspace.
+
+```bash
+kai ws stage --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dir <path>` - Directory to stage from (default: current directory)
+
+**Example:**
+```bash
+kai ws stage --ws feature/auth --dir ./src
+```
+
+**Output:**
+```
+Staged changes:
+  Changeset: d4e5f6a1b2c3
+  New head:  e5f6a1b2c3d4
+  Files:     3 changed
+  Changes:   2 change types detected
+```
+
+---
+
+### `kai ws log`
+
+Show the changelog for a workspace.
+
+```bash
+kai ws log --ws <name>
+```
+
+**Example:**
+```bash
+kai ws log --ws feature/auth
+```
+
+---
+
+### `kai ws shelve`
+
+Shelve a workspace (freeze staging).
+
+```bash
+kai ws shelve --ws <name>
+```
+
+---
+
+### `kai ws unshelve`
+
+Unshelve a workspace (resume staging).
+
+```bash
+kai ws unshelve --ws <name>
+```
+
+---
+
+### `kai ws close`
+
+Permanently close a workspace.
+
+```bash
+kai ws close --ws <name>
+```
+
+---
+
+### `kai ws delete`
+
+Delete a workspace permanently (metadata and refs).
+
+```bash
+kai ws delete --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dry-run` - Show what would be deleted without actually deleting
+- `--keep-refs` - Preserve workspace refs (rare)
+
+**Examples:**
+```bash
+# Preview what would be deleted
+kai ws delete --ws feature/experiment --dry-run
+
+# Actually delete
+kai ws delete --ws feature/experiment
+
+# Delete but keep refs (rare)
+kai ws delete --ws old-branch --keep-refs
+```
+
+**Note:** Content (snapshots, changesets, files) is NOT deleted - that's the GC's job. Run `kai prune` after deleting workspaces to reclaim storage.
+
+---
+
+### `kai ws checkout`
+
+Checkout workspace head snapshot to filesystem.
+
+```bash
+kai ws checkout --ws <name> [flags]
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--dir <path>` - Target directory to write files to (default: current directory)
+- `--clean` - Delete files not in snapshot
+
+**Examples:**
+```bash
+# Checkout to current directory
+kai ws checkout --ws feature/auth
+
+# Checkout to specific directory
+kai ws checkout --ws feature/auth --dir ./src
+
+# Checkout with clean (removes extra files)
+kai ws checkout --ws feature/auth --clean
+```
+
+---
+
+### `kai integrate`
+
+Integrate workspace changes into a target snapshot.
+
+```bash
+kai integrate --ws <name> --into <snapshot-id>
+```
+
+**Flags:**
+- `--ws <name>` - Workspace name or ID (required)
+- `--into <snapshot-id>` - Target snapshot ID (required)
+
+**Example:**
+```bash
+kai integrate --ws feature/auth --into abc123...
+```
+
+**Output:**
+```
+Integration successful!
+  Result snapshot: f6a1b2c3d4e5...
+  Applied 2 changeset(s)
+  Auto-resolved: 3 change(s)
+```
+
+If there are conflicts:
+```
+Integration conflicts (1):
+  auth/login.ts: File modified in both workspace and target
+```
+
+---
+
+### `kai diff`
+
+Show semantic differences between snapshots.
+
+```bash
+kai diff [base-ref] [head-ref] [flags]
+```
+
+**Arguments:**
+- `[base-ref]` - Base snapshot (optional; defaults to `@snap:last`)
+- `[head-ref]` - Head snapshot (optional; if omitted, compares against working directory)
+
+**Flags:**
+- `-p, --patch` - Show line-level diff (like git diff) with colors
+- `--semantic` - Show semantic diff (default)
+- `--json` - Output diff as JSON
+- `--name-only` - Output just paths with status prefixes (A/M/D)
+- `--dir <path>` - Directory to compare against (default: current directory)
+- `--explain` - Show what concepts are being used
+
+**Examples:**
+```bash
+# Semantic diff - last snapshot vs working directory (default)
+kai diff
+
+# Line-level diff like git (with colors)
+kai diff -p
+
+# Compare two snapshots
+kai diff @snap:prev @snap:last
+
+# Output as JSON for programmatic use
+kai diff --json
+
+# Just file paths
+kai diff --name-only
+```
+
+**Output example:**
+```
+Diff: a1b2c3d4e5f6 → working directory
+
+~ auth/login.ts
+  ~ function login(user) -> function login(user, token)
+  + function validateMFA(code)
+
++ config.json
+  + timeout
+  + retries
+
+~ schema.sql
+  ~ users.email: VARCHAR(100) -> VARCHAR(255)
+  + users.created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+Summary: 3 files (1 added, 2 modified, 0 removed)
+         6 units (4 added, 2 modified, 0 removed)
+```
+
+**Diff granularity:**
+
+| Type | Support | Description |
+|------|---------|-------------|
+| Function | ✓ | Detects added/removed/modified functions with signature changes |
+| Class | ✓ | Detects class additions/removals |
+| Method | ✓ | Detects method changes within classes |
+| SQL Table | ✓ | Detects table additions/removals |
+| SQL Column | ✓ | Detects column additions/modifications/removals |
+| JSON Key | ✓ | Detects key additions/modifications/removals |
+| YAML Key | ✓ | Detects key additions/modifications/removals |
+
+---
+
+### `kai merge`
+
+Perform AST-aware 3-way merge at symbol granularity.
+
+```bash
+kai merge <base-file> <left-file> <right-file> [flags]
+```
+
+**Arguments:**
+- `<base-file>` - Common ancestor file
+- `<left-file>` - Left/ours version
+- `<right-file>` - Right/theirs version
+
+**Flags:**
+- `--lang <lang>` - Language (js, ts, py) - auto-detected from extension if not specified
+- `-o, --output <path>` - Output file path (defaults to stdout)
+- `--json` - Output result as JSON (includes conflicts)
+
+**Examples:**
+```bash
+# Merge JavaScript files - output to stdout
+kai merge base.js left.js right.js
+
+# Merge Python files with explicit language
+kai merge base.py branch1.py branch2.py --lang py -o merged.py
+
+# Get JSON output with conflict details
+kai merge base.js left.js right.js --json
+```
+
+**What it does:**
+- Parses files using Tree-sitter to extract semantic units (functions, classes, constants)
+- Performs 3-way merge at symbol granularity, not line-by-line
+- Auto-merges changes to different functions in the same file
+- Detects semantic conflicts:
+
+| Conflict Kind | Description |
+|---------------|-------------|
+| `API_SIGNATURE_DIVERGED` | Both sides changed function parameters differently |
+| `CONST_VALUE_CONFLICT` | Both sides changed constant value differently |
+| `DELETE_vs_MODIFY` | One side deleted, other modified |
+| `CONCURRENT_CREATE` | Both sides created same-named unit |
+| `BODY_DIVERGED` | Same function body modified on both sides |
+
+**Example JSON output:**
+```json
+{
+  "success": false,
+  "conflicts": [
+    {
+      "kind": "BODY_DIVERGED",
+      "unit": "file::foo",
+      "message": "Function foo body modified on both sides"
+    }
+  ]
+}
+```
+
+---
+
+### `kai checkout`
+
+Restore the filesystem to match a snapshot's state.
+
+```bash
+kai checkout <snapshot-id> [flags]
+```
+
+**Arguments:**
+- `<snapshot-id>` - Snapshot ID, ref name, or selector
+
+**Flags:**
+- `--dir <path>` - Target directory (default: current directory)
+- `--clean` - Delete files not in the snapshot
+
+**Examples:**
+```bash
+# Restore to specific directory
+kai checkout abc123... --dir ./src
+
+# Restore with cleanup of extra files
+kai checkout @snap:last --dir ./src --clean
+```
+
+---
+
+### `kai cherry-pick`
+
+Apply a changeset onto a target snapshot.
+
+```bash
+kai cherry-pick <changeset> <target-snapshot>
+```
+
+**Arguments:**
+- `<changeset>` - ChangeSet ID, ref name, or selector
+- `<target-snapshot>` - Target snapshot to apply changes onto
+
+**Examples:**
+```bash
+kai cherry-pick cs.login_fix snap.main
+kai cherry-pick @cs:last @snap:last
+```
+
+Creates a new changeset representing the applied changes.
+
+---
+
+### `kai rebase`
+
+Reapply one or more changesets onto a new base snapshot.
+
+```bash
+kai rebase <target-snapshot> <changeset> [changeset...]
+```
+
+**Arguments:**
+- `<target-snapshot>` - New base snapshot
+- `<changeset>` - One or more changesets to reapply (in order)
+
+**Examples:**
+```bash
+kai rebase snap.main cs.a1b2 cs.c3d4
+kai rebase @snap:last @cs:prev @cs:last
+```
+
+---
+
+### `kai bisect`
+
+Find a regression via binary search over snapshots.
+
+**Subcommands:**
+
+#### `kai bisect start`
+
+Start a bisect session.
+
+```bash
+kai bisect start <good-snapshot> <bad-snapshot>
+```
+
+**Arguments:**
+- `<good-snapshot>` - Known good snapshot (no regression)
+- `<bad-snapshot>` - Known bad snapshot (has regression)
+
+#### `kai bisect good`
+
+Mark the current snapshot as good (no regression).
+
+```bash
+kai bisect good
+```
+
+#### `kai bisect bad`
+
+Mark the current snapshot as bad (has regression).
+
+```bash
+kai bisect bad
+```
+
+#### `kai bisect next`
+
+Show the next snapshot to test.
+
+```bash
+kai bisect next
+```
+
+#### `kai bisect reset`
+
+End the bisect session.
+
+```bash
+kai bisect reset
+```
+
+**Workflow Example:**
+```bash
+kai bisect start snap.v1.0 snap.v1.5   # Start bisecting
+kai bisect next                         # Get next snapshot to test
+# ... test your code ...
+kai bisect good                         # Mark as good
+kai bisect next                         # Get next snapshot
+# ... test your code ...
+kai bisect bad                          # Mark as bad
+# ... repeat until regression found ...
+kai bisect reset                        # Clean up
+```
+
+---
+
+### `kai ref list`
+
+List all named references.
+
+```bash
+kai ref list [flags]
+```
+
+**Flags:**
+- `--kind <kind>` - Filter by kind (Snapshot, ChangeSet, Workspace)
+
+**Example:**
+```bash
+kai ref list
+kai ref list --kind Snapshot
+```
+
+**Output:**
+```
+NAME                            KIND          TARGET
+snap.latest                     Snapshot      d9ec990243e5efea...
+snap.main                       Snapshot      d9ec990243e5efea...
+cs.latest                       ChangeSet     90cd726437a465b9...
+ws.feature/auth.head            Snapshot      4a2556c086b1f664...
+```
+
+---
+
+### `kai ref set`
+
+Create or update a named reference.
+
+```bash
+kai ref set <name> <target>
+```
+
+**Arguments:**
+- `<name>` - Reference name (e.g., `snap.main`, `cs.bugfix`)
+- `<target>` - Target ID (full hex, short prefix, ref name, or selector)
+
+**Examples:**
+```bash
+# Set using short ID
+kai ref set snap.main d9ec9902
+
+# Set using another ref
+kai ref set snap.backup snap.main
+
+# Set using selector
+kai ref set snap.before_feature @snap:prev
+kai ref set cs.last_change @cs:last
+```
+
+---
+
+### `kai ref del`
+
+Delete a named reference.
+
+```bash
+kai ref del <name>
+```
+
+**Arguments:**
+- `<name>` - Reference name to delete
+
+**Example:**
+```bash
+kai ref del snap.old_backup
+```
+
+---
+
+### `kai tag`
+
+Manage tag refs that point to snapshots.
+
+#### `kai tag create`
+
+Create or update a tag ref.
+
+```bash
+kai tag create <name> <target>
+```
+
+**Arguments:**
+- `<name>` - Tag name (e.g., `v1.0`, `release-2024`)
+- `<target>` - Snapshot ID, ref name, or selector
+
+**Examples:**
+```bash
+kai tag create v1.0 @snap:last
+kai tag create release-2024 snap.main
+```
+
+#### `kai tag list`
+
+List all tag refs.
+
+```bash
+kai tag list
+```
+
+#### `kai tag delete`
+
+Delete a tag ref.
+
+```bash
+kai tag delete <name>
+```
+
+**Example:**
+```bash
+kai tag delete v1.0-beta
+```
+
+---
+
+### `kai modules`
+
+Manage module definitions for your codebase. Modules group related files together, enabling semantic diffs at module level, targeted test selection, and import graph analysis.
+
+#### `kai modules init`
+
+Initialize module configuration by auto-detecting modules from your codebase.
+
+```bash
+kai modules init [flags]
+```
+
+**Flags:**
+- `--infer` - Auto-detect modules from source structure
+- `--write` - Save configuration to `.kai/rules/modules.yaml`
+- `--by <strategy>` - Grouping strategy: `dirs` (default), `packages`
+- `--tests <glob>` - Test file pattern (e.g., `"tests/**"`)
+
+**Examples:**
+```bash
+# Preview inferred modules
+kai modules init --infer
+
+# Save inferred modules
+kai modules init --infer --write
+
+# Group by top-level directories
+kai modules init --infer --by dirs
+
+# Also detect test modules
+kai modules init --infer --tests "tests/**"
+```
+
+#### `kai modules add`
+
+Add a module definition.
+
+```bash
+kai modules add <name> <glob>
+```
+
+**Arguments:**
+- `<name>` - Module name (e.g., `Auth`, `API`)
+- `<glob>` - Glob pattern for files (e.g., `auth/**`)
+
+**Example:**
+```bash
+kai modules add Auth "src/auth/**"
+kai modules add Tests "**/*.test.ts"
+```
+
+#### `kai modules list`
+
+List all defined modules.
+
+```bash
+kai modules list
+```
+
+#### `kai modules preview`
+
+Preview file-to-module mapping without saving.
+
+```bash
+kai modules preview
+```
+
+Shows which files match each module definition.
+
+---
+
+### `kai pick`
+
+Search and select nodes interactively.
+
+```bash
+kai pick <kind> [flags]
+```
+
+**Arguments:**
+- `<kind>` - Node kind: `Snapshot`, `ChangeSet`, or `Workspace` (aliases: `snap`, `cs`, `ws`)
+
+**Flags:**
+- `--filter <substring>` - Filter by substring in ID or payload
+- `--no-ui` - Output matches without interactive selection
+
+**Examples:**
+```bash
+# List all snapshots
+kai pick Snapshot
+
+# Search snapshots containing "auth"
+kai pick snap --filter auth
+
+# List changesets non-interactively
+kai pick cs --no-ui
+```
+
+---
+
+### `kai completion`
+
+Generate shell completion scripts.
+
+```bash
+kai completion [bash|zsh|fish|powershell]
+```
+
+**Arguments:**
+- `bash` - Generate Bash completion script
+- `zsh` - Generate Zsh completion script
+- `fish` - Generate Fish completion script
+- `powershell` - Generate PowerShell completion script
+
+**Examples:**
+```bash
+# Bash - add to ~/.bashrc
+source <(kai completion bash)
+
+# Zsh - add to ~/.zshrc
+source <(kai completion zsh)
+
+# Fish - save to completions directory
+kai completion fish > ~/.config/fish/completions/kai.fish
+
+# PowerShell
+kai completion powershell | Out-String | Invoke-Expression
+```
+
+---
+
+### `kai prune`
+
+Garbage collect unreferenced content (snapshots, changesets, files).
+
+```bash
+kai prune [flags]
+```
+
+**Flags:**
+- `--dry-run` - Show what would be deleted without actually deleting
+- `--since <days>` - Only delete content older than N days (0 = no limit)
+- `--aggressive` - Also sweep orphaned Symbols and Modules
+
+**Examples:**
+```bash
+# Preview what would be deleted
+kai prune --dry-run
+
+# Actually delete unreferenced content
+kai prune
+
+# Only delete content older than 30 days
+kai prune --since 30
+
+# Aggressive cleanup (includes symbols and modules)
+kai prune --aggressive
+```
+
+**What happens:**
+1. Collects all roots (refs targets, workspace nodes)
+2. Marks all reachable nodes from roots (BFS traversal)
+3. Deletes any nodes not marked as reachable
+4. Deletes orphaned object files from `.kai/objects/`
+
+---
+
+### `kai shadow`
+
+Shadow Git by importing ranges, comparing diffs, and checking drift.
+
+**Subcommands:**
+- `shadow import` - Create snapshots + a changeset from a Git range and optionally update a ref.
+- `shadow parity` - Compare Git `--name-only` against Kai snapshot diffs.
+- `shadow drift` - Detect drift between a Git ref and a snapshot ref.
+
+**Examples:**
+```bash
+# Use explicit commit hashes (range format: BASE..HEAD)
+git -C /path/to/repo rev-parse HEAD HEAD~1
+kai shadow import --git-range <base>..<head> --repo /path/to/repo --update-ref snap.main
+
+# Compare changed files between Git and Kai
+kai shadow parity --git-range <base>..<head> --repo /path/to/repo
+
+# Check drift between a Git ref and a snapshot ref
+kai shadow drift --git-ref <head> --snap snap.main --repo /path/to/repo
+```
+
+**Flags:**
+- `--git-range` - Git range `BASE..HEAD` (required for import/parity)
+- `--git-ref` - Git ref to compare (default: `HEAD`)
+- `--snap` - Snapshot ref to compare (default: `snap.main`)
+- `--repo` - Path to Git repository (default: `.`)
+- `--update-ref` - Ref to update to HEAD snapshot (default: `snap.main`)
+
+**Note:** Run this after `kai ws delete` to reclaim storage.
+
+---
+
+## CI & Test Selection
+
+Kai provides intelligent test selection for CI pipelines. Instead of running all tests on every change, Kai analyzes which tests are affected by your changes and generates a targeted test plan.
+
+### Safe Skipping Philosophy
+
+The key concern with selective testing is: "If selective CI ever skips a test that should've run, users will disable Kai the next day."
+
+Kai addresses this with **progressive hardening** through three safety modes:
+
+1. **Shadow Mode** - Learn and validate before trusting
+2. **Guarded Mode** - Safe by construction with automatic fallback
+3. **Strict Mode** - Full selective after building confidence
+
+This allows teams to start safely, build confidence, and gradually increase selectivity.
+
+---
+
+### `kai test affected`
+
+List test files affected by changes between two snapshots.
+
+```bash
+kai test affected <base-snap> <head-snap>
+```
+
+**Arguments:**
+- `<base-snap>` - Base snapshot ID, ref, or selector
+- `<head-snap>` - Head snapshot ID, ref, or selector
+
+**Examples:**
+```bash
+# Find affected tests between two snapshots
+kai test affected @snap:prev @snap:last
+
+# Using explicit snapshot refs
+kai test affected snap.main snap.feature
+```
+
+**Prerequisites:**
+This command requires running `kai analyze calls` first to build the call graph.
+
+**How it works:**
+1. Analyzes the call graph to find which source files changed
+2. Identifies test files that import or call changed files
+3. Returns the list of test files that should be run
+
+---
+
+### `kai ci plan`
+
+Generate a CI test selection plan from a changeset.
+
+```bash
+kai ci plan <changeset|selector> [flags]
+```
+
+**Arguments:**
+- `<changeset|selector>` - ChangeSet ID, workspace selector, or snapshot selector
+
+**Flags:**
+- `--strategy <strategy>` - Selection strategy: `auto`, `symbols`, `imports`, `coverage` (default: `auto`)
+- `--risk-policy <policy>` - Risk policy: `expand`, `warn`, `fail` (default: `expand`)
+- `--safety-mode <mode>` - Safety mode: `shadow`, `guarded`, `strict` (default: `guarded`)
+- `--explain` - Output human-readable explanation table instead of JSON
+- `--out <file>` - Output file for plan JSON
+
+**Safety Modes:**
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `shadow` | Compute selective plan but CI runs full suite. Logs predictions for comparison. | Learning phase, validating test selection |
+| `guarded` | Run selective plan with automatic fallback. Auto-expands on structural risks. | Default production mode, safe by construction |
+| `strict` | Run selective plan only. No auto-expansion. Use panic switch for full suite. | Mature setups with high confidence |
+
+**Examples:**
+```bash
+# Generate plan with default guarded mode
+kai ci plan @cs:last --strategy=auto --out plan.json
+
+# Shadow mode: learn and compare
+kai ci plan @cs:last --safety-mode=shadow --out plan.json
+
+# Strict mode: selective only
+kai ci plan @cs:last --safety-mode=strict --out plan.json
+
+# Human-readable explanation table
+kai ci plan @cs:last --explain
+
+# Force full suite via panic switch (any mode)
+KAI_FORCE_FULL=1 kai ci plan @cs:last --out plan.json
+```
+
+**Plan Output:**
+
+The plan JSON includes:
+- `mode` - Plan mode: `selective`, `expanded`, `shadow`, `full`, `skip`
+- `safetyMode` - The safety mode used
+- `confidence` - Top-level confidence score (0.0-1.0)
+- `targets.run` - Test files to run
+- `targets.full` - Full test suite (shadow mode only)
+- `targets.fallback` - Whether fallback is enabled (guarded mode)
+- `safety.confidence` - Confidence score (0.0-1.0)
+- `safety.structuralRisks` - Detected risk patterns
+- `safety.autoExpanded` - Whether plan was auto-expanded
+- `uncertainty.score` - Uncertainty score (0-100)
+- `uncertainty.sources` - What contributed to uncertainty
+- `expansionLog` - Array of reasons why plan was expanded
+- `provenance.changeset` - Changeset ID used
+- `provenance.base` / `provenance.head` - Snapshot IDs
+- `provenance.kaiVersion` - Kai CLI version
+- `provenance.detectorVersion` - Dynamic import detector version (for cache invalidation)
+- `provenance.generatedAt` - ISO8601 timestamp
+- `provenance.analyzers` - Which analyzers ran (e.g., `symbols@1`, `imports@1`)
+- `provenance.policyHash` - Hash of ci-policy.yaml if used
+- `prediction` - Shadow mode prediction data
+
+**Structural Risks:**
+
+Kai detects patterns that indicate higher risk of missed tests:
+
+| Risk Type | Severity | Description |
+|-----------|----------|-------------|
+| `config_change` | High | Config file changed (package.json, tsconfig, jest.config, etc.) |
+| `test_infra` | High | Test infrastructure changed (fixtures, mocks, setup files) |
+| `dynamic_import` | High | Dynamic require/import detected - static analysis unreliable |
+| `no_test_mapping` | Medium | Changed files have no test coverage |
+| `many_files_changed` | Medium | More than 20 files changed |
+| `cross_module_change` | Medium | Changes span 3+ modules |
+
+**Panic Switch:**
+
+Set `KAI_FORCE_FULL=1` or `KAI_PANIC=1` to force full suite in any mode:
+```bash
+KAI_FORCE_FULL=1 kai ci plan @cs:last --safety-mode=strict --out plan.json
+```
+
+**CI Policy Configuration:**
+
+Create a `.kai/rules/ci-policy.yaml` file in your repo to customize risk thresholds and behavior (legacy path `kai.ci-policy.yaml` is also supported):
+
+```yaml
+version: 1
+
+thresholds:
+  minConfidence: 0.40    # Expand if confidence below 40%
+  maxUncertainty: 70     # Expand if uncertainty above 70
+  maxFilesChanged: 50    # Expand if more than 50 files changed
+  maxTestsSkipped: 0.90  # Expand if skipping >90% of tests
+
+paranoia:
+  alwaysFullPatterns:
+    - "*.lock"
+    - "go.mod"
+    - "package.json"
+    - ".github/workflows/*"
+  expandOnPatterns:
+    - "**/config/**"
+    - "**/setup.*"
+    - "**/__mocks__/**"
+  riskMultipliers:
+    "src/core/**": 1.5
+    "lib/**": 1.3
+
+behavior:
+  onHighRisk: expand      # expand, warn, fail
+  onLowConfidence: expand
+  onNoTests: warn         # expand, warn, pass
+  failOnExpansion: false  # Exit non-zero if expansion occurred
+
+dynamicImports:
+  expansion: nearest_module  # nearest_module, package, owners, full_suite
+  ownersFallback: true       # Use union model: nearest_module → owners → full_suite
+  maxFilesThreshold: 200     # If >N files in expansion, widen further
+  boundedRiskThreshold: 100  # Bounded imports matching >N files are treated as risky
+  allowlist:                 # Paths to ignore dynamic imports (glob patterns)
+    - "src/vendor/**"
+    - "**/*.generated.js"
+  boundGlobs:                # Known-bounded dynamic imports by pattern
+    "src/widgets/**": ["src/widgets/**/*.test.js"]
+```
+
+**Dynamic Import Expansion Strategies:**
+
+| Strategy | Description |
+|----------|-------------|
+| `nearest_module` | Expand to tests in the same module as the dynamic import |
+| `package` | Expand to tests in the same directory/package |
+| `owners` | Expand to tests owned by the same team (via CODEOWNERS) |
+| `full_suite` | Expand to all tests (most conservative) |
+
+**Union Model (ownersFallback: true):**
+
+When `ownersFallback` is enabled, Kai uses a cascading fallback strategy:
+
+1. **nearest_module** → Try to find tests in the same module
+2. **package** → Fall back to tests in the same directory
+3. **owners** → Fall back to parent directory (team ownership proxy)
+4. **full_suite** → Nuclear fallback if nothing else matches
+
+This prevents edge cases where `modules.yaml` is incomplete from causing selection misses.
+
+**Bounded-but-Risky Detection:**
+
+Some dynamic imports are "bounded" by webpack/vite comments but have huge footprints:
+
+```javascript
+/* webpackInclude: /plugins/ */  // Might match 500+ files!
+const plugin = await import(`./plugins/${name}`);
+```
+
+Set `boundedRiskThreshold` to treat bounded imports matching more than N files as risky (triggering expansion).
+
+The policy hash is included in the plan's provenance for audit trail.
+
+**Dynamic Import Detection:**
+
+The plan includes detailed dynamic import analysis:
+
+```json
+{
+  "dynamicImport": {
+    "detected": true,
+    "files": [
+      {
+        "path": "src/loader.js",
+        "kind": "import(variable)",
+        "line": 42,
+        "bounded": false,
+        "allowlisted": false,
+        "confidence": 0.9
+      }
+    ],
+    "policy": {
+      "expansion": "nearest_module",
+      "expandedTo": ["src/loader.test.js"],
+      "ownersFallback": true
+    },
+    "telemetry": {
+      "totalDetected": 3,
+      "bounded": 1,
+      "unbounded": 2,
+      "allowlisted": 0,
+      "widenedTests": 5,
+      "cacheHits": 2,
+      "cacheMisses": 1
+    }
+  }
+}
+```
+
+**Bounding Dynamic Imports:**
+
+Use webpack/vite magic comments to bound dynamic imports and prevent unnecessary test expansion:
+
+```javascript
+// Bounded - kai knows the scope
+const widget = await import(
+  /* webpackInclude: /\.widget\.js$/ */
+  `./widgets/${name}.widget.js`
+);
+
+// Unbounded - triggers expansion
+const mod = await import(modulePath);
+```
+
+**False Positive Reduction:**
+
+Kai automatically filters out false positives:
+- Constant-foldable cases: `require("foo/" + "bar")`
+- Literal `require.resolve()`: `require.resolve("lodash")`
+- Template literals with known paths: `` require(`./locales/${lang}.json`) `` with `webpackInclude`
+
+---
+
+### `kai ci print`
+
+Print a human-readable summary of a CI plan.
+
+```bash
+kai ci print --plan <file> [flags]
+```
+
+**Flags:**
+- `--plan <file>` - Plan JSON file to print (required)
+- `--section <section>` - Section to print: `summary`, `targets`, `impact`, `causes`, `safety`
+- `--json` - Output as JSON
+
+**Sections:**
+
+| Section | Description |
+|---------|-------------|
+| `summary` | Overview of plan (default) |
+| `targets` | What to run/skip |
+| `impact` | What changed |
+| `causes` | Why each test was selected (root cause analysis) |
+| `safety` | Safety analysis details |
+
+**Examples:**
+```bash
+# Print summary
+kai ci print --plan plan.json
+
+# Print only targets
+kai ci print --plan plan.json --section targets
+
+# Print safety analysis
+kai ci print --plan plan.json --section safety
+
+# Print root cause analysis (why each test was selected)
+kai ci print --plan plan.json --section causes
+```
+
+---
+
+### `kai ci detect-runtime-risk`
+
+Analyze test output for runtime signals that indicate a possible selection miss.
+
+```bash
+kai ci detect-runtime-risk --logs <file> [--plan <file>] [flags]
+```
+
+**Flags:**
+- `--logs <file>` - Path to test output JSON (Jest, Mocha, pytest, Go)
+- `--stderr <file>` - Path to stderr/text log file
+- `--plan <file>` - Path to plan file (for cross-reference)
+- `--format <fmt>` - Log format: auto, jest, mocha, pytest, go, text
+
+**Detected Signals:**
+
+| Signal | Severity | Description |
+|--------|----------|-------------|
+| `module_not_found` | Critical | Cannot find module/package errors (Node.js, Python, Go) |
+| `import_error` | Critical | Import/require failures, missing exports |
+| `type_error` | High | TypeScript/type checking errors |
+| `setup_crash` | Critical | Test setup hook failures, fixture errors |
+| `unexpected_failure` | Low | Other runtime errors |
+
+**Languages Supported:**
+- **Node.js/JavaScript**: `Cannot find module`, webpack errors, Jest failures
+- **TypeScript**: TS2307, TS2305, TS2339, type error bursts
+- **Python**: `ModuleNotFoundError`, `ImportError`, importlib errors, pytest fixtures
+- **Go**: Package not found, plugin load failures, build failures
+
+**Exit Codes:**
+- `0` - No risks detected, selection was safe
+- `1` - Error running the command
+- `75` - TRIPWIRE: Rerun full suite recommended (with `--tripwire`)
+
+**Examples:**
+```bash
+# Analyze Jest test output
+kai ci detect-runtime-risk --logs jest-results.json --plan plan.json
+
+# Analyze stderr from test run
+kai ci detect-runtime-risk --stderr test.log
+
+# Tripwire mode for CI (exit 75 if rerun needed)
+kai ci detect-runtime-risk --stderr test.log --tripwire
+
+# Treat any failure as tripwire trigger
+kai ci detect-runtime-risk --stderr test.log --tripwire --rerun-on-fail
+```
+
+**Tripwire Mode (`--tripwire`):**
+
+In tripwire mode, outputs only `RERUN` or `OK` and exits with code 75 or 0. This makes it easy to integrate into CI pipelines:
+
+```bash
+# Run selective tests, then check for runtime risks
+npm run test:selective 2>&1 | tee test.log
+kai ci detect-runtime-risk --stderr test.log --tripwire || npm run test:full
+```
+
+**GitHub Actions Integration:**
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate test plan
+        run: kai ci plan @cs:last --out plan.json
+
+      - name: Run selective tests
+        id: selective
+        continue-on-error: true
+        run: |
+          npm run test -- $(jq -r '.targets.run[]' plan.json) 2>&1 | tee test.log
+
+      - name: Check for runtime tripwire
+        id: tripwire
+        run: kai ci detect-runtime-risk --stderr test.log --tripwire
+        continue-on-error: true
+
+      - name: Rerun full suite if tripwire triggered
+        if: steps.tripwire.outcome == 'failure'
+        run: |
+          echo "Tripwire triggered - running full suite"
+          npm run test:full
+```
+
+**GitLab CI Integration:**
+
+```yaml
+test:
+  script:
+    - kai ci plan @cs:last --out plan.json
+    - npm run test:selective 2>&1 | tee test.log || true
+    - |
+      if ! kai ci detect-runtime-risk --stderr test.log --tripwire; then
+        echo "Tripwire triggered - running full suite"
+        npm run test:full
+      fi
+```
+
+---
+
+### `kai ci explain-dynamic-imports`
+
+Analyze files for dynamic imports and explain how they would affect test selection.
+
+```bash
+kai ci explain-dynamic-imports [path] [--json]
+```
+
+**Arguments:**
+- `[path]` - File or directory to scan (defaults to current directory)
+
+**Flags:**
+- `--json` - Output as JSON instead of human-readable format
+
+**Examples:**
+```bash
+# Scan current directory
+kai ci explain-dynamic-imports
+
+# Scan specific directory
+kai ci explain-dynamic-imports src/
+
+# Scan single file
+kai ci explain-dynamic-imports src/plugins/loader.js
+
+# Output as JSON
+kai ci explain-dynamic-imports src/ --json
+```
+
+**Output:**
+```
+Dynamic Import Analysis
+============================================================
+Files scanned: 42
+Dynamic imports found: 5
+Expansion strategy: nearest_module
+Owners fallback: true
+Bounded risk threshold: 100 files
+
+⚠️  UNBOUNDED (2) - Will trigger expansion:
+   src/plugins/index.ts:42
+      Type: import(variable) (confidence: 90%)
+      Action: Expand to nearest_module
+
+✓  BOUNDED (2) - Safe, will not expand:
+   src/i18n/load.js:5 → webpackInclude: /locales\/.*\.json$/
+
+○  ALLOWLISTED (1) - Ignored by policy:
+   src/vendor/legacy.js:12
+
+Recommendations:
+  • Add webpackInclude/webpackExclude comments to bound dynamic imports
+  • Add paths to dynamicImports.allowlist in kai.ci-policy.yaml
+  • Use explicit imports where possible
+```
+
+Use this command before committing to understand how dynamic imports affect CI test selection.
+
+---
+
+### `kai ci record-miss`
+
+Record a test selection miss for shadow mode learning and analysis.
+
+```bash
+kai ci record-miss --plan <file> [--evidence <file> | --failed <tests>]
+```
+
+**Flags:**
+- `--plan <file>` - Path to plan file (required)
+- `--evidence <file>` - Path to test results JSON (Jest, pytest, Go test -json)
+- `--failed <tests>` - Comma-separated list of failed test files
+
+**Examples:**
+```bash
+# Record miss from test results JSON
+kai ci record-miss --plan plan.json --evidence jest-results.json
+
+# Record miss with explicit failed tests
+kai ci record-miss --plan plan.json --failed "tests/auth.test.js,tests/api.test.js"
+```
+
+Miss records are appended to `.kai/ci-misses.jsonl` for aggregation and analysis.
+
+---
+
+### `kai ci ingest-coverage`
+
+Ingest coverage reports to build file→test mappings for coverage-based test selection.
+
+```bash
+kai ci ingest-coverage --from <file> [flags]
+```
+
+**Flags:**
+- `--from <file>` - Path to coverage report (required)
+- `--format <fmt>` - Format: `auto`, `nyc`, `coveragepy`, `jacoco` (default: `auto`)
+- `--branch <name>` - Branch name to associate with coverage data
+- `--tag <name>` - Tag to associate with coverage data (e.g., commit hash)
+
+**Supported Formats:**
+
+| Format | Tool | Report File |
+|--------|------|-------------|
+| `nyc` | NYC/Istanbul | `coverage-final.json` |
+| `coveragepy` | coverage.py | `coverage.json` (with `--format json`) |
+| `jacoco` | JaCoCo | `jacoco.xml` |
+
+**Examples:**
+```bash
+# Ingest NYC coverage (auto-detected)
+kai ci ingest-coverage --from coverage/coverage-final.json
+
+# Ingest Python coverage.py report
+kai ci ingest-coverage --from coverage.json --format coveragepy
+
+# Ingest JaCoCo XML report
+kai ci ingest-coverage --from target/site/jacoco/jacoco.xml --format jacoco
+
+# Associate with branch and commit
+kai ci ingest-coverage --from coverage-final.json --branch main --tag abc123
+```
+
+**How Coverage Selection Works:**
+
+1. **Ingest Phase**: After tests run, ingest coverage to build `file→test` mappings
+2. **Planning Phase**: When `--strategy=coverage` or `--strategy=auto`, Kai looks up which tests covered the changed files
+3. **Selection**: Tests that recently covered any changed file are included in the plan
+
+Coverage data is stored in `.kai/coverage-map.json` and accumulates over time.
+
+**Policy Configuration:**
+
+```yaml
+coverage:
+  enabled: true        # Use coverage data in test selection
+  lookbackDays: 30     # How far back to consider coverage data
+  minHits: 1           # Minimum hit count to trust a mapping
+  onNoCoverage: warn   # expand, warn, ignore - action for files without coverage
+```
+
+---
+
+### `kai ci ingest-contracts`
+
+Register contract schemas (OpenAPI, Protobuf, GraphQL) and their associated tests.
+
+```bash
+kai ci ingest-contracts --type <type> --path <path> --tests <tests> [flags]
+```
+
+**Flags:**
+- `--type <type>` - Contract type: `openapi`, `protobuf`, `graphql` (required)
+- `--path <path>` - Path to schema file (required)
+- `--tests <tests>` - Comma-separated test files to run when schema changes (required)
+- `--service <name>` - Service/module name this schema belongs to
+- `--generated <paths>` - Comma-separated paths to generated files from this schema
+
+**Examples:**
+```bash
+# Register OpenAPI schema
+kai ci ingest-contracts --type openapi --path api/openapi.yaml \
+  --tests "tests/api/users.test.js,tests/api/auth.test.js" \
+  --service users
+
+# Register Protobuf schema with generated files
+kai ci ingest-contracts --type protobuf --path proto/user.proto \
+  --tests "tests/grpc/user.test.go" \
+  --service users \
+  --generated "gen/user.pb.go,gen/user_grpc.pb.go"
+
+# Register GraphQL schema
+kai ci ingest-contracts --type graphql --path schema.graphql \
+  --tests "tests/graphql/resolvers.test.ts" \
+  --service api
+```
+
+**How Contract Detection Works:**
+
+1. **Registration**: Register each contract schema with its associated tests
+2. **Fingerprinting**: Kai computes a hash (digest) of each schema file
+3. **Change Detection**: When planning, if a schema's digest changed, its registered tests are added to the plan
+4. **Generated Files**: If generated files from a schema change, the schema's tests are also added
+
+Contract registrations are stored in `.kai/contracts.json`.
+
+**Policy Configuration:**
+
+```yaml
+contracts:
+  enabled: true                    # Enable contract change detection
+  onChange: add_tests              # add_tests, expand, warn
+  types:                           # Which contract types to detect
+    - openapi
+    - protobuf
+    - graphql
+```
+
+---
+
+### `kai ci annotate-plan`
+
+Annotate a plan with fallback/tripwire information for auditability.
+
+```bash
+kai ci annotate-plan <plan-file> [flags]
+```
+
+**Flags:**
+- `--fallback-used` - Mark that fallback was triggered
+- `--fallback-reason <reason>` - Reason for fallback: `runtime_tripwire`, `planner_over_threshold`, `panic_switch`
+- `--fallback-trigger <text>` - The specific error/condition that triggered fallback
+- `--fallback-exit-code <code>` - Exit code from tripwire (e.g., 75)
+
+**Examples:**
+```bash
+# Annotate plan after tripwire triggered
+kai ci annotate-plan plan.json \
+  --fallback-used \
+  --fallback-reason runtime_tripwire \
+  --fallback-trigger "ModuleNotFoundError: No module named 'missing'" \
+  --fallback-exit-code 75
+
+# Annotate after planner expanded due to high uncertainty
+kai ci annotate-plan plan.json \
+  --fallback-used \
+  --fallback-reason planner_over_threshold
+```
+
+**Plan Fallback Field:**
+
+After annotation, the plan includes a `fallback` field:
+
+```json
+{
+  "fallback": {
+    "used": true,
+    "reason": "runtime_tripwire",
+    "trigger": "ModuleNotFoundError: No module named 'missing'",
+    "exitCode": 75
+  }
+}
+```
+
+**Use in CI:**
+
+```yaml
+- name: Run selective tests
+  id: selective
+  continue-on-error: true
+  run: npm run test:selective 2>&1 | tee test.log
+
+- name: Check tripwire
+  id: tripwire
+  run: kai ci detect-runtime-risk --stderr test.log --tripwire
+  continue-on-error: true
+
+- name: Rerun and annotate if tripwire triggered
+  if: steps.tripwire.outcome == 'failure'
+  run: |
+    npm run test:full
+    kai ci annotate-plan plan.json \
+      --fallback-used \
+      --fallback-reason runtime_tripwire \
+      --fallback-exit-code 75
+
+- name: Upload plan for audit
+  uses: actions/upload-artifact@v4
+  with:
+    name: test-plan
+    path: plan.json
+```
+
+This creates an audit trail showing when and why fallback occurred.
+
+---
+
+## Toolchain Integration (CI + IDEs)
+
+Practical integration points for CI and IDE workflows:
+
+- **CI pipelines:** use `kai ci plan` to generate a targeted test plan and `kai ci print` for human-readable summaries.
+- **Pre-commit/PR checks:** use `kai diff` and `kai intent render` to surface semantic changes before review.
+- **IDE helpers:** use `kai review open` and `kai review view` to fetch semantic review context from the CLI.
+- **Shell completion:** enable `kai completion` for refs/selectors to speed up CLI usage.
+
+Toolchain validation checklist:
+- See `kailab/docs/toolchain_validation.md` for CI/IDE/Git GUI validation status and steps.
+
+### `kai ci validate-plan`
+
+Validate that a plan.json file has all required fields with correct types.
+
+```bash
+kai ci validate-plan <plan-file> [--strict]
+```
+
+**Flags:**
+- `--strict` - Also validate optional fields like policyHash and analyzers
+
+**Validated Fields:**
+- Required: `mode`, `risk`, `safetyMode`, `provenance.kaiVersion`, `provenance.detectorVersion`, `provenance.generatedAt`
+- Strict mode: `provenance.policyHash`, `provenance.analyzers`
+- Value validation: `mode` ∈ {selective, expanded, full, shadow, skip}, `risk` ∈ {low, medium, high}
+
+**Exit Codes:**
+- `0` - Plan is valid
+- `1` - Plan is invalid or error reading file
+
+**Examples:**
+```bash
+# Basic validation
+kai ci validate-plan plan.json
+
+# Strict validation (includes optional fields)
+kai ci validate-plan plan.json --strict
+```
+
+---
+
+### Nightly Shadow Validation Job
+
+Use shadow mode with a nightly job to validate test selection accuracy before trusting it in production:
+
+```yaml
+# .github/workflows/nightly-validation.yml
+name: Nightly Test Selection Validation
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 3 AM UTC daily
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate comparison
+
+      - name: Generate shadow plan
+        run: |
+          kai ci plan @snap:last --safety-mode=shadow --out plan.json
+          kai ci validate-plan plan.json
+
+      - name: Run full test suite
+        id: full
+        run: npm run test:full 2>&1 | tee test.log
+
+      - name: Compare prediction to reality
+        run: |
+          # Extract which tests failed
+          FAILED=$(jq -r '.failures[].file' jest-results.json 2>/dev/null || echo "")
+          PREDICTED=$(jq -r '.targets.run[]' plan.json)
+
+          # Check if any failures were in skipped tests
+          for fail in $FAILED; do
+            if ! echo "$PREDICTED" | grep -q "$fail"; then
+              echo "MISS: $fail was not in predicted targets"
+              kai ci record-miss --plan plan.json --failed "$fail"
+            fi
+          done
+
+      - name: Annotate and upload plan
+        run: |
+          kai ci annotate-plan plan.json \
+            --fallback.used=false \
+            --fallback.reason=nightly_validation
+
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-validation-${{ github.run_number }}
+          path: |
+            plan.json
+            test.log
+            jest-results.json
+```
+
+This creates a feedback loop that:
+1. Generates a shadow plan (what *would* run selectively)
+2. Runs the full suite (ground truth)
+3. Compares predictions to actual failures
+4. Records any misses for analysis
+5. Archives the plan for dashboarding
+
+Over time, this builds confidence in test selection before enabling guarded or strict mode.
+
+---
+
+### `kai review`
+
+Code review commands centered on changesets.
+
+#### Code Diffs in Reviews (Semantic First, Text When Needed)
+
+Kai reviews center on ChangeSets. Each ChangeSet renders reviewable code in three layers:
+
+**1. Intent & Impact**
+- Human sentence (intent)
+- Affected modules/symbols
+- Classified change types (e.g., `API_SURFACE_CHANGED`, `CONDITION_CHANGED`)
+
+**2. Semantic Diff (default)**
+- Symbol hunks: before/after of functions, methods, classes, constants
+- Handles moves/renames/formatting automatically (no noise)
+- Highlights signature changes, condition/constant updates, and JSON/YAML/SQL units
+- Comments anchor to symbols (preferred) or file+range
+
+**3. Raw Text Diff (fallback / verify)**
+- Unified or side-by-side for any file (including unsupported language/binary-as-text)
+- Useful for trust-but-verify and copy/paste
+
+**CLI Examples:**
+```bash
+# Open a review for the latest ChangeSet
+kai review open @cs:last --title "Reduce session timeout to 30 min"
+
+# Show a ChangeSet with semantic hunks (default)
+kai review view @cs:last
+
+# Force raw text view (trust-but-verify)
+kai review view @cs:last --view=text
+
+# Mixed view: semantic first, then raw hunks for each touched file
+kai review view @cs:last --view=mixed
+
+# Plain semantic diff (outside the review flow)
+kai diff @snap:prev @snap:last --semantic
+
+# JSON for tooling / UI adapters
+kai diff @snap:prev @snap:last --json
+```
+
+**Example (Semantic Hunk):**
+```
+auth/login.ts
+  function login(user: User, device: string)
+-   returns boolean
++   returns boolean  // unchanged
+-  login(user, device)
++  login(user, device, ip: string)   // API_SURFACE_CHANGED: +ip
+
+auth/constants.ts
+- export const TIMEOUT = 3600
++ export const TIMEOUT = 1800         // CONSTANT_UPDATED
+```
+
+**JSON Shape (Hunks):**
+```json
+{
+  "units": [
+    {
+      "kind": "function",
+      "fqName": "auth.login",
+      "file": "auth/login.ts",
+      "change": "API_SURFACE_CHANGED",
+      "before": {"signature": "login(user: User, device: string)"},
+      "after":  {"signature": "login(user: User, device: string, ip: string)"},
+      "ranges": {"before":[[4,0],[12,1]], "after":[[4,0],[14,1]]}
+    }
+  ],
+  "files": [
+    {
+      "path": "auth/constants.ts",
+      "change": "CONSTANT_UPDATED",
+      "before": "export const TIMEOUT = 3600",
+      "after":  "export const TIMEOUT = 1800"
+    }
+  ]
+}
+```
+
+**Comment Anchoring:**
+- Primary: `ReviewComment` → Symbol (fqName, signature, ranges)
+- Fallback: `ReviewComment` → File + range
+- Comments auto-carry forward when a ChangeSet is `SUPERSEDED`
+
+**Unsupported/Non-Code Files:**
+- Show file-level status + raw diff if textual
+- If binary, show "changed" with size/hash deltas; attach preview if available
+
+---
+
+#### `kai review open`
+
+Open a new review for a changeset or workspace.
+
+```bash
+kai review open <target-id> --title <title> [flags]
+```
+
+**Arguments:**
+- `<target-id>` - ChangeSet or Workspace ID to review
+
+**Flags:**
+- `--title <title>` - Review title (required)
+- `--desc <text>` - Review description
+- `--reviewers <names>` - Reviewers (can be specified multiple times)
+
+**Example:**
+```bash
+kai review open cs.latest --title "Fix authentication timeout" --reviewers alice --reviewers bob
+```
+
+---
+
+#### `kai review list`
+
+List all reviews.
+
+```bash
+kai review list
+```
+
+**Output:**
+```
+ID            STATE     TITLE                        AUTHOR    TARGET
+a1b2c3d4...   open      Fix authentication timeout   alice     ChangeSet
+d4e5f6a7...   approved  Add billing module           bob       Workspace
+```
+
+---
+
+#### `kai review view`
+
+View details of a review with semantic diff.
+
+```bash
+kai review view <review-id> [flags]
+```
+
+**Flags:**
+- `--view <mode>` - View mode: `semantic` (default), `text`, or `mixed`
+- `--json` - Output as JSON (includes semantic hunks)
+
+**Examples:**
+```bash
+# Default semantic view
+kai review view a1b2c3d4
+
+# Raw text diff for verification
+kai review view a1b2c3d4 --view=text
+
+# Both semantic and raw hunks
+kai review view a1b2c3d4 --view=mixed
+```
+
+---
+
+#### `kai review status`
+
+Change the status of a review.
+
+```bash
+kai review status <review-id> <new-state>
+```
+
+**States:** `draft`, `open`, `approved`, `changes_requested`, `merged`, `abandoned`
+
+---
+
+#### `kai review approve`
+
+Approve a review.
+
+```bash
+kai review approve <review-id>
+```
+
+---
+
+#### `kai review request-changes`
+
+Request changes on a review.
+
+```bash
+kai review request-changes <review-id>
+```
+
+---
+
+#### `kai review close`
+
+Close a review with a final state.
+
+```bash
+kai review close <review-id> --state <merged|abandoned>
+```
+
+---
+
+#### `kai review ready`
+
+Mark a draft review as ready for review.
+
+```bash
+kai review ready <review-id>
+```
+
+---
+
+#### `kai review export`
+
+Export a review as markdown or HTML.
+
+```bash
+kai review export <review-id> [flags]
+```
+
+**Flags:**
+- `--markdown` - Export as markdown
+- `--html` - Export as HTML
+
+---
+
+## Configuration
+
+### Module Definitions
+
+Edit `.kai/rules/modules.yaml` to define your project's modules:
+
+```yaml
+modules:
+  # Simple module with single pattern
+  - name: Auth
+    include: ["auth/**"]
+
+  # Module with multiple patterns
+  - name: API
+    include:
+      - "api/**"
+      - "routes/**"
+      - "controllers/**"
+
+  # Module matching specific file types
+  - name: Tests
+    include:
+      - "**/*.test.ts"
+      - "**/*.spec.ts"
+      - "__tests__/**"
+
+  # Module with nested paths
+  - name: Components
+    include:
+      - "src/components/**"
+      - "src/ui/**"
+
+  # Feature-based modules
+  - name: Billing
+    include: ["**/billing/**", "**/payments/**"]
+
+  - name: Profile
+    include: ["**/profile/**", "**/user/**"]
+```
+
+**Pattern syntax (doublestar):**
+- `*` - Matches any characters except `/`
+- `**` - Matches any characters including `/`
+- `?` - Matches any single character
+- `[abc]` - Matches any character in the set
+- `{a,b}` - Matches either `a` or `b`
+
+**Examples:**
+| Pattern | Matches | Doesn't Match |
+|---------|---------|---------------|
+| `auth/**` | `auth/login.ts`, `auth/utils/hash.ts` | `authentication/login.ts` |
+| `*.ts` | `index.ts` | `src/index.ts` |
+| `**/*.test.ts` | `foo.test.ts`, `src/utils/foo.test.ts` | `foo.test.js` |
+| `src/{api,lib}/**` | `src/api/index.ts`, `src/lib/utils.ts` | `src/app/index.ts` |
+
+---
+
+### Change Type Rules
+
+The `.kai/rules/changetypes.yaml` file defines how changes are detected:
+
+```yaml
+rules:
+  - id: CONDITION_CHANGED
+    match:
+      node_types: ["binary_expression", "logical_expression", "relational_expression"]
+      detector: "operator_or_boundary_changed"
+
+  - id: CONSTANT_UPDATED
+    match:
+      node_types: ["number", "string"]
+      detector: "literal_value_changed"
+
+  - id: API_SURFACE_CHANGED
+    match:
+      node_types: ["function_declaration", "method_definition", "export_statement"]
+      detector: "params_or_exports_changed"
+```
+
+**Note:** In the MVP, these rules are informational. The detectors are implemented in Go code. Future versions may support custom detector definitions.
+
+---
+
+## Understanding the Output
+
+### Node Types
+
+| Kind | Description | Key Payload Fields |
+|------|-------------|-------------------|
+| `Snapshot` | Point-in-time capture of codebase | `gitRef`, `fileCount`, `createdAt` |
+| `File` | Source code file | `path`, `lang`, `digest` |
+| `Symbol` | Code symbol (function/class/variable) | `fqName`, `kind`, `range`, `signature` |
+| `Module` | Logical grouping of files | `name`, `patterns` |
+| `ChangeSet` | Diff between two snapshots | `base`, `head`, `intent` |
+| `ChangeType` | Classified change with evidence | `category`, `evidence` |
+
+### Edge Types
+
+| Type | From | To | Meaning |
+|------|------|-----|---------|
+| `HAS_FILE` | Snapshot | File | Snapshot contains this file |
+| `CONTAINS` | Module | File | Module includes this file |
+| `DEFINES_IN` | Symbol | File | Symbol is defined in this file |
+| `MODIFIES` | ChangeSet | File/Symbol | ChangeSet modifies this file/symbol |
+| `HAS` | ChangeSet | ChangeType | ChangeSet includes this change type |
+| `AFFECTS` | ChangeSet | Module | ChangeSet affects this module |
+
+### Change Type Evidence
+
+Each ChangeType node includes evidence of where the change occurred:
+
+```json
+{
+  "category": "CONDITION_CHANGED",
+  "evidence": {
+    "fileRanges": [
+      {
+        "path": "auth/session.ts",
+        "start": [7, 6],
+        "end": [7, 16]
+      }
+    ],
+    "symbols": ["abc123..."]
+  }
+}
+```
+
+- `fileRanges` - Source locations where the change was detected
+- `symbols` - IDs of symbols containing/affected by the change
+
+---
+
+## Architecture Deep Dive
+
+### Content-Addressed Storage
+
+Kai uses content-addressed storage for both nodes and file content:
+
+**Node IDs:**
+```
+NodeID = BLAKE3(kind + "\n" + canonicalJSON(payload))
+```
+
+This ensures:
+- Same content always produces same ID (deterministic)
+- Re-running commands doesn't create duplicates (idempotent)
+- Easy to verify data integrity
+
+**File Objects:**
+```
+.kai/objects/<blake3-hash-of-content>
+```
+
+Files are stored by their content hash, enabling:
+- Automatic deduplication
+- Efficient storage for similar files
+- Integrity verification
+
+### Database Schema
+
+```sql
+-- Nodes table: stores all entities
+CREATE TABLE nodes (
+  id BLOB PRIMARY KEY,         -- BLAKE3 hash
+  kind TEXT NOT NULL,          -- Node type
+  payload TEXT NOT NULL,       -- Canonical JSON
+  created_at INTEGER NOT NULL  -- Unix milliseconds
+);
+
+-- Edges table: stores relationships
+CREATE TABLE edges (
+  src BLOB NOT NULL,           -- Source node ID
+  type TEXT NOT NULL,          -- Edge type
+  dst BLOB NOT NULL,           -- Destination node ID
+  at BLOB,                     -- Context (snapshot/changeset ID)
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (src, type, dst, at)
+);
+
+-- Indexes for query performance
+CREATE INDEX edges_src ON edges(src);
+CREATE INDEX edges_dst ON edges(dst);
+CREATE INDEX edges_type ON edges(type);
+```
+
+### Tree-sitter Integration
+
+Kai uses Tree-sitter for parsing TypeScript/JavaScript:
+
+- **Language**: JavaScript grammar (handles most TS syntax)
+- **Node types parsed**:
+  - `function_declaration`
+  - `class_declaration`
+  - `method_definition`
+  - `variable_declaration`
+  - `lexical_declaration`
+  - `arrow_function`
+  - `export_statement`
+  - `binary_expression`
+  - `number`, `string`
+
+### Change Detection Algorithm
+
+1. **File Comparison**
+   ```
+   changed_files = files where base.digest != head.digest
+   ```
+
+2. **AST Differencing**
+   - Parse before/after with Tree-sitter
+   - Find corresponding nodes by position proximity
+   - Compare node content and structure
+
+3. **Detector Execution**
+   - `operator_or_boundary_changed`: Compare operators and numeric literals
+   - `literal_value_changed`: Compare string/number values at same position
+   - `params_or_exports_changed`: Compare function signatures and export lists
+
+---
+
+## Use Cases
+
+### Code Review Enhancement
+
+Use Kai to understand pull requests at a semantic level:
+
+```bash
+# Create snapshots of base and PR branches
+kai snapshot create --git main --repo .
+kai snapshot create --git pr-123 --repo .
+
+# Analyze and compare
+kai analyze symbols <main-snap>
+kai analyze symbols <pr-snap>
+kai changeset create <main-snap> <pr-snap>
+
+# Get summary
+kai intent render <changeset>
+kai dump <changeset> --json > review.json
+```
+
+### Change Impact Analysis
+
+Understand what modules and symbols are affected:
+
+```bash
+# View affected modules in changeset output
+kai changeset create <before> <after>
+# Output includes: Affected modules: [Auth, Billing]
+
+# Get detailed impact from JSON
+kai dump <changeset> --json | jq '.nodes[] | select(.kind == "Symbol")'
+```
+
+### Changelog Generation
+
+Generate semantic changelogs:
+
+```bash
+# For each release tag pair
+for version in v1.0 v1.1 v1.2; do
+  kai snapshot $version --repo .
+done
+
+# Generate changesets between versions
+kai changeset create <v1.0-snap> <v1.1-snap>
+kai intent render <cs-1>
+
+kai changeset create <v1.1-snap> <v1.2-snap>
+kai intent render <cs-2>
+```
+
+### Auditing and Compliance
+
+Track what types of changes were made:
+
+```bash
+# Export all change types
+kai dump <changeset> --json | jq '.nodes[] | select(.kind == "ChangeType")'
+
+# Find all API surface changes
+kai dump <changeset> --json | jq '.nodes[] | select(.payload.category == "API_SURFACE_CHANGED")'
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+**"opening repository: repository does not exist"**
+```
+Error: opening repo: repository does not exist at '.'
+```
+Solution: Ensure you're in a Git repository or specify `--repo` path.
+
+**"resolving ref: not a branch, tag, or commit hash"**
+```
+Error: resolving ref "main": not a branch, tag, or commit hash
+```
+Solution: Verify the Git ref exists locally (`git branch -a`, `git tag`). `kai snapshot create --git` accepts local refs (not `origin/main`). Run `git fetch` and use local branch names.
+
+**"Kai diff doesn't match Git/GitLab diff"**
+Symptoms: Git shows more files changed than Kai.
+
+Checklist:
+1) Ensure snapshots point to the exact Git refs you intended.
+2) Use explicit changesets for reviews (`kai changeset create snap.main snap.feature` then `kai review open @cs:last`).
+3) Confirm file types are supported (see `detectLang` in `kai-cli/internal/gitio/gitio.go`).
+
+**"invalid snapshot ID"**
+```
+Error: invalid snapshot ID: encoding/hex: invalid byte
+```
+Solution: Use the full 64-character hex ID from snapshot output.
+
+**"changeset not found"**
+```
+Error: getting changeset data: changeset not found
+```
+Solution: Verify the changeset ID. Run `sqlite3 .kai/db.sqlite "SELECT hex(id) FROM nodes WHERE kind='ChangeSet'"`.
+
+### Debugging
+
+**View database contents:**
+```bash
+# List all nodes
+sqlite3 .kai/db.sqlite "SELECT kind, COUNT(*) FROM nodes GROUP BY kind"
+
+# List all snapshots
+sqlite3 .kai/db.sqlite "SELECT hex(id), payload FROM nodes WHERE kind='Snapshot'"
+
+# List all changesets
+sqlite3 .kai/db.sqlite "SELECT hex(id), json_extract(payload, '$.intent') FROM nodes WHERE kind='ChangeSet'"
+```
+
+**Check object storage:**
+```bash
+# List stored objects
+ls -la .kai/objects/
+
+# View a file's content
+cat .kai/objects/<hash>
+```
+
+**Reset Kai:**
+```bash
+# Remove all Kai data
+rm -rf .kai/
+
+# Reinitialize
+kai init
+```
+
+---
+
+## Development
+
+### Building
+
+```bash
+# Build CLI
+cd kai-cli && make build
+
+# Build server
+cd kailab && make build
+
+# Run CLI tests
+cd kai-cli && make test
+
+# Run server tests
+cd kailab && make test
+
+# Run all tests
+(cd kai-core && go test ./...) && \
+(cd kai-cli && go test ./...) && \
+(cd kailab && go test ./...)
+```
+
+### Running Tests
+
+```bash
+# All tests
+go test ./...
+
+# Specific package
+go test ./internal/parse/...
+
+# With verbose output
+go test -v ./...
+
+# With coverage
+go test -cover ./...
+```
+
+### Project Structure
+
+```
+kai/
+├── kai-cli/                     # CLI application
+│   ├── cmd/kai/
+│   │   └── main.go              # CLI entry point with Cobra commands
+│   ├── internal/
+│   │   ├── graph/               # SQLite node/edge storage (local)
+│   │   ├── gitio/               # go-git repository operations
+│   │   ├── snapshot/            # Snapshot creation and symbol analysis
+│   │   ├── module/              # Path glob matching
+│   │   ├── classify/            # Change type detection
+│   │   └── remote/              # Kailab HTTP client
+│   ├── schema/
+│   │   └── 0001_init.sql        # Local database schema
+│   ├── rules/
+│   │   ├── modules.yaml         # Default module patterns
+│   │   └── changetypes.yaml     # Change type definitions
+│   ├── testdata/
+│   │   └── repo/                # Sample Git repository
+│   ├── go.mod
+│   └── Makefile
+│
+├── kai-core/                    # Shared library
+│   ├── cas/                     # Content-addressed storage (BLAKE3)
+│   ├── util/                    # Canonical JSON utilities
+│   ├── parse/                   # Tree-sitter parsing
+│   ├── detect/                  # Change type detection
+│   ├── diff/                    # Semantic diff computation
+│   ├── intent/                  # Intent generation
+│   ├── merge/                   # AST-aware 3-way merge
+│   └── go.mod
+│
+├── kailab/                      # Data plane server
+│   ├── cmd/kailabd/
+│   │   └── main.go              # Server entry point
+│   ├── api/                     # HTTP handlers and middleware
+│   ├── repo/                    # Multi-repo registry with LRU caching
+│   ├── store/                   # SQLite storage layer
+│   ├── pack/                    # Pack format encoding/decoding
+│   ├── proto/                   # Wire protocol DTOs
+│   ├── background/              # Background enrichment workers
+│   ├── config/                  # Environment configuration
+│   └── go.mod
+│
+├── kailab-control/              # Control plane server
+│   ├── cmd/kailab-control/
+│   │   └── main.go              # Server entry point
+│   ├── internal/
+│   │   ├── api/                 # HTTP handlers, middleware, routes
+│   │   ├── auth/                # JWT, magic links, PATs
+│   │   ├── cfg/                 # Environment configuration
+│   │   ├── db/                  # SQLite database layer
+│   │   ├── model/               # Data models
+│   │   └── routing/             # Shard picker
+│   ├── frontend/                # Svelte + Tailwind web console
+│   │   ├── src/
+│   │   │   ├── lib/             # Stores, API client
+│   │   │   └── routes/          # Page components
+│   │   └── package.json
+│   └── go.mod
+│
+└── README.md
+```
+
+### Adding a New Change Type
+
+1. Define the rule in `rules/changetypes.yaml`
+2. Add the category constant in `internal/classify/classify.go`
+3. Implement the detector function
+4. Add tests in `internal/classify/classify_test.go`
+
+### Adding a New Language
+
+1. Add Tree-sitter grammar dependency
+2. Update `internal/parse/parse.go` with language detection
+3. Add symbol extraction logic for new AST node types
+4. Update `internal/gitio/gitio.go` file extension detection
+
+---

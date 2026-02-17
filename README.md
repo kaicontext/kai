@@ -81,6 +81,8 @@ kai diff
 kai ci plan
 ```
 
+For the full command reference, concepts, and workflow examples, see [docs/cli-reference.md](docs/cli-reference.md).
+
 ---
 
 ## License
