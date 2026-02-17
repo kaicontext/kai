@@ -1,8 +1,93 @@
 # Contributing to Kai
 
-Thanks for your interest in contributing to Kai. This guide covers how to set up a development environment, run tests, and submit changes.
+Thanks for your interest in contributing to Kai. This guide covers what we accept, how to set up a development environment, and how to submit changes.
 
 Have questions? Join us on [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg).
+
+## Scope
+
+Kai is an open-core project. The OSS repo contains the core engine and CLI. The hosted cloud service is separate and closed-source.
+
+### What we accept
+
+- Bug fixes
+- Performance improvements
+- Determinism improvements
+- Documentation improvements
+- Additional language support (parsers, symbol extraction, call graphs)
+- CI integration enhancements
+- Test coverage improvements
+- CLI UX improvements
+
+### What we will not accept
+
+- Cloud or server implementations (authentication, multi-tenancy, hosting)
+- Enterprise features (RBAC, SSO, billing, audit logging)
+- Changes that introduce network dependencies into kai-core
+- Breaking changes without prior discussion in an issue
+- License changes
+
+These boundaries protect the open-core architecture. See [docs/architecture-boundary.md](docs/architecture-boundary.md) for the full breakdown.
+
+## Pull Request Process
+
+### Review requirements
+
+- All PRs require at least one maintainer approval
+- PRs must pass CI before merging
+- PRs must include tests if behavior changes
+- PRs must preserve deterministic behavior
+- PRs must not introduce prohibited dependencies (no `net/http` or cloud SDKs in kai-core)
+
+### Before you start
+
+- Check existing issues to avoid duplicating work
+- For large changes, open an issue first to discuss the approach
+- Keep PRs focused — one logical change per PR
+
+### Response times
+
+- Initial review within 5 business days
+- Major design discussions may take longer
+- If your PR has been waiting, ping us on Slack or in the PR
+
+### Decision authority
+
+Maintainers reserve the right to decline contributions that conflict with project direction, architectural boundaries, or correctness guarantees. We'll always explain why.
+
+## Determinism Requirements
+
+Kai's core promise is deterministic, reproducible results. Any change that affects the following must include regression tests:
+
+- Graph construction or hashing
+- Snapshot content or ordering
+- CI plan output or test selection
+- ChangeSet computation
+
+Run the regression suite before submitting:
+
+```bash
+cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
+  -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_" \
+  -v -count=1
+```
+
+If your change produces different output for the same input, it must be discussed in an issue first.
+
+## Open-Core Boundary Rules
+
+The `scripts/check-core-purity.sh` script enforces these rules in CI:
+
+- No `net/http` imports in kai-core
+- No cloud SDK dependencies in kai-core
+- No cloud provider URLs in kai-core
+- No proprietary concepts (`tenant`, `org_id`, `sso`, `billing`) in kai-core
+
+Run it locally before submitting:
+
+```bash
+./scripts/check-core-purity.sh
+```
 
 ## Development Setup
 
@@ -10,7 +95,6 @@ Have questions? Join us on [Slack](https://join.slack.com/t/kailayer/shared_invi
 
 - Go 1.24+
 - GCC or Clang (for CGO — tree-sitter and SQLite)
-- Node.js 20+ (for frontend and benchmark repos)
 - Git
 
 ### Build
@@ -32,11 +116,6 @@ CGO_ENABLED=1 go build ./...
 cd kai-cli && CGO_ENABLED=1 go test ./...
 cd kai-core && CGO_ENABLED=1 go test ./...
 
-# Regression suite only
-cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
-  -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_" \
-  -v -count=1
-
 # Benchmarks
 ./bench/run_repos.sh --mode both -n 3
 ```
@@ -47,26 +126,18 @@ cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
 kai-cli/           CLI binary (commands, CI plan, shadow mode)
 kai-core/          Core engine (tree-sitter parsing, graph, snapshots)
 bench/             Benchmark harness
-docs/              Open-core boundary, licensing, and architecture docs
+docs/              Architecture, licensing, and reference docs
 scripts/           Enforcement and utility scripts
 ```
 
-## Making Changes
-
-### Before You Start
-
-- Check existing issues to avoid duplicating work
-- For large changes, open an issue first to discuss the approach
-- Keep PRs focused — one logical change per PR
-
-### Code Style
+## Code Style
 
 - Follow standard Go conventions (`gofmt`, `go vet`)
 - No unnecessary abstractions — simpler is better
 - Tests go next to the code they test (`*_test.go`)
-- Database migrations need both SQLite and PostgreSQL versions
+- Don't add comments that restate the code
 
-### Commit Messages
+### Commit messages
 
 Write clear, concise commit messages:
 
@@ -81,19 +152,9 @@ Added export_statement case with parseReexportSource helper.
 - First line: imperative mood, under 72 characters
 - Body: explain *why*, not just *what*
 
-### Testing
-
-- Add tests for new functionality
-- Run the regression suite before submitting
-- For graph/selection changes, verify zero false negatives:
-  ```bash
-  cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ -run "TestFalseNeg_" -v
-  ```
-
-
 ## Developer Certificate of Origin (DCO)
 
-All contributions to Kai must be signed off under the [Developer Certificate of Origin](https://developercertificate.org/). This certifies that you have the right to submit the code and that it can be distributed under the Apache 2.0 license.
+All contributions must be signed off under the [Developer Certificate of Origin](https://developercertificate.org/). This certifies that you have the right to submit the code and that it can be distributed under the Apache 2.0 license.
 
 Add a `Signed-off-by` line to your commits:
 
@@ -117,7 +178,7 @@ PRs without DCO sign-off will not be merged.
 
 ## Copyright Headers
 
-Source files should include an SPDX copyright header. Run the check script to verify:
+Source files should include an SPDX copyright header:
 
 ```bash
 ./scripts/check-copyright-headers.sh          # Check
@@ -129,10 +190,14 @@ Source files should include an SPDX copyright header. Run the check script to ve
 1. Fork the repository
 2. Create a branch from `main`
 3. Make your changes with tests
-4. Sign off your commits (`git commit -s`)
-5. Ensure CI passes: `go test ./...` in each module
-6. Open a PR against `main`
-7. Fill out the PR template
+4. Run `./scripts/check-core-purity.sh`
+5. Sign off your commits (`git commit -s`)
+6. Ensure CI passes: `go test ./...` in each module
+7. Open a PR against `main`
+
+## Security Reporting
+
+Vulnerabilities should not be submitted as public issues. See [SECURITY.md](SECURITY.md) for responsible disclosure instructions.
 
 ## Reporting Issues
 
@@ -142,4 +207,4 @@ Source files should include an SPDX copyright header. Run the check script to ve
 
 ## Questions
 
-Open a discussion or issue — we're happy to help.
+Open a [discussion](https://github.com/kailayerhq/kai/discussions) or join [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg).
