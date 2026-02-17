@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing to Kai. This guide covers how to set up a development environment, run tests, and submit changes.
 
+Have questions? Join us on [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg).
+
 ## Development Setup
 
 ### Prerequisites
