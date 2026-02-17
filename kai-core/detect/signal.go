@@ -265,7 +265,7 @@ func inferTags(ct *ChangeType) []string {
 // isTestFile checks if a path is a test file.
 func isTestFile(path string) bool {
 	// Common test file patterns
-	patterns := []string{"_test.go", ".test.js", ".test.ts", ".spec.js", ".spec.ts", "test_", "_test.py", "_spec.rb"}
+	patterns := []string{"_test.go", ".test.js", ".test.ts", ".spec.js", ".spec.ts", "test_", "_test.py", "_spec.rb", "_test.rb"}
 	for _, p := range patterns {
 		if len(path) >= len(p) && path[len(path)-len(p):] == p {
 			return true

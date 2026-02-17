@@ -1,0 +1,151 @@
+# GitLab CI configuration for Ruby on Rails with Kai selective testing
+#
+# This runs only the RSpec tests affected by your changes instead of the full suite.
+#
+# Setup:
+# 1. Add Kai binary to your CI image or install at runtime
+# 2. Run your full test suite once with SimpleCov to generate coverage
+# 3. Ingest coverage data so Kai knows which specs cover which files
+#
+# After setup, Kai will select only the relevant specs on every MR.
+
+stages:
+  - plan
+  - test
+  - coverage
+
+variables:
+  RAILS_ENV: test
+  DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/test"
+  BUNDLE_PATH: vendor/bundle
+
+# ── Stage 1: Compute test plan ──────────────────────────────────
+kai-plan:
+  stage: plan
+  image: ruby:3.3
+  before_script:
+    - curl -fsSL https://kailayer.com/install.sh | sh
+  script:
+    - |
+      # Generate selective test plan from MR diff
+      kai ci plan \
+        --git-range ${CI_MERGE_REQUEST_DIFF_BASE_SHA}..${CI_COMMIT_SHA} \
+        --out plan.json \
+        --explain
+
+      # Extract mode and test count for downstream jobs
+      MODE=$(jq -r .mode plan.json)
+      TEST_COUNT=$(jq '.targets.run | length' plan.json)
+      CONFIDENCE=$(jq -r .safety.confidence plan.json)
+
+      echo "KAI_MODE=$MODE" >> plan.env
+      echo "KAI_TEST_COUNT=$TEST_COUNT" >> plan.env
+      echo "KAI_CONFIDENCE=$CONFIDENCE" >> plan.env
+
+      echo "Plan: mode=$MODE, tests=$TEST_COUNT, confidence=$CONFIDENCE"
+  artifacts:
+    paths:
+      - plan.json
+    reports:
+      dotenv: plan.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Stage 2: Run only affected specs ────────────────────────────
+rspec-selective:
+  stage: test
+  image: ruby:3.3
+  needs: [kai-plan]
+  services:
+    - postgres:16
+    - redis:7
+  before_script:
+    - bundle install --jobs 4 --retry 3
+    - bundle exec rails db:prepare
+  script:
+    - |
+      if [ "$KAI_MODE" = "skip" ]; then
+        echo "No tests affected by this change"
+        exit 0
+      fi
+
+      # Extract spec files from plan
+      SPECS=$(jq -r '.targets.run[]' plan.json | grep '_spec\.rb$' | tr '\n' ' ')
+
+      if [ -z "$SPECS" ]; then
+        echo "No Ruby specs in plan, skipping"
+        exit 0
+      fi
+
+      echo "Running $KAI_TEST_COUNT specs (confidence: $KAI_CONFIDENCE)"
+      echo "Specs: $SPECS"
+
+      # Run only the affected specs with SimpleCov for coverage learning
+      COVERAGE=true bundle exec rspec $SPECS \
+        --format progress \
+        --format json --out rspec-results.json
+  artifacts:
+    paths:
+      - coverage/
+      - rspec-results.json
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Stage 2 (fallback): Full suite on low confidence ────────────
+rspec-full:
+  stage: test
+  image: ruby:3.3
+  needs: [kai-plan]
+  services:
+    - postgres:16
+    - redis:7
+  before_script:
+    - bundle install --jobs 4 --retry 3
+    - bundle exec rails db:prepare
+  script:
+    - |
+      echo "Low confidence ($KAI_CONFIDENCE), running full suite"
+      COVERAGE=true bundle exec rspec \
+        --format progress \
+        --format json --out rspec-results.json
+  artifacts:
+    paths:
+      - coverage/
+      - rspec-results.json
+    when: always
+  rules:
+    - if: $KAI_CONFIDENCE < 0.4
+      when: always
+    - when: never
+
+# ── Stage 3: Ingest coverage for next run ────────────────────────
+ingest-coverage:
+  stage: coverage
+  image: ruby:3.3
+  needs: [rspec-selective]
+  before_script:
+    - curl -fsSL https://kailayer.com/install.sh | sh
+  script:
+    - |
+      if [ -f coverage/.resultset.json ]; then
+        kai ci ingest-coverage \
+          --from coverage/.resultset.json \
+          --format nyc \
+          --branch "$CI_COMMIT_REF_NAME" \
+          --tag "pipeline-$CI_PIPELINE_ID"
+        echo "Coverage ingested for future selective runs"
+      else
+        echo "No coverage data found, skipping ingest"
+      fi
+  artifacts:
+    paths:
+      - .kai/coverage-map.json
+  cache:
+    key: kai-coverage
+    paths:
+      - .kai/coverage-map.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

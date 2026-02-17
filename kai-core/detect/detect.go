@@ -130,7 +130,7 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	var changes []*ChangeType
 
 	// Detect function additions/removals (most important for intent)
-	funcChanges := d.detectFunctionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID)
+	funcChanges := d.detectFunctionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, parseLang)
 	changes = append(changes, funcChanges...)
 
 	// Detect condition changes
@@ -142,19 +142,19 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	changes = append(changes, constChanges...)
 
 	// Detect API surface changes
-	apiChanges := d.detectAPISurfaceChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID)
+	apiChanges := d.detectAPISurfaceChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, parseLang)
 	changes = append(changes, apiChanges...)
 
 	return changes, nil
 }
 
 // detectFunctionChanges detects added, removed, or modified functions.
-func (d *Detector) detectFunctionChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
+func (d *Detector) detectFunctionChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string, lang string) []*ChangeType {
 	var changes []*ChangeType
 
 	// Get all function declarations from both versions
-	beforeFuncs := GetAllFunctions(before, beforeContent)
-	afterFuncs := GetAllFunctions(after, afterContent)
+	beforeFuncs := GetAllFunctions(before, beforeContent, lang)
+	afterFuncs := GetAllFunctions(after, afterContent, lang)
 
 	// Check for added functions
 	for name, afterFunc := range afterFuncs {
@@ -233,43 +233,81 @@ type FuncInfo struct {
 }
 
 // GetAllFunctions extracts all function declarations from a parsed file.
-// Exported for use by rename detection.
-func GetAllFunctions(parsed *parse.ParsedFile, content []byte) map[string]*FuncInfo {
+// Exported for use by rename detection. The lang parameter selects
+// language-appropriate AST node types (defaults to JS/TS).
+func GetAllFunctions(parsed *parse.ParsedFile, content []byte, lang ...string) map[string]*FuncInfo {
 	funcs := make(map[string]*FuncInfo)
 
-	// Function declarations: function foo() {}
-	for _, node := range parsed.FindNodesOfType("function_declaration") {
-		name := getFunctionName(node, content)
-		if name != "" {
-			body := getFunctionBody(node, content)
-			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
-		}
+	l := "js"
+	if len(lang) > 0 && lang[0] != "" {
+		l = lang[0]
 	}
 
-	// Arrow functions assigned to variables: const foo = () => {}
-	for _, node := range parsed.FindNodesOfType("lexical_declaration") {
-		name, arrowNode := getArrowFunctionName(node, content)
-		if name != "" && arrowNode != nil {
-			body := getFunctionBody(arrowNode, content)
-			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+	switch l {
+	case "rb":
+		// Ruby: method and singleton_method nodes
+		for _, node := range parsed.FindNodesOfType("method") {
+			name := getFunctionName(node, content)
+			if name != "" {
+				body := getFunctionBody(node, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
 		}
-	}
-
-	// Variable declarations: var foo = function() {}
-	for _, node := range parsed.FindNodesOfType("variable_declaration") {
-		name, funcNode := getVariableFunctionName(node, content)
-		if name != "" && funcNode != nil {
-			body := getFunctionBody(funcNode, content)
-			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+		for _, node := range parsed.FindNodesOfType("singleton_method") {
+			name := getFunctionName(node, content)
+			if name != "" {
+				body := getFunctionBody(node, content)
+				funcs["self."+name] = &FuncInfo{Name: "self." + name, Node: node, Body: body}
+			}
 		}
-	}
 
-	// Method definitions in classes/objects
-	for _, node := range parsed.FindNodesOfType("method_definition") {
-		name := getFunctionName(node, content)
-		if name != "" {
-			body := getFunctionBody(node, content)
-			funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+	case "py":
+		// Python: function_definition nodes
+		for _, node := range parsed.FindNodesOfType("function_definition") {
+			name := getFunctionName(node, content)
+			if name != "" {
+				body := getFunctionBody(node, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
+		}
+
+	default:
+		// JS/TS/Go and others
+
+		// Function declarations: function foo() {}
+		for _, node := range parsed.FindNodesOfType("function_declaration") {
+			name := getFunctionName(node, content)
+			if name != "" {
+				body := getFunctionBody(node, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
+		}
+
+		// Arrow functions assigned to variables: const foo = () => {}
+		for _, node := range parsed.FindNodesOfType("lexical_declaration") {
+			name, arrowNode := getArrowFunctionName(node, content)
+			if name != "" && arrowNode != nil {
+				body := getFunctionBody(arrowNode, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
+		}
+
+		// Variable declarations: var foo = function() {}
+		for _, node := range parsed.FindNodesOfType("variable_declaration") {
+			name, funcNode := getVariableFunctionName(node, content)
+			if name != "" && funcNode != nil {
+				body := getFunctionBody(funcNode, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
+		}
+
+		// Method definitions in classes/objects
+		for _, node := range parsed.FindNodesOfType("method_definition") {
+			name := getFunctionName(node, content)
+			if name != "" {
+				body := getFunctionBody(node, content)
+				funcs[name] = &FuncInfo{Name: name, Node: node, Body: body}
+			}
 		}
 	}
 
@@ -282,7 +320,7 @@ func getFunctionBody(node *sitter.Node, content []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
-		case "statement_block", "block", "expression_statement":
+		case "statement_block", "block", "expression_statement", "body_statement":
 			return parse.GetNodeContent(child, content)
 		}
 	}
@@ -449,29 +487,43 @@ func (d *Detector) detectConstantUpdates(path string, before, after *parse.Parse
 }
 
 // detectAPISurfaceChanges detects changes in function signatures or exports.
-func (d *Detector) detectAPISurfaceChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
+func (d *Detector) detectAPISurfaceChanges(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string, lang string) []*ChangeType {
 	var changes []*ChangeType
 
 	// Check function declarations
-	funcChanges := d.compareFunctions(path, before, after, beforeContent, afterContent, fileID)
+	funcChanges := d.compareFunctions(path, before, after, beforeContent, afterContent, fileID, lang)
 	changes = append(changes, funcChanges...)
 
-	// Check export statements
-	exportChanges := d.compareExports(path, before, after, beforeContent, afterContent, fileID)
-	changes = append(changes, exportChanges...)
+	// Check export statements (skip for languages without export keyword)
+	if lang != "rb" && lang != "py" {
+		exportChanges := d.compareExports(path, before, after, beforeContent, afterContent, fileID)
+		changes = append(changes, exportChanges...)
+	}
 
 	return changes
 }
 
-func (d *Detector) compareFunctions(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
+func (d *Detector) compareFunctions(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string, lang string) []*ChangeType {
 	var changes []*ChangeType
 
-	beforeFuncs := before.FindNodesOfType("function_declaration")
-	afterFuncs := after.FindNodesOfType("function_declaration")
+	var beforeFuncs, afterFuncs []*sitter.Node
 
-	// Also check arrow functions and method definitions
-	beforeFuncs = append(beforeFuncs, before.FindNodesOfType("method_definition")...)
-	afterFuncs = append(afterFuncs, after.FindNodesOfType("method_definition")...)
+	switch lang {
+	case "rb":
+		beforeFuncs = before.FindNodesOfType("method")
+		afterFuncs = after.FindNodesOfType("method")
+		beforeFuncs = append(beforeFuncs, before.FindNodesOfType("singleton_method")...)
+		afterFuncs = append(afterFuncs, after.FindNodesOfType("singleton_method")...)
+	case "py":
+		beforeFuncs = before.FindNodesOfType("function_definition")
+		afterFuncs = after.FindNodesOfType("function_definition")
+	default:
+		beforeFuncs = before.FindNodesOfType("function_declaration")
+		afterFuncs = after.FindNodesOfType("function_declaration")
+		// Also check arrow functions and method definitions
+		beforeFuncs = append(beforeFuncs, before.FindNodesOfType("method_definition")...)
+		afterFuncs = append(afterFuncs, after.FindNodesOfType("method_definition")...)
+	}
 
 	// Build a map of function names to nodes
 	beforeByName := make(map[string]*sitter.Node)
@@ -673,7 +725,7 @@ func getFunctionName(node *sitter.Node, content []byte) string {
 func getFunctionParams(node *sitter.Node, content []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "formal_parameters" {
+		if child.Type() == "formal_parameters" || child.Type() == "method_parameters" || child.Type() == "parameters" {
 			return parse.GetNodeContent(child, content)
 		}
 	}

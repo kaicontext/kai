@@ -370,6 +370,10 @@ func extToLang(ext string) string {
 		return "json"
 	case ".yaml", ".yml":
 		return "yaml"
+	case ".rb":
+		return "rb"
+	case ".rs":
+		return "rs"
 	case ".sql":
 		return "sql"
 	default:
@@ -379,7 +383,7 @@ func extToLang(ext string) string {
 
 func isCodeLang(lang string) bool {
 	switch lang {
-	case "js", "ts", "py", "go", "rust", "java":
+	case "js", "ts", "py", "go", "rb", "rs", "rust", "java":
 		return true
 	default:
 		return false
