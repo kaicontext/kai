@@ -4,6 +4,7 @@ package gitio
 import (
 	"fmt"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -182,6 +183,42 @@ func (gs *GitSource) loadFiles() error {
 
 	gs.files = files
 	return nil
+}
+
+// DiffFilesNative uses git diff --name-status for fast diffing on large repos.
+func (r *Repository) DiffFilesNative(base, head string) (added, modified, deleted []string, err error) {
+	cmd := exec.Command("git", "diff", "--name-status", base, head)
+	cmd.Dir = r.path
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("git diff --name-status: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		status, path := parts[0], parts[1]
+		switch {
+		case strings.HasPrefix(status, "A"):
+			added = append(added, path)
+		case strings.HasPrefix(status, "D"):
+			deleted = append(deleted, path)
+		case strings.HasPrefix(status, "M"):
+			modified = append(modified, path)
+		case strings.HasPrefix(status, "R"):
+			// Rename: tab-separated old\tnew in the path part
+			renameParts := strings.SplitN(path, "\t", 2)
+			if len(renameParts) == 2 {
+				deleted = append(deleted, renameParts[0])
+				added = append(added, renameParts[1])
+			}
+		}
+	}
+	return added, modified, deleted, nil
 }
 
 // DiffFiles returns the paths of files that differ between two commits.

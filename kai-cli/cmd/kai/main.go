@@ -4868,6 +4868,17 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		}
 		gitBase, gitHead := parts[0], parts[1]
 
+		// Fast path: use git diff + coverage map when available
+		coverageMap := loadOrCreateCoverageMap()
+		hasCoverage := coverageMap != nil && len(coverageMap.Entries) > 0
+		if hasCoverage && !ciNoFast {
+			plan, _, err := generateCIPlanFast(gitBase, gitHead, ciGitRepo, coverageMap)
+			if err == nil {
+				return outputCIPlan(*plan, args)
+			}
+			fmt.Fprintf(os.Stderr, "Fast path failed (%v), falling back to full snapshot\n", err)
+		}
+
 		// Create temp database
 		tmpDir, err := os.MkdirTemp("", "kai-ci-*")
 		if err != nil {
@@ -5633,7 +5644,14 @@ func runCIPlan(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Output the plan
+	return outputCIPlan(plan, args)
+}
+
+// outputCIPlan handles plan serialization, file writing, and display.
+func outputCIPlan(plan CIPlan, args []string) error {
+	// Load CI policy for fail-closed checks
+	ciPolicy, _, _ := loadCIPolicy()
+
 	planJSON, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling plan: %w", err)
@@ -14831,22 +14849,14 @@ func extractAllTestFilesFromCoverage(cm *CoverageMap) []string {
 func generateCIPlanFast(gitBase, gitHead, repoPath string, coverageMap *CoverageMap) (*CIPlan, func(), error) {
 	start := time.Now()
 
-	// Open repo and resolve refs
+	// Open repo (for path resolution only)
 	repo, err := gitio.Open(repoPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening repo: %w", err)
 	}
-	baseCommit, err := repo.ResolveRef(gitBase)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolving base ref %s: %w", gitBase, err)
-	}
-	headCommit, err := repo.ResolveRef(gitHead)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolving head ref %s: %w", gitHead, err)
-	}
 
-	// Git diff — no file reading needed
-	added, modified, deleted, err := repo.DiffFiles(baseCommit, headCommit)
+	// Use native git diff — instant even on large repos
+	added, modified, deleted, err := repo.DiffFilesNative(gitBase, gitHead)
 	if err != nil {
 		return nil, nil, fmt.Errorf("computing diff: %w", err)
 	}
