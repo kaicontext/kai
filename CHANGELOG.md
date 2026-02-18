@@ -3,9 +3,10 @@
 All notable changes to Kai are documented here.
 
 ## Changelog since v0.3.0
-_32 commits since 2026-02-11_
+_34 commits since 2026-02-11_
 
 ### Features
+- Add VitePress docs site and automated changelog pipeline (`e693fc94`)
 - Add diff-first CI fast path: skip full snapshots when coverage map exists (`bff10aec`)
 - Add Ruby and Python support to change detection (`497605ab`)
 - Add ideal customer profile for design partner outreach (`6f27d183`)
@@ -34,8 +35,12 @@ _32 commits since 2026-02-11_
 - Fix idempotent migration for job outputs columns on PostgreSQL (`618c7181`)
 
 ### Other
+- Remove duplicate VitePress setup (docs site lives in kai-server) (`dd794281`)
 - Remove ICP doc from OSS repo (moved to private) (`0f4e3ce1`)
 - Move detailed CLI reference to docs/cli-reference.md (`82143bec`)
 - Simplify README to focus on what Kai does (`f5a8fe06`)
 - Split repo: remove server code to separate kai-server repository (`b3fd983a`)
 - Open-core architecture, licensing, benchmarks, CI, telemetry, and regression tests (`8d38b45f`)
+- Both compile cleanly. The qualifyShardURL function is implemented and working. (`f83766b9`)
+- actionCheckout  completely rewritten to use the Kai API instead of git clone: (`9078e36e`)
+- Root cause: The Kai CLI pushes snap.latest (not snap.main). Both kai/kailab and howth/howth only have two refs: snap.latest and cs.latest. notifyPushCI was converting snap.latest!’ refs/heads/latest, which never matches branches: [main] in any workflow. CI never worked for Kai CLI pushes  howth was the same. (`4d6475f7`)
