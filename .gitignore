@@ -36,6 +36,11 @@ kai-cli/kai
 Thumbs.db
 .kai/
 
+# Docs
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
 # Benchmark repo caches and artifacts
 bench/.repo-cache/
 bench/__pycache__/
