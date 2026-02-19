@@ -1,0 +1,143 @@
+# GitHub Actions workflow for Next.js + Jest with Kai selective testing
+#
+# Runs only the Jest tests affected by your changes instead of the full suite.
+#
+# Setup:
+# 1. Install Kai CLI in your project (or let the workflow install it)
+# 2. Ensure jest.config.js uses next/jest and has coverage configured
+# 3. Run your full test suite once with --coverage to generate Istanbul output
+# 4. Ingest coverage so Kai knows which tests cover which files
+#
+# Works with both App Router and Pages Router projects.
+
+name: CI (Kai Selective)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Step 1: Compute selective test plan ──────────────────────────
+  kai-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      test-count: ${{ steps.plan.outputs.test_count }}
+      confidence: ${{ steps.plan.outputs.confidence }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Kai
+        run: curl -fsSL https://kailayer.com/install.sh | sh
+
+      - name: Generate selective test plan
+        id: plan
+        run: |
+          kai ci plan \
+            --git-range ${{ github.event.pull_request.base.sha || 'HEAD~1' }}..${{ github.sha }} \
+            --out plan.json \
+            --explain
+
+          echo "mode=$(jq -r .mode plan.json)" >> "$GITHUB_OUTPUT"
+          echo "test_count=$(jq '.targets.run | length' plan.json)" >> "$GITHUB_OUTPUT"
+          echo "confidence=$(jq -r .safety.confidence plan.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kai-plan
+          path: plan.json
+
+  # ── Step 2: Run only affected tests ─────────────────────────────
+  test-selective:
+    needs: kai-plan
+    if: needs.kai-plan.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kai-plan
+
+      - name: Run selected Jest tests
+        run: |
+          TESTS=$(jq -r '.targets.run[]' plan.json | grep '\.test\.\(js\|jsx\|ts\|tsx\)$\|\.spec\.\(js\|jsx\|ts\|tsx\)$' | tr '\n' ' ')
+
+          if [ -z "$TESTS" ]; then
+            echo "No matching test files in plan, skipping"
+            exit 0
+          fi
+
+          echo "Running ${{ needs.kai-plan.outputs.test-count }} tests (confidence: ${{ needs.kai-plan.outputs.confidence }})"
+          npx jest $TESTS --coverage --coverageReporters=json --ci
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+
+  # ── Step 2 (fallback): Full suite on low confidence ─────────────
+  test-full:
+    needs: kai-plan
+    if: needs.kai-plan.outputs.confidence < 0.4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run full Jest suite
+        run: npx jest --coverage --coverageReporters=json --ci
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+
+  # ── Step 3: Ingest coverage for next run ─────────────────────────
+  ingest-coverage:
+    needs: [test-selective, test-full]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Kai
+        run: curl -fsSL https://kailayer.com/install.sh | sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
+      - name: Ingest Istanbul/NYC coverage
+        run: |
+          if [ -f coverage/coverage-final.json ]; then
+            kai ci ingest-coverage \
+              --from coverage/coverage-final.json \
+              --format nyc \
+              --branch "${{ github.ref_name }}" \
+              --tag "${{ github.sha }}"
+            echo "Coverage ingested for future selective runs"
+          else
+            echo "No coverage data found, skipping ingest"
+          fi

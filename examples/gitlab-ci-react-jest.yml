@@ -1,0 +1,131 @@
+# GitLab CI configuration for React + Jest with Kai selective testing
+#
+# Runs only the Jest tests affected by your changes instead of the full suite.
+#
+# Setup:
+# 1. Add Kai binary to your CI image or install at runtime
+# 2. Run your full test suite once with --coverage to generate Istanbul output
+# 3. Ingest coverage so Kai knows which tests cover which files
+#
+# After setup, Kai will select only the relevant tests on every MR.
+
+stages:
+  - plan
+  - test
+  - coverage
+
+variables:
+  NODE_ENV: test
+
+# ── Stage 1: Compute test plan ──────────────────────────────────
+kai-plan:
+  stage: plan
+  image: node:20
+  before_script:
+    - curl -fsSL https://kailayer.com/install.sh | sh
+  script:
+    - |
+      kai ci plan \
+        --git-range ${CI_MERGE_REQUEST_DIFF_BASE_SHA}..${CI_COMMIT_SHA} \
+        --out plan.json \
+        --explain
+
+      MODE=$(jq -r .mode plan.json)
+      TEST_COUNT=$(jq '.targets.run | length' plan.json)
+      CONFIDENCE=$(jq -r .safety.confidence plan.json)
+
+      echo "KAI_MODE=$MODE" >> plan.env
+      echo "KAI_TEST_COUNT=$TEST_COUNT" >> plan.env
+      echo "KAI_CONFIDENCE=$CONFIDENCE" >> plan.env
+
+      echo "Plan: mode=$MODE, tests=$TEST_COUNT, confidence=$CONFIDENCE"
+  artifacts:
+    paths:
+      - plan.json
+    reports:
+      dotenv: plan.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Stage 2: Run only affected tests ────────────────────────────
+jest-selective:
+  stage: test
+  image: node:20
+  needs: [kai-plan]
+  before_script:
+    - npm ci
+  script:
+    - |
+      if [ "$KAI_MODE" = "skip" ]; then
+        echo "No tests affected by this change"
+        exit 0
+      fi
+
+      TESTS=$(jq -r '.targets.run[]' plan.json | grep '\.test\.\(js\|jsx\|ts\|tsx\)$' | tr '\n' ' ')
+
+      if [ -z "$TESTS" ]; then
+        echo "No matching test files in plan, skipping"
+        exit 0
+      fi
+
+      echo "Running $KAI_TEST_COUNT tests (confidence: $KAI_CONFIDENCE)"
+      echo "Tests: $TESTS"
+
+      npx jest $TESTS --coverage --coverageReporters=json --ci
+  artifacts:
+    paths:
+      - coverage/
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Stage 2 (fallback): Full suite on low confidence ────────────
+jest-full:
+  stage: test
+  image: node:20
+  needs: [kai-plan]
+  before_script:
+    - npm ci
+  script:
+    - |
+      echo "Low confidence ($KAI_CONFIDENCE), running full suite"
+      npx jest --coverage --coverageReporters=json --ci
+  artifacts:
+    paths:
+      - coverage/
+    when: always
+  rules:
+    - if: $KAI_CONFIDENCE < 0.4
+      when: always
+    - when: never
+
+# ── Stage 3: Ingest coverage for next run ────────────────────────
+ingest-coverage:
+  stage: coverage
+  image: node:20
+  needs: [jest-selective]
+  before_script:
+    - curl -fsSL https://kailayer.com/install.sh | sh
+  script:
+    - |
+      if [ -f coverage/coverage-final.json ]; then
+        kai ci ingest-coverage \
+          --from coverage/coverage-final.json \
+          --format nyc \
+          --branch "$CI_COMMIT_REF_NAME" \
+          --tag "pipeline-$CI_PIPELINE_ID"
+        echo "Coverage ingested for future selective runs"
+      else
+        echo "No coverage data found, skipping ingest"
+      fi
+  artifacts:
+    paths:
+      - .kai/coverage-map.json
+  cache:
+    key: kai-coverage
+    paths:
+      - .kai/coverage-map.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
