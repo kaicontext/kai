@@ -403,7 +403,7 @@ func (db *DB) GetEdgesByContextAndDst(at []byte, edgeType EdgeType, dst []byte) 
 // which content-addressed version of the file they point to.
 func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, error) {
 	rows, err := db.conn.Query(`
-		SELECT e.src, e.dst, e.created_at
+		SELECT e.src, e.dst, e.at, e.created_at
 		FROM edges e
 		JOIN nodes n ON e.dst = n.id
 		WHERE e.type = ?
@@ -417,9 +417,9 @@ func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, err
 
 	var edges []*Edge
 	for rows.Next() {
-		var src, dst []byte
+		var src, dst, at []byte
 		var createdAt int64
-		if err := rows.Scan(&src, &dst, &createdAt); err != nil {
+		if err := rows.Scan(&src, &dst, &at, &createdAt); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
 
@@ -427,6 +427,7 @@ func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, err
 			Src:       src,
 			Type:      edgeType,
 			Dst:       dst,
+			At:        at,
 			CreatedAt: createdAt,
 		})
 	}

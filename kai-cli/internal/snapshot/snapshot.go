@@ -411,12 +411,36 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 
 	// For test files, trace the full import graph transitively to find all dependencies
 	// Then create TESTS edges from test file to all source files it depends on
+	//
+	// Go-specific: test files in the same directory as source files are part of the
+	// same package (no import needed). Create TESTS edges from *_test.go to all
+	// non-test .go files in the same directory.
+	goFilesByDir := make(map[string][]*fileInfo)
+	for _, fi := range files {
+		if fi.lang == "go" {
+			dir := filepath.Dir(fi.path)
+			goFilesByDir[dir] = append(goFilesByDir[dir], fi)
+		}
+	}
+
 	for _, fi := range files {
 		if !fi.isTest {
 			continue
 		}
 
-		// BFS to find all transitive dependencies
+		// Go same-package test coverage: _test.go covers all .go files in same dir
+		if fi.lang == "go" {
+			dir := filepath.Dir(fi.path)
+			for _, sibling := range goFilesByDir[dir] {
+				if sibling.path != fi.path && !sibling.isTest {
+					if err := c.db.InsertEdge(tx, fi.id, graph.EdgeTests, sibling.id, snapshotID); err != nil {
+						return fmt.Errorf("inserting TESTS edge: %w", err)
+					}
+				}
+			}
+		}
+
+		// BFS to find all transitive import dependencies
 		visited := make(map[string]bool)
 		queue := []string{fi.path}
 		visited[fi.path] = true
@@ -467,70 +491,97 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 			continue
 		}
 
-		// For each call, try to resolve it
-		for _, call := range parsed.Calls {
-			// Skip method calls for now (obj.method())
-			if call.IsMethodCall {
-				continue
-			}
-
-			// Check if this call matches an import
+		// For Go files, build a map of import alias -> resolved file paths
+		// so we can match pkg.Function() calls to target files
+		var goImportAliasMap map[string][]string // alias -> file paths
+		if fi.lang == "go" {
+			goImportAliasMap = make(map[string][]string)
 			for _, imp := range parsed.Imports {
-				if !imp.IsRelative {
+				alias := imp.Default // last path component or explicit alias
+				if alias == "" || alias == "_" {
 					continue
 				}
-
-				// Check if the call name is imported from this source
-				var importedAs string
-				if imp.Default == call.CalleeName {
-					importedAs = imp.Default
-				} else if originalName, ok := imp.Named[call.CalleeName]; ok {
-					importedAs = originalName
+				resolved := resolveGoImport(imp.Source, fi.path, goPkgIndex)
+				if len(resolved) > 0 {
+					goImportAliasMap[alias] = resolved
 				}
+			}
+		}
 
-				if importedAs != "" {
-					// Resolve the import source
-					dir := filepath.Dir(fi.path)
-					basePath := parse.ResolveImportPath(dir, imp.Source)
+		// For each call, try to resolve it
+		for _, call := range parsed.Calls {
+			var targetFiles []string
 
-					// Try possible file paths
-					var resolved string
-					for _, candidate := range parse.PossibleFilePaths(basePath) {
-						if _, ok := filesByPath[candidate]; ok {
-							resolved = candidate
-							break
-						}
-					}
-
-					if resolved != "" {
-						if targetFile, ok := filesByPath[resolved]; ok {
-							// Get the Symbol node for the caller and callee
-							// For now, create a lightweight edge: Caller file -> Callee file with the call info
-							// A full implementation would link Symbol -> Symbol
-
-							// Find or create a placeholder for the call relationship
-							// Store as edge metadata: src=file, dst=file, with call info in a new Call node
-							callPayload := map[string]interface{}{
-								"calleeName": call.CalleeName,
-								"callerFile": fi.path,
-								"calleeFile": resolved,
-								"line":       call.Range.Start[0], // Line is first element of [2]int
-							}
-
-							// Insert a Call relationship node
-							callID, err := c.db.InsertNode(tx, graph.KindSymbol, callPayload)
-							if err != nil {
-								// Skip errors
-								continue
-							}
-
-							// Create edge: CallerFile --CALLS--> CalleeFile (via the Call node)
-							if err := c.db.InsertEdge(tx, fi.id, graph.EdgeCalls, targetFile.id, callID); err != nil {
-								// Skip errors
-								continue
+			if fi.lang == "go" {
+				// Go: match pkg.Function() calls via import alias map
+				if call.IsMethodCall && call.CalleeObject != "" {
+					// pkg.Function() — CalleeObject is the package alias
+					if files, ok := goImportAliasMap[call.CalleeObject]; ok {
+						// Check if CalleeName is exported in the target package
+						for _, f := range files {
+							if tf, ok := filesByPath[f]; ok {
+								for _, exp := range tf.exported {
+									if exp == call.CalleeName {
+										targetFiles = append(targetFiles, f)
+									}
+								}
 							}
 						}
 					}
+				} else if !call.IsMethodCall {
+					// Direct call to an exported symbol (same package or dot-import)
+					if target, ok := exportMap[call.CalleeName]; ok {
+						if target.path != fi.path {
+							targetFiles = append(targetFiles, target.path)
+						}
+					}
+				}
+			} else {
+				// JS/TS/Python: original logic — match non-method calls via imports
+				if call.IsMethodCall {
+					continue
+				}
+				for _, imp := range parsed.Imports {
+					if !imp.IsRelative {
+						continue
+					}
+					var importedAs string
+					if imp.Default == call.CalleeName {
+						importedAs = imp.Default
+					} else if originalName, ok := imp.Named[call.CalleeName]; ok {
+						importedAs = originalName
+					}
+					if importedAs != "" {
+						dir := filepath.Dir(fi.path)
+						basePath := parse.ResolveImportPath(dir, imp.Source)
+						for _, candidate := range parse.PossibleFilePaths(basePath) {
+							if _, ok := filesByPath[candidate]; ok {
+								targetFiles = append(targetFiles, candidate)
+								break
+							}
+						}
+					}
+				}
+			}
+
+			// Create CALLS edges for resolved targets
+			for _, resolved := range targetFiles {
+				targetFile, ok := filesByPath[resolved]
+				if !ok {
+					continue
+				}
+				callPayload := map[string]interface{}{
+					"calleeName": call.CalleeName,
+					"callerFile": fi.path,
+					"calleeFile": resolved,
+					"line":       call.Range.Start[0],
+				}
+				callID, err := c.db.InsertNode(tx, graph.KindSymbol, callPayload)
+				if err != nil {
+					continue
+				}
+				if err := c.db.InsertEdge(tx, fi.id, graph.EdgeCalls, targetFile.id, callID); err != nil {
+					continue
 				}
 			}
 		}

@@ -285,23 +285,18 @@ func (s *Server) handleCallers(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 	filePath := optString(req, "file")
 
+	// CALLS edges are File --CALLS--> File with a Call node as context (at).
+	// The Call node payload has "calleeName" which we match against symbolName.
+	// To find callers: find CALLS edges where the calleeName matches and
+	// optionally the target file matches.
+
+	// First try symbol-level edges (future-proof)
 	snapID, err := s.latestSnapshotID()
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	symbolNode, err := s.findSymbolInGraph(snapID, symbolName, filePath)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-
-	// Find edges pointing TO this symbol (callers)
-	edges, err := s.db.GetEdgesTo(symbolNode.ID, graph.EdgeCalls)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error querying callers: %v", err)), nil
-	}
-
-	callers, err := s.edgesToSymbolLocations(edges, true)
+	callers, err := s.findCallersViaFileEdges(snapID, symbolName, filePath)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -325,18 +320,7 @@ func (s *Server) handleCallees(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	symbolNode, err := s.findSymbolInGraph(snapID, symbolName, filePath)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-
-	// Find edges FROM this symbol (callees)
-	edges, err := s.db.GetEdges(symbolNode.ID, graph.EdgeCalls)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error querying callees: %v", err)), nil
-	}
-
-	callees, err := s.edgesToSymbolLocations(edges, false)
+	callees, err := s.findCalleesViaFileEdges(snapID, symbolName, filePath)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -772,6 +756,138 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		"affected_tests": testFiles,
 		"total_affected": len(results),
 	})
+}
+
+// --- Call Graph Helpers ---
+
+type callInfo struct {
+	CallerFile string `json:"caller_file,omitempty"`
+	CalleeFile string `json:"callee_file,omitempty"`
+	CalleeName string `json:"callee_name"`
+	Line       int    `json:"line,omitempty"`
+}
+
+// findCallersViaFileEdges finds files that call the given symbol by scanning
+// CALLS edges and matching the call node's calleeName payload.
+func (s *Server) findCallersViaFileEdges(snapID []byte, symbolName, filePath string) ([]callInfo, error) {
+	// If file specified, find the file node and get edges TO it
+	// Then filter by calleeName matching symbolName
+	var edges []*graph.Edge
+	var err error
+
+	if filePath != "" {
+		edges, err = s.db.GetEdgesToByPath(filePath, graph.EdgeCalls)
+	} else {
+		// No file specified — scan all CALLS edges (expensive but correct)
+		edges, err = s.db.GetEdgesOfType(graph.EdgeCalls)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var results []callInfo
+	seen := make(map[string]bool)
+
+	for _, edge := range edges {
+		// The "at" field is a Call node with payload {calleeName, callerFile, calleeFile, line}
+		if len(edge.At) == 0 {
+			continue
+		}
+		callNode, err := s.db.GetNode(edge.At)
+		if err != nil || callNode == nil {
+			continue
+		}
+		calleeName, _ := callNode.Payload["calleeName"].(string)
+		if calleeName != symbolName {
+			continue
+		}
+
+		callerFile, _ := callNode.Payload["callerFile"].(string)
+		line := 0
+		if l, ok := callNode.Payload["line"].(float64); ok {
+			line = int(l)
+		}
+
+		key := fmt.Sprintf("%s:%d", callerFile, line)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		results = append(results, callInfo{
+			CallerFile: callerFile,
+			CalleeName: calleeName,
+			Line:       line,
+		})
+	}
+
+	return results, nil
+}
+
+// findCalleesViaFileEdges finds symbols called from a file containing the given symbol.
+func (s *Server) findCalleesViaFileEdges(snapID []byte, symbolName, filePath string) ([]callInfo, error) {
+	if filePath == "" {
+		// Need a file to find outgoing calls from
+		node, err := s.findSymbolInGraph(snapID, symbolName, "")
+		if err != nil {
+			return nil, err
+		}
+		if fileIDStr, ok := node.Payload["fileId"].(string); ok {
+			fileID, err := hex.DecodeString(fileIDStr)
+			if err == nil {
+				fileNode, err := s.db.GetNode(fileID)
+				if err == nil && fileNode != nil {
+					filePath, _ = fileNode.Payload["path"].(string)
+				}
+			}
+		}
+		if filePath == "" {
+			return nil, fmt.Errorf("cannot determine file for symbol %q", symbolName)
+		}
+	}
+
+	fileNode, err := s.findFileNodeByPath(snapID, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	edges, err := s.db.GetEdges(fileNode.ID, graph.EdgeCalls)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []callInfo
+	seen := make(map[string]bool)
+
+	for _, edge := range edges {
+		if len(edge.At) == 0 {
+			continue
+		}
+		callNode, err := s.db.GetNode(edge.At)
+		if err != nil || callNode == nil {
+			continue
+		}
+		calleeName, _ := callNode.Payload["calleeName"].(string)
+		calleeFile, _ := callNode.Payload["calleeFile"].(string)
+		line := 0
+		if l, ok := callNode.Payload["line"].(float64); ok {
+			line = int(l)
+		}
+
+		key := fmt.Sprintf("%s:%s", calleeFile, calleeName)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		results = append(results, callInfo{
+			CalleeFile: calleeFile,
+			CalleeName: calleeName,
+			Line:       line,
+		})
+	}
+
+	return results, nil
 }
 
 // --- Helpers ---
