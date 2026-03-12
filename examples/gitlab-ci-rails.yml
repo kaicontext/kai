@@ -38,6 +38,11 @@ kai-plan:
       TEST_COUNT=$(jq '.targets.run | length' plan.json)
       CONFIDENCE=$(jq -r .safety.confidence plan.json)
 
+      # Override mode to "full" if confidence is too low
+      if [ "$(echo "$CONFIDENCE < 0.4" | bc -l)" = "1" ]; then
+        MODE="full"
+      fi
+
       echo "KAI_MODE=$MODE" >> plan.env
       echo "KAI_TEST_COUNT=$TEST_COUNT" >> plan.env
       echo "KAI_CONFIDENCE=$CONFIDENCE" >> plan.env
@@ -117,7 +122,7 @@ rspec-full:
       - rspec-results.json
     when: always
   rules:
-    - if: $KAI_CONFIDENCE < 0.4
+    - if: $KAI_MODE == "full"
       when: always
     - when: never
 

@@ -1,9 +1,11 @@
 // @trigger schedule
-// @startDateTime 2026-02-18T00:01:00
+// @startDateTime 2026-02-19T09:00:00
+// @rrule FREQ=DAILY
 // @tz America/New_York
 // @title Kai Changelog Update
 
 const REPO = "kailayerhq/kai";
+const HEADER = "# Changelog\n\nAll notable changes to Kai are documented here.\n\n";
 
 // Get latest release to know the cutoff
 const releasesRes = await http.get(`https://api.github.com/repos/${REPO}/releases?per_page=1`);
@@ -36,9 +38,10 @@ if (!Array.isArray(commits) || commits.length === 0) {
     }
   }
 
-  // Build changelog
+  // Build new section
+  const today = new Date().toISOString().split("T")[0];
   const lines = [];
-  lines.push(`## Changelog since ${lastTag}`);
+  lines.push(`## ${today} — since ${lastTag}`);
   lines.push(`_${commits.length} commits since ${since.split("T")[0]}_\n`);
 
   if (categories.features.length > 0) {
@@ -57,32 +60,56 @@ if (!Array.isArray(commits) || commits.length === 0) {
     lines.push("");
   }
 
-  const changelog = lines.join("\n");
-  console.log(changelog);
+  const newSection = lines.join("\n");
+  console.log(newSection);
 
-  // Build full CHANGELOG.md content with header
-  const fullChangelog = `# Changelog\n\nAll notable changes to Kai are documented here.\n\n${changelog}`;
-
-  // Commit CHANGELOG.md to the repo via GitHub Contents API
-  const ghToken = await secrets.get("GITHUB_TOKEN");
+  // Fetch existing CHANGELOG.md to accumulate
+  const ghToken = secrets.get("GITHUB_TOKEN");
   const apiBase = `https://api.github.com/repos/${REPO}/contents/CHANGELOG.md`;
-  const headers = {
+  const apiHeaders = {
     Authorization: `Bearer ${ghToken}`,
     Accept: "application/vnd.github.v3+json",
   };
 
-  // Get current file SHA (if it exists) for the update
+  let existingContent = "";
   let fileSha = null;
   try {
-    const existing = await http.get(apiBase, { headers });
+    const existing = await http.get(apiBase, { headers: apiHeaders });
     fileSha = existing.data.sha;
+    existingContent = atob(existing.data.content.replace(/\n/g, ""));
   } catch (e) {
-    // File doesn't exist yet — that's fine, we'll create it
     console.log("CHANGELOG.md does not exist yet, will create it.");
   }
 
+  // Strip the header from existing content to get previous sections
+  let previousSections = existingContent;
+  if (previousSections.startsWith("# Changelog")) {
+    // Remove everything up to the first ## section
+    const firstSection = previousSections.indexOf("\n## ");
+    if (firstSection !== -1) {
+      previousSections = previousSections.substring(firstSection + 1);
+    } else {
+      previousSections = "";
+    }
+  }
+
+  // Don't duplicate if this section already exists
+  if (previousSections.includes(`## ${today} — since ${lastTag}`)) {
+    // Replace the existing section for today
+    const sectionStart = previousSections.indexOf(`## ${today} — since ${lastTag}`);
+    const nextSection = previousSections.indexOf("\n## ", sectionStart + 1);
+    if (nextSection !== -1) {
+      previousSections = previousSections.substring(nextSection + 1);
+    } else {
+      previousSections = "";
+    }
+  }
+
+  // Assemble: header + new section + previous sections
+  const fullChangelog = HEADER + newSection + (previousSections ? "\n" + previousSections : "");
+
   const commitBody = {
-    message: `Update CHANGELOG.md (${commits.length} commits since ${lastTag})`,
+    message: `Update CHANGELOG.md (${today}: ${commits.length} commits since ${lastTag})`,
     content: btoa(fullChangelog),
     branch: "main",
   };
@@ -90,12 +117,12 @@ if (!Array.isArray(commits) || commits.length === 0) {
     commitBody.sha = fileSha;
   }
 
-  await http.put(apiBase, commitBody, { headers });
+  await http.put(apiBase, commitBody, { headers: apiHeaders });
   console.log("Committed CHANGELOG.md to main.");
 
   // Create a 1medium task with the changelog
   await task.create({
     title: `Changelog update: ${commits.length} commits since ${lastTag}`,
-    description: changelog,
+    description: newSection,
   });
 }
