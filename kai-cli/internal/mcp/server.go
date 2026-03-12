@@ -24,7 +24,6 @@ import (
 	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/snapshot"
-	"kai/internal/util"
 )
 
 // --- Initialization State ---
@@ -1182,40 +1181,26 @@ func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mc
 		}
 	}
 
-	// Compare working directory to snapshot
-	snapshotFiles, err := s.snapshotFiles(snapID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading snapshot: %v", err)), nil
-	}
-
-	source, err := dirio.OpenDirectory(s.workDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
-	}
-
-	currentFiles, err := source.GetFiles()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading files: %v", err)), nil
-	}
-
-	// Build current file map: path → content digest
-	currentMap := make(map[string]string, len(currentFiles))
-	for _, f := range currentFiles {
-		currentMap[f.Path] = util.Blake3HashHex(f.Content)
-	}
-
-	// Find stale files
+	// Detect stale files using git (fast) instead of hashing all file contents.
+	// git diff tracks working tree changes efficiently via its index.
 	var staleFiles []string
-	for path, currentDigest := range currentMap {
-		snapDigest, exists := snapshotFiles[path]
-		if !exists || currentDigest != snapDigest {
-			staleFiles = append(staleFiles, path)
+	gitDiff, err := gitOutput(s.workDir, "diff", "--name-only", "HEAD")
+	if err == nil {
+		// Also include untracked files
+		gitUntracked, _ := gitOutput(s.workDir, "ls-files", "--others", "--exclude-standard")
+		if gitDiff != "" {
+			staleFiles = append(staleFiles, strings.Split(gitDiff, "\n")...)
 		}
-	}
-	// Files deleted since snapshot
-	for path := range snapshotFiles {
-		if _, exists := currentMap[path]; !exists {
-			staleFiles = append(staleFiles, path+" (deleted)")
+		if gitUntracked != "" {
+			staleFiles = append(staleFiles, strings.Split(gitUntracked, "\n")...)
+		}
+		// Also check if any files changed since the snapshot was captured
+		if snapNode != nil {
+			if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
+				captureTime := time.UnixMilli(int64(ts))
+				age := time.Since(captureTime)
+				result["capture_age_seconds"] = int(age.Seconds())
+			}
 		}
 	}
 	sort.Strings(staleFiles)
@@ -1224,8 +1209,6 @@ func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if len(staleFiles) > 0 {
 		result["stale_files"] = staleFiles
 	}
-	result["snapshot_files"] = len(snapshotFiles)
-	result["current_files"] = len(currentMap)
 
 	return jsonResult(result)
 }
