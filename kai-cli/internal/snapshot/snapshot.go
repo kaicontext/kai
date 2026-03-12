@@ -273,7 +273,8 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		lang, _ := fileNode.Payload["lang"].(string)
 
 		// Only process supported languages
-		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" && lang != "go" && lang != "py" {
+		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" &&
+			lang != "go" && lang != "py" && lang != "rb" && lang != "rs" {
 			continue
 		}
 
@@ -303,6 +304,42 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		filesByPath[path] = fi
 	}
 
+	// Build Go package directory index: import path suffix -> list of .go files
+	// For a file at "kai-cli/internal/graph/graph.go", we index:
+	//   "graph" -> [kai-cli/internal/graph/graph.go, ...]
+	//   "internal/graph" -> [...]
+	//   "kai-cli/internal/graph" -> [...]
+	//   etc. (all suffixes of the directory path)
+	goPkgIndex := make(map[string][]string) // pkg suffix -> file paths
+	for path, fi := range filesByPath {
+		if fi.lang != "go" {
+			continue
+		}
+		dir := filepath.Dir(path)
+		parts := strings.Split(dir, "/")
+		// Index all suffixes: "a/b/c" -> ["c", "b/c", "a/b/c"]
+		for i := len(parts) - 1; i >= 0; i-- {
+			suffix := strings.Join(parts[i:], "/")
+			goPkgIndex[suffix] = append(goPkgIndex[suffix], path)
+		}
+	}
+
+	// Build Python module index: dotted import -> file paths
+	// "auth.token" -> "auth/token.py"
+	pyFileIndex := make(map[string]string) // module path -> file path
+	allPaths := make(map[string]bool)      // simple existence set for all file paths
+	for path, fi := range filesByPath {
+		allPaths[path] = true
+		if fi.lang != "py" {
+			continue
+		}
+		// Convert file path to module path: auth/token.py -> auth.token
+		modPath := strings.TrimSuffix(path, ".py")
+		modPath = strings.TrimSuffix(modPath, "/__init__")
+		modPath = strings.ReplaceAll(modPath, "/", ".")
+		pyFileIndex[modPath] = path
+	}
+
 	// Second pass: extract imports and build import graph
 	// importGraph maps file path -> list of imported file paths
 	importGraph := make(map[string][]string)
@@ -321,28 +358,34 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 
 		fi.exported = parsed.Exports
 
-		// Build import graph and collect resolved imports
+		// Build import graph — language-specific resolution
 		var imports []string
 		for _, imp := range parsed.Imports {
-			if !imp.IsRelative {
-				continue // Skip node_modules imports
-			}
+			switch fi.lang {
+			case "go":
+				// Go: match import path against directory suffixes
+				// e.g. "kai/internal/graph" matches files in any dir ending with "kai/internal/graph"
+				resolved := resolveGoImport(imp.Source, fi.path, goPkgIndex)
+				imports = append(imports, resolved...)
 
-			// Try to resolve the import
-			dir := filepath.Dir(fi.path)
-			basePath := parse.ResolveImportPath(dir, imp.Source)
+			case "py":
+				// Python: convert dotted import to path
+				resolved := resolvePythonImport(imp.Source, fi.path, pyFileIndex, allPaths)
+				imports = append(imports, resolved...)
 
-			// Try possible file paths
-			var resolved string
-			for _, candidate := range parse.PossibleFilePaths(basePath) {
-				if _, ok := filesByPath[candidate]; ok {
-					resolved = candidate
-					break
+			default:
+				// JS/TS/Ruby/Rust: relative import resolution
+				if !imp.IsRelative {
+					continue
 				}
-			}
-
-			if resolved != "" {
-				imports = append(imports, resolved)
+				dir := filepath.Dir(fi.path)
+				basePath := parse.ResolveImportPath(dir, imp.Source)
+				for _, candidate := range parse.PossibleFilePaths(basePath) {
+					if _, ok := filesByPath[candidate]; ok {
+						imports = append(imports, candidate)
+						break
+					}
+				}
 			}
 		}
 		importGraph[fi.path] = imports
@@ -761,4 +804,71 @@ func isBinaryOrImageFile(filename string) bool {
 		return true
 	}
 	return false
+}
+
+// resolveGoImport resolves a Go import path to files in the snapshot.
+// Go imports are package paths like "fmt", "kai/internal/graph", "kai-core/diff".
+// We match by finding directories whose path suffix matches the import path.
+// Returns all .go files in the matched package directory (excluding the importing file's own dir).
+func resolveGoImport(importPath, importingFile string, goPkgIndex map[string][]string) []string {
+	// Skip stdlib imports (no slash = stdlib like "fmt", "os", "strings")
+	if !strings.Contains(importPath, "/") {
+		return nil
+	}
+
+	importingDir := filepath.Dir(importingFile)
+
+	// Try exact match first, then progressively shorter suffixes
+	// For "kai/internal/graph", try: "kai/internal/graph", "internal/graph", "graph"
+	parts := strings.Split(importPath, "/")
+	for i := 0; i < len(parts); i++ {
+		suffix := strings.Join(parts[i:], "/")
+		if files, ok := goPkgIndex[suffix]; ok {
+			// Filter out files from the same directory (don't self-import)
+			var result []string
+			for _, f := range files {
+				if filepath.Dir(f) != importingDir {
+					result = append(result, f)
+				}
+			}
+			if len(result) > 0 {
+				return result
+			}
+		}
+	}
+
+	return nil
+}
+
+// resolvePythonImport resolves a Python import to files in the snapshot.
+// Handles "from auth.token import validate" and "import auth.token".
+func resolvePythonImport(importSource, importingFile string, pyIndex map[string]string, allPaths map[string]bool) []string {
+	// Try the import source directly as a dotted module path
+	if path, ok := pyIndex[importSource]; ok {
+		return []string{path}
+	}
+
+	// Try as a directory path: "auth.token" -> "auth/token.py" or "auth/token/__init__.py"
+	dirPath := strings.ReplaceAll(importSource, ".", "/")
+	candidates := []string{
+		dirPath + ".py",
+		filepath.Join(dirPath, "__init__.py"),
+	}
+	for _, c := range candidates {
+		if allPaths[c] {
+			return []string{c}
+		}
+	}
+
+	// Try progressively shorter prefixes for "from X.Y import Z"
+	// "auth.token" might match "auth/token.py"
+	parts := strings.Split(importSource, ".")
+	for i := len(parts); i > 0; i-- {
+		prefix := strings.Join(parts[:i], ".")
+		if path, ok := pyIndex[prefix]; ok {
+			return []string{path}
+		}
+	}
+
+	return nil
 }
