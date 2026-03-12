@@ -7,16 +7,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"kai/internal/dirio"
 	"kai/internal/graph"
+	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/snapshot"
+	"kai/internal/util"
 )
 
 // Server wraps the MCP server with access to the Kai graph database.
@@ -24,14 +30,17 @@ type Server struct {
 	db       *graph.DB
 	resolver *ref.Resolver
 	snap     *snapshot.Creator
+	workDir  string // project root (where .kai lives)
 }
 
 // NewServer creates a new MCP server backed by the given graph database.
-func NewServer(db *graph.DB) *Server {
+// workDir is the project root directory (parent of .kai).
+func NewServer(db *graph.DB, workDir string) *Server {
 	return &Server{
 		db:       db,
 		resolver: ref.NewResolver(db),
 		snap:     snapshot.NewCreator(db, nil),
+		workDir:  workDir,
 	}
 }
 
@@ -156,6 +165,30 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithNumber("max_depth", mcp.Description("Maximum graph traversal depth (default: 3)")),
 		),
 		s.handleImpact,
+	)
+
+	// kai_status — check graph freshness
+	srv.AddTool(
+		mcp.NewTool("kai_status",
+			readOnly(),
+			mcp.WithDescription("Check if the Kai semantic graph is fresh. Returns last capture time, current branch, HEAD commit, and any files that have changed since the last capture. Call this before using other kai tools to verify freshness. If stale_files exist, ask the user before calling kai_refresh."),
+		),
+		s.handleStatus,
+	)
+
+	// kai_refresh — update the semantic graph
+	srv.AddTool(
+		mcp.NewTool("kai_refresh",
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				ReadOnlyHint:    mcp.ToBoolPtr(false),
+				DestructiveHint: mcp.ToBoolPtr(false),
+				IdempotentHint:  mcp.ToBoolPtr(true),
+				OpenWorldHint:   mcp.ToBoolPtr(false),
+			}),
+			mcp.WithDescription("Re-capture the semantic graph. IMPORTANT: Ask the user for permission before calling this. Use kai_status first to check if refresh is needed. Scope controls what gets captured."),
+			mcp.WithString("scope", mcp.Description("What to capture: 'all' (full directory, default), 'staged' (git staged files only)")),
+		),
+		s.handleRefresh,
 	)
 }
 
@@ -1052,6 +1085,163 @@ func (s *Server) snapshotFiles(snapshotID []byte) (map[string]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// --- Status & Refresh Handlers ---
+
+func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	result := map[string]interface{}{}
+
+	// Get git info
+	if branch, err := gitOutput(s.workDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		result["branch"] = branch
+	}
+	if commit, err := gitOutput(s.workDir, "rev-parse", "--short", "HEAD"); err == nil {
+		result["head_commit"] = commit
+	}
+
+	// Get latest snapshot info
+	snapID, err := s.latestSnapshotID()
+	if err != nil {
+		result["last_capture"] = nil
+		result["stale"] = true
+		result["message"] = "No snapshots found. Run kai_refresh to capture."
+		return jsonResult(result)
+	}
+
+	snapNode, err := s.db.GetNode(snapID)
+	if err == nil && snapNode != nil {
+		if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
+			captureTime := time.UnixMilli(int64(ts)).UTC()
+			result["last_capture"] = captureTime.Format(time.RFC3339)
+		}
+	}
+
+	// Compare working directory to snapshot
+	snapshotFiles, err := s.snapshotFiles(snapID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error reading snapshot: %v", err)), nil
+	}
+
+	source, err := dirio.OpenDirectory(s.workDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
+	}
+
+	currentFiles, err := source.GetFiles()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error reading files: %v", err)), nil
+	}
+
+	// Build current file map: path → content digest
+	currentMap := make(map[string]string, len(currentFiles))
+	for _, f := range currentFiles {
+		currentMap[f.Path] = util.Blake3HashHex(f.Content)
+	}
+
+	// Find stale files
+	var staleFiles []string
+	for path, currentDigest := range currentMap {
+		snapDigest, exists := snapshotFiles[path]
+		if !exists || currentDigest != snapDigest {
+			staleFiles = append(staleFiles, path)
+		}
+	}
+	// Files deleted since snapshot
+	for path := range snapshotFiles {
+		if _, exists := currentMap[path]; !exists {
+			staleFiles = append(staleFiles, path+" (deleted)")
+		}
+	}
+	sort.Strings(staleFiles)
+
+	// Check for uncommitted git changes
+	if status, err := gitOutput(s.workDir, "status", "--porcelain"); err == nil {
+		result["uncommitted_changes"] = status != ""
+	}
+
+	result["stale"] = len(staleFiles) > 0
+	if len(staleFiles) > 0 {
+		result["stale_files"] = staleFiles
+	}
+	result["snapshot_files"] = len(snapshotFiles)
+	result["current_files"] = len(currentMap)
+
+	return jsonResult(result)
+}
+
+func (s *Server) handleRefresh(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	scope := optString(req, "scope")
+	if scope == "" {
+		scope = "all"
+	}
+
+	if scope != "all" && scope != "staged" {
+		return mcp.NewToolResultError("scope must be 'all' or 'staged'"), nil
+	}
+
+	// Load modules
+	modulesPath := filepath.Join(s.workDir, ".kai", "rules", "modules.yaml")
+	matcher, err := module.LoadRulesOrEmpty(modulesPath)
+	if err != nil {
+		// Try legacy location
+		legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
+		matcher, err = module.LoadRulesOrEmpty(legacyPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error loading modules: %v", err)), nil
+		}
+	}
+
+	creator := snapshot.NewCreator(s.db, matcher)
+
+	// Open directory source
+	source, err := dirio.OpenDirectory(s.workDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
+	}
+
+	// Create snapshot
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error creating snapshot: %v", err)), nil
+	}
+
+	// Analyze symbols
+	if err := creator.AnalyzeSymbols(snapshotID, nil); err != nil {
+		// Non-fatal: continue with partial results
+		_ = err
+	}
+
+	// Build call graph
+	if err := creator.AnalyzeCalls(snapshotID, nil); err != nil {
+		_ = err
+	}
+
+	// Update refs
+	autoRefMgr := ref.NewAutoRefManager(s.db)
+	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error updating refs: %v", err)), nil
+	}
+
+	files, _ := source.GetFiles()
+
+	return jsonResult(map[string]interface{}{
+		"status":      "captured",
+		"snapshot_id": hex.EncodeToString(snapshotID)[:12],
+		"files":       len(files),
+		"scope":       scope,
+	})
+}
+
+// gitOutput runs a git command and returns trimmed stdout.
+func gitOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // isTestFile returns true if the file path looks like a test file.

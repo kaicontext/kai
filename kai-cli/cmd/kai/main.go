@@ -1711,8 +1711,100 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	srv := kaimcp.NewServer(db)
+	srv := kaimcp.NewServer(db, cwd)
 	return srv.Serve(cmd.Context())
+}
+
+var hookCmd = &cobra.Command{
+	Use:   "hook",
+	Short: "Manage git hooks for automatic capture",
+}
+
+var hookInstallCmd = &cobra.Command{
+	Use:   "install",
+	Short: "Install git pre-commit hook that runs kai capture",
+	Long: `Installs a git pre-commit hook that automatically updates the Kai
+semantic graph when you commit. This ensures committed code always has
+a matching graph state.
+
+The hook runs 'kai capture' before each commit. If capture fails,
+the commit is aborted.`,
+	RunE: runHookInstall,
+}
+
+var hookUninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove the kai pre-commit hook",
+	RunE:  runHookUninstall,
+}
+
+const kaiHookMarker = "# kai-managed-hook"
+
+func runHookInstall(cmd *cobra.Command, args []string) error {
+	hookPath := filepath.Join(".git", "hooks", "pre-commit")
+
+	// Check .git exists
+	if _, err := os.Stat(".git"); os.IsNotExist(err) {
+		return fmt.Errorf("not a git repository (no .git directory)")
+	}
+
+	// Create hooks directory if needed
+	hooksDir := filepath.Join(".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("creating hooks directory: %w", err)
+	}
+
+	// Check for existing hook
+	if data, err := os.ReadFile(hookPath); err == nil {
+		content := string(data)
+		if strings.Contains(content, kaiHookMarker) {
+			fmt.Println("Kai pre-commit hook already installed.")
+			return nil
+		}
+		// There's an existing non-kai hook — don't overwrite
+		return fmt.Errorf("pre-commit hook already exists (not managed by Kai). Remove it first or add 'kai capture' manually")
+	}
+
+	hookContent := `#!/bin/sh
+` + kaiHookMarker + `
+# Automatically update Kai semantic graph before commit.
+# Installed by: kai hook install
+# Remove with:  kai hook uninstall
+
+kai capture
+`
+
+	if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+		return fmt.Errorf("writing hook: %w", err)
+	}
+
+	fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
+	fmt.Println("Kai will automatically capture before each commit.")
+	return nil
+}
+
+func runHookUninstall(cmd *cobra.Command, args []string) error {
+	hookPath := filepath.Join(".git", "hooks", "pre-commit")
+
+	data, err := os.ReadFile(hookPath)
+	if os.IsNotExist(err) {
+		fmt.Println("No pre-commit hook found.")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if !strings.Contains(string(data), kaiHookMarker) {
+		return fmt.Errorf("pre-commit hook exists but is not managed by Kai")
+	}
+
+	if err := os.Remove(hookPath); err != nil {
+		return err
+	}
+
+	fmt.Println("Removed Kai pre-commit hook.")
+	return nil
 }
 
 func init() {
@@ -2146,6 +2238,12 @@ func init() {
 	mcpCmd.GroupID = groupAdvanced
 	mcpCmd.AddCommand(mcpServeCmd)
 	rootCmd.AddCommand(mcpCmd)
+
+	// Hook management
+	hookCmd.GroupID = groupStart
+	hookCmd.AddCommand(hookInstallCmd)
+	hookCmd.AddCommand(hookUninstallCmd)
+	rootCmd.AddCommand(hookCmd)
 
 	// Add auth subcommands
 	authCmd.AddCommand(authLoginCmd)
