@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -62,8 +63,11 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 	srv.AddTool(
 		mcp.NewTool("kai_symbols",
 			readOnly(),
-			mcp.WithDescription("List all symbols (functions, classes, methods, variables) defined in a file. Returns symbol names, kinds, signatures, and line locations."),
+			mcp.WithDescription("List symbols defined in a file. Returns names, kinds, and line numbers. For large files, prefer kai_impact/kai_callers/kai_tests over listing all symbols. Use 'kind' to filter (e.g. only functions). Use 'exported=true' for Go to see only public symbols."),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root (e.g. src/auth.go)")),
+			mcp.WithString("kind", mcp.Description("Filter by symbol kind: function, method, class, variable, interface, struct, type, constant")),
+			mcp.WithBoolean("exported", mcp.Description("If true, only return exported/public symbols (Go: uppercase-first)")),
+			mcp.WithBoolean("signatures", mcp.Description("If true, include full signatures in output (default: false to save tokens)")),
 		),
 		s.handleSymbols,
 	)
@@ -73,7 +77,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		mcp.NewTool("kai_callers",
 			readOnly(),
 			mcp.WithDescription("Find all functions/files that call a given symbol. Walks the CALLS edge in the semantic graph. More accurate than grep — finds indirect callers through imports."),
-			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callers of (e.g. validateToken)")),
+			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callers of (e.g. validateToken, Resolve). Use bare function name — receiver prefixes like *Type. are stripped automatically.")),
 			mcp.WithString("file", mcp.Description("File where the symbol is defined, to disambiguate (e.g. auth/token.go)")),
 		),
 		s.handleCallers,
@@ -225,6 +229,10 @@ func (s *Server) handleSymbols(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
 	}
 
+	kindFilter := optString(req, "kind")
+	exportedOnly := optBool(req, "exported")
+	includeSignatures := optBool(req, "signatures")
+
 	snapID, err := s.latestSnapshotID()
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -245,27 +253,41 @@ func (s *Server) handleSymbols(ctx context.Context, req mcp.CallToolRequest) (*m
 		Kind      string `json:"kind"`
 		Signature string `json:"signature,omitempty"`
 		Line      int    `json:"line,omitempty"`
-		EndLine   int    `json:"end_line,omitempty"`
 	}
 
 	results := make([]symbolInfo, 0, len(symbols))
 	for _, sym := range symbols {
-		info := symbolInfo{}
-		if v, ok := sym.Payload["fqName"].(string); ok {
-			info.Name = v
+		name, _ := sym.Payload["fqName"].(string)
+		kind, _ := sym.Payload["kind"].(string)
+
+		// Apply kind filter
+		if kindFilter != "" && !strings.EqualFold(kind, kindFilter) {
+			continue
 		}
-		if v, ok := sym.Payload["kind"].(string); ok {
-			info.Kind = v
+
+		// Apply exported filter: check if the bare name starts with uppercase
+		if exportedOnly {
+			bareName := name
+			if idx := strings.LastIndex(bareName, "."); idx >= 0 {
+				bareName = bareName[idx+1:]
+			}
+			if bareName == "" || !unicode.IsUpper(rune(bareName[0])) {
+				continue
+			}
 		}
-		if v, ok := sym.Payload["signature"].(string); ok {
-			info.Signature = v
+
+		info := symbolInfo{
+			Name: name,
+			Kind: kind,
+		}
+		if includeSignatures {
+			if v, ok := sym.Payload["signature"].(string); ok {
+				info.Signature = v
+			}
 		}
 		if r, ok := sym.Payload["range"].(map[string]interface{}); ok {
 			if line, ok := r["startLine"].(float64); ok {
 				info.Line = int(line)
-			}
-			if line, ok := r["endLine"].(float64); ok {
-				info.EndLine = int(line)
 			}
 		}
 		results = append(results, info)
@@ -770,6 +792,11 @@ type callInfo struct {
 // findCallersViaFileEdges finds files that call the given symbol by scanning
 // CALLS edges and matching the call node's calleeName payload.
 func (s *Server) findCallersViaFileEdges(snapID []byte, symbolName, filePath string) ([]callInfo, error) {
+	// Normalize Go receiver-qualified names: *Resolver.Resolve → Resolve, Type.Method → Method
+	if idx := strings.LastIndex(symbolName, "."); idx >= 0 {
+		symbolName = symbolName[idx+1:]
+	}
+
 	// If file specified, find the file node and get edges TO it
 	// Then filter by calleeName matching symbolName
 	var edges []*graph.Edge
@@ -1053,6 +1080,11 @@ func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
 // optString returns an optional string argument, or "" if not present.
 func optString(req mcp.CallToolRequest, key string) string {
 	return req.GetString(key, "")
+}
+
+// optBool returns an optional boolean argument, or false if not present.
+func optBool(req mcp.CallToolRequest, key string) bool {
+	return req.GetBool(key, false)
 }
 
 // optFloat returns an optional float argument, or the default if not present.
