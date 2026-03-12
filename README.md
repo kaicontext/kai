@@ -4,72 +4,64 @@
 
 # Kai
 
-Kai makes code changes safer and CI dramatically faster by understanding what actually changed.
+**Semantic infrastructure for code change.**
 
-Modern CI systems run everything because they only see line-level diffs.
-Kai understands behavior-level impact.
+Kai understands what code *means* — functions, dependencies, behavior impact —
+not just which lines changed. This semantic graph powers precise CI,
+context-aware IDEs, and verifiable AI coding agents.
 
-Instead of asking:
-
-> "What files changed?"
-
-Kai answers:
-
-> "What parts of the system changed in meaning — and what tests actually need to run?"
+[kailayer.com](https://kailayer.com)
 
 ---
 
-## What Kai Does
+## What Kai Builds
 
-For every pull request, Kai:
+For every commit, Kai constructs a queryable semantic model:
 
-* Builds a semantic model of your codebase
-* Determines which modules are impacted by a change
-* Identifies the minimal set of tests required
-* Produces a deterministic execution plan
-* Runs only what matters — safely
+| Layer | What It Captures |
+|-------|----------------|
+| **Functions & methods** | Signatures, bodies, call graphs |
+| **Dependencies** | Module relationships, data flow |
+| **Behavior changes** | What actually changed in meaning, not just text |
 
-The result:
-
-* Shorter CI times
-* Fewer redundant test executions
-* Faster developer feedback loops
-* No compromise on correctness
+This graph is immutable, verifiable, and designed for machine reasoning.
 
 ---
 
-## Why This Matters
+## Current Applications
 
-As teams grow and AI generates more code:
+### Phase 1: Selective CI (Shipping)
+Kai determines which tests actually need to run based on behavioral impact,
+not file diffs. Result: 80% CI time reduction for early users.
 
-* PR volume increases
-* CI costs scale linearly
-* Review noise increases
-* Build times slow development velocity
+### Phase 2: IDE Integration (In Development)
+Semantic context where developers work — precise jump-to-definition,
+impact analysis, and change validation inside VS Code.
 
-Kai turns CI from a static script into an intelligent execution plan.
-
-It reduces wasted computation while preserving safety.
-
----
-
-## What Kai Is Not
-
-Kai does not replace your test runner.
-Kai does not rewrite your build system.
-Kai does not require changing your workflow.
-
-Kai sits on top of your existing CI and makes it smarter.
+### Phase 3: Verified AI Agents (Building)
+Close the loop: agent proposes edit → Kai validates impact →
+agent executes with proof, not generation with hope.
 
 ---
 
-## The Vision
+## Why This Matters Now
 
-Software changes should be evaluated based on meaning and impact, not just modified lines.
+AI generates more code than humans review. Current tools:
 
-Kai is building the semantic control plane for software change.
+- Guess at dependencies from text
+- Run tests blindly or skip them dangerously
+- Produce changes without verifiable impact analysis
+
+Kai provides the semantic substrate AI coding tools need to operate
+safely and precisely at scale.
 
 ---
+
+## Install
+
+```bash
+curl -sSL https://get.kailayer.com | sh
+```
 
 ## Quick Start
 
@@ -77,11 +69,34 @@ Kai is building the semantic control plane for software change.
 kai init
 kai snapshot create --git main --repo .
 kai snapshot create --git feat/my-branch --repo .
-kai diff
-kai ci plan
+kai diff                    # semantic change impact
+kai ci plan                 # minimal test selection
 ```
 
-For the full command reference, concepts, and workflow examples, see [docs/cli-reference.md](docs/cli-reference.md).
+For full command reference and workflow examples, see [docs/cli-reference.md](docs/cli-reference.md).
+
+---
+
+## Architecture
+
+Kai is open-core: CLI and semantic engine are Apache 2.0.
+Kai Cloud adds hosted infrastructure and team features.
+
+See [What's Open Source vs. Kai Cloud](docs/architecture-boundary.md).
+
+---
+
+## Roadmap
+
+| Phase | Status | Milestone |
+|-------|--------|-----------|
+| Semantic graph (5 languages, 71 change types) | **Production** | 2.8M commits analyzed |
+| CI optimization | **Shipping** | 3 design partners, daily usage |
+| IDE extension | **Building** | VS Code integration, 60-day target |
+| Context retrieval for LLMs | **Architecture** | Design partners defining requirements |
+| Verified agent loop | **Planned** | Autonomous editing with proof |
+
+[Full roadmap →](https://github.com/orgs/kailayerhq/projects/1)
 
 ---
 
@@ -89,24 +104,11 @@ For the full command reference, concepts, and workflow examples, see [docs/cli-r
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).
 
 ---
 
-## Architecture
+## Community & Contributing
 
-Kai is open-core: the CLI and core engine are Apache 2.0, while Kai Cloud adds hosted infrastructure features. See [What's Open Source vs What's in Kai Cloud](docs/architecture-boundary.md) for the full breakdown.
-
-## Roadmap
-
-See what we're working on: [Kai Roadmap](https://github.com/orgs/kailayerhq/projects/1)
-
-## Community
-
-Join the conversation:
-
-* [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg)
-
-## Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and how to submit changes.
+- [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg)
+- [Contributing guidelines](CONTRIBUTING.md)
