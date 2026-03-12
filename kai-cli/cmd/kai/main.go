@@ -32,6 +32,8 @@ import (
 
 	"kai-core/diff"
 	"kai-core/merge"
+
+	kaimcp "kai/internal/mcp"
 	"kai/internal/ai"
 	"kai/internal/classify"
 	semanticdiff "kai/internal/diff"
@@ -1221,6 +1223,22 @@ Examples:
 	RunE: runFetch,
 }
 
+var pullCmd = &cobra.Command{
+	Use:   "pull [remote]",
+	Short: "Pull latest snapshot from remote and update local state",
+	Long: `Pull the latest snapshot from the remote server, fetch all file content,
+and update the local snap.latest ref to match.
+
+This is the inverse of 'kai push'. It fetches the remote's snap.latest,
+downloads all file nodes and content blobs, stores them locally, and
+updates your local refs.
+
+Examples:
+  kai pull              # Pull from origin
+  kai pull upstream     # Pull from a named remote`,
+	RunE: runPull,
+}
+
 var cloneCmd = &cobra.Command{
 	Use:   "clone <org/repo | url> [directory]",
 	Short: "Clone a repository from a remote server",
@@ -1546,6 +1564,9 @@ var (
 	cloneTenant string
 	cloneRepo   string
 
+	// Pull flags
+	pullForce bool
+
 	// Fetch flags
 	fetchWorkspace string
 	fetchReview    string
@@ -1641,6 +1662,57 @@ func runTelemetryStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+var mcpCmd = &cobra.Command{
+	Use:   "mcp",
+	Short: "MCP server for AI coding assistants",
+}
+
+var mcpServeCmd = &cobra.Command{
+	Use:   "serve",
+	Short: "Start MCP server on stdio (used by Claude Code, Kilo Code, etc.)",
+	Long: `Start an MCP (Model Context Protocol) server that exposes Kai's semantic
+graph to AI coding assistants over stdio.
+
+Configure in Claude Code (.claude.json):
+  {
+    "mcpServers": {
+      "kai": {
+        "command": "kai",
+        "args": ["mcp", "serve"]
+      }
+    }
+  }
+
+The server exposes tools like kai_symbols, kai_callers, kai_context, kai_impact,
+kai_tests, kai_diff, and more. These give the AI assistant structured access to
+your codebase's dependency graph, call graph, and test coverage map.`,
+	RunE: runMCPServe,
+}
+
+func runMCPServe(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	kaiPath := filepath.Join(cwd, kaiDir)
+	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
+		return fmt.Errorf("no .kai directory found — run 'kai init && kai capture' first")
+	}
+
+	dbPath := filepath.Join(kaiPath, dbFile)
+	objPath := filepath.Join(kaiPath, objectsDir)
+
+	db, err := graph.Open(dbPath, objPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer db.Close()
+
+	srv := kaimcp.NewServer(db)
+	return srv.Serve(cmd.Context())
 }
 
 func init() {
@@ -1760,6 +1832,8 @@ func init() {
 	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
 
 	// Fetch flags
+	pullCmd.Flags().BoolVar(&pullForce, "force", false, "Pull even if local has unpushed snapshots")
+
 	fetchCmd.Flags().StringVar(&fetchWorkspace, "ws", "", "Fetch a specific workspace by name and recreate it locally")
 	fetchCmd.Flags().StringVar(&fetchReview, "review", "", "Fetch a specific review by ID and recreate it locally")
 	fetchCmd.Flags().BoolVar(&fetchExplain, "explain", false, "Show detailed explanation of what this command does")
@@ -2013,12 +2087,14 @@ func init() {
 	remoteCmd.GroupID = groupRemote
 	pushCmd.GroupID = groupRemote
 	fetchCmd.GroupID = groupRemote
+	pullCmd.GroupID = groupRemote
 	cloneCmd.GroupID = groupRemote
 	authCmd.GroupID = groupRemote
 	updateCmd.GroupID = groupRemote
 	rootCmd.AddCommand(remoteCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
+	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(cloneCmd)
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.Flags().Bool("check", false, "Check for updates without installing")
@@ -2065,6 +2141,11 @@ func init() {
 	telemetryCmd.AddCommand(telemetryDisableCmd)
 	telemetryCmd.AddCommand(telemetryStatusCmd)
 	rootCmd.AddCommand(telemetryCmd)
+
+	// MCP server
+	mcpCmd.GroupID = groupAdvanced
+	mcpCmd.AddCommand(mcpServeCmd)
+	rootCmd.AddCommand(mcpCmd)
 
 	// Add auth subcommands
 	authCmd.AddCommand(authLoginCmd)
@@ -7904,6 +7985,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Kai initialized")
 		fmt.Println()
 
+		// Show current workspace
+		currentWs, _ := getCurrentWorkspace()
+		if currentWs != "" {
+			fmt.Printf("Workspace:  %s\n", currentWs)
+		} else {
+			fmt.Println("Workspace:  (none) — working on snap.latest")
+		}
+
 		// Count snapshots and changesets
 		snapshots, err := db.GetNodesByKind(graph.KindSnapshot)
 		if err != nil {
@@ -8453,13 +8542,15 @@ func runWsList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing workspaces: %w", err)
 	}
 
+	currentWs, _ := getCurrentWorkspace()
+
 	if len(workspaces) == 0 {
 		fmt.Println("No workspaces found.")
 		return nil
 	}
 
-	fmt.Printf("%-20s  %-10s  %-12s  %-12s  %s\n", "NAME", "STATUS", "BASE", "HEAD", "CHANGESETS")
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("  %-20s  %-10s  %-12s  %-12s  %s\n", "NAME", "STATUS", "BASE", "HEAD", "CHANGESETS")
+	fmt.Println(strings.Repeat("-", 82))
 	for _, ws := range workspaces {
 		baseStr := ""
 		headStr := ""
@@ -8469,8 +8560,12 @@ func runWsList(cmd *cobra.Command, args []string) error {
 		if len(ws.HeadSnapshot) > 0 {
 			headStr = util.BytesToHex(ws.HeadSnapshot)[:12]
 		}
-		fmt.Printf("%-20s  %-10s  %-12s  %-12s  %d\n",
-			ws.Name, ws.Status, baseStr, headStr, len(ws.OpenChangeSets))
+		marker := " "
+		if ws.Name == currentWs {
+			marker = "*"
+		}
+		fmt.Printf("%s %-20s  %-10s  %-12s  %-12s  %d\n",
+			marker, ws.Name, ws.Status, baseStr, headStr, len(ws.OpenChangeSets))
 	}
 
 	return nil
@@ -8701,7 +8796,17 @@ func runWsCheckout(cmd *cobra.Command, args []string) error {
 		name = args[0]
 	}
 	if name == "" {
-		return fmt.Errorf("workspace name required (pass as argument or use --ws)")
+		// No name given — clear current workspace
+		currentWs, _ := getCurrentWorkspace()
+		if currentWs == "" {
+			fmt.Println("No workspace is currently checked out.")
+			return nil
+		}
+		if err := setCurrentWorkspace(""); err != nil {
+			return fmt.Errorf("clearing workspace: %w", err)
+		}
+		fmt.Printf("Left workspace %q — now working on snap.latest\n", currentWs)
+		return nil
 	}
 
 	db, err := openDB()
@@ -9727,6 +9832,9 @@ func resolveID(db *graph.DB, input string, wantKind *ref.Kind) ([]byte, error) {
 	result, err := resolver.Resolve(input, wantKind)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("not found: %s", input)
 	}
 	return result.ID, nil
 }
@@ -10957,6 +11065,194 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runPull(cmd *cobra.Command, args []string) error {
+	te := telemetry.NewEvent("pull")
+	defer te.Finish()
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Determine remote name
+	remoteName := "origin"
+	if len(args) > 0 {
+		remoteName = args[0]
+	}
+
+	// Create client for remote
+	client, err := remote.NewClientForRemote(remoteName)
+	if err != nil {
+		return fmt.Errorf("remote '%s' not configured (use 'kai remote set %s <url>')", remoteName, remoteName)
+	}
+
+	// Check server health
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
+	}
+
+	fmt.Printf("Pulling from %s (%s)...\n", remoteName, client.BaseURL)
+
+	// Get snap.latest ref from remote
+	snapRef, err := client.GetRef("snap.latest")
+	if err != nil {
+		return fmt.Errorf("getting remote snap.latest: %w", err)
+	}
+	if snapRef == nil {
+		fmt.Println("No snap.latest on remote — nothing to pull.")
+		return nil
+	}
+
+	remoteDigest := hex.EncodeToString(snapRef.Target)
+	fmt.Printf("  Remote snap.latest: %s\n", remoteDigest[:12])
+
+	// Check if we already have this snapshot locally
+	refMgr := ref.NewRefManager(db)
+	localRef, _ := refMgr.Get("snap.latest")
+	if localRef != nil && hex.EncodeToString(localRef.TargetID) == remoteDigest {
+		fmt.Println("Already up to date.")
+		return nil
+	}
+
+	// Check for divergence: local snap.latest differs from remote
+	if localRef != nil && !pullForce {
+		localDigest := hex.EncodeToString(localRef.TargetID)
+		// Check if the remote knows about our local snapshot
+		_, _, err := client.GetObject(localRef.TargetID)
+		if err != nil || localDigest != remoteDigest {
+			// Local has a different snapshot that may not be on the remote
+			fmt.Printf("  Warning: local snap.latest (%s) differs from remote (%s)\n",
+				localDigest[:12], remoteDigest[:12])
+			fmt.Println("  You have unpushed local snapshots that will become orphaned.")
+			fmt.Println()
+			fmt.Println("  To pull anyway:  kai pull --force")
+			fmt.Println("  To push first:   kai push")
+			return fmt.Errorf("pull aborted: local and remote have diverged")
+		}
+	}
+
+	// Fetch the snapshot node if we don't have it
+	exists, _ := db.HasNode(snapRef.Target)
+	if !exists {
+		content, kind, err := client.GetObject(snapRef.Target)
+		if err != nil {
+			return fmt.Errorf("fetching snapshot object: %w", err)
+		}
+		if content == nil {
+			return fmt.Errorf("snapshot object not found on remote")
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(content, &payload); err != nil {
+			return fmt.Errorf("parsing snapshot: %w", err)
+		}
+
+		tx, err := db.BeginTx()
+		if err != nil {
+			return fmt.Errorf("starting transaction: %w", err)
+		}
+		if _, err := db.InsertNode(tx, graph.NodeKind(kind), payload); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("inserting snapshot node: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("committing snapshot: %w", err)
+		}
+	}
+
+	// List all files in the remote snapshot
+	filesResp, err := client.ListSnapshotFiles("snap.latest")
+	if err != nil {
+		return fmt.Errorf("listing remote files: %w", err)
+	}
+
+	fmt.Printf("  Remote snapshot has %d file(s)\n", len(filesResp.Files))
+
+	// Fetch file nodes and content blobs
+	fetched := 0
+	for _, f := range filesResp.Files {
+		// Check if we have the file node
+		fileDigest, err := hex.DecodeString(f.Digest)
+		if err != nil {
+			continue
+		}
+		exists, _ := db.HasNode(fileDigest)
+		if !exists {
+			// Fetch file node
+			content, kind, err := client.GetObject(fileDigest)
+			if err != nil {
+				fmt.Printf("  Warning: failed to fetch file node %s: %v\n", f.Path, err)
+				continue
+			}
+			if content != nil {
+				var payload map[string]interface{}
+				if err := json.Unmarshal(content, &payload); err == nil {
+					tx, _ := db.BeginTx()
+					if _, err := db.InsertNode(tx, graph.NodeKind(kind), payload); err == nil {
+						tx.Commit()
+					} else {
+						tx.Rollback()
+					}
+				}
+			}
+		}
+
+		// Check if we have the content blob
+		_, readErr := db.ReadObject(f.ContentDigest)
+		if readErr != nil {
+			// Fetch raw content from remote
+			rawContent, err := client.GetRawContent(f.ContentDigest)
+			if err != nil {
+				fmt.Printf("  Warning: failed to fetch content for %s: %v\n", f.Path, err)
+				continue
+			}
+			if _, err := db.WriteObject(rawContent); err != nil {
+				fmt.Printf("  Warning: failed to store content for %s: %v\n", f.Path, err)
+				continue
+			}
+			fetched++
+		}
+
+		// Ensure HAS_FILE edge exists
+		db.InsertEdgeDirect(snapRef.Target, graph.EdgeHasFile, fileDigest, nil)
+	}
+
+	if fetched > 0 {
+		fmt.Printf("  Fetched %d content blob(s)\n", fetched)
+	}
+
+	// Also fetch cs.latest if available
+	csRef, err := client.GetRef("cs.latest")
+	if err == nil && csRef != nil {
+		csExists, _ := db.HasNode(csRef.Target)
+		if !csExists {
+			content, kind, err := client.GetObject(csRef.Target)
+			if err == nil && content != nil {
+				var payload map[string]interface{}
+				if err := json.Unmarshal(content, &payload); err == nil {
+					tx, _ := db.BeginTx()
+					if _, err := db.InsertNode(tx, graph.NodeKind(kind), payload); err == nil {
+						tx.Commit()
+					} else {
+						tx.Rollback()
+					}
+				}
+			}
+		}
+		refMgr.Set("cs.latest", csRef.Target, ref.KindChangeSet)
+	}
+
+	// Update local snap.latest
+	if err := refMgr.Set("snap.latest", snapRef.Target, ref.KindSnapshot); err != nil {
+		return fmt.Errorf("updating local snap.latest: %w", err)
+	}
+
+	fmt.Printf("  snap.latest -> %s\n", remoteDigest[:12])
+	fmt.Println("Pull complete.")
+	return nil
+}
+
 func runClone(cmd *cobra.Command, args []string) error {
 	rawURL := args[0]
 
@@ -11376,13 +11672,17 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("getting workspace %q: %w", currentWsName, err)
 			}
 			if ws == nil {
-				return fmt.Errorf("workspace %q not found (clear with 'kai ws switch')", currentWsName)
+				return fmt.Errorf("workspace %q not found (clear with 'kai ws checkout')", currentWsName)
 			}
 
-			// Create changeset from workspace's head to working snapshot
+			// Create changeset from workspace's head to latest snapshot
+			// Try @snap:working first, fall back to @snap:last
 			headSnapID, err := resolveSnapshotID(db, "@snap:working")
 			if err != nil {
-				return fmt.Errorf("resolving @snap:working: %w", err)
+				headSnapID, err = resolveSnapshotID(db, "@snap:last")
+				if err != nil {
+					return fmt.Errorf("no snapshot found — run 'kai capture' first")
+				}
 			}
 
 			// Check if there are changes

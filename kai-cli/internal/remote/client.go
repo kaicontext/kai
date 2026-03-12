@@ -377,6 +377,58 @@ func (c *Client) GetObject(digest []byte) ([]byte, string, error) {
 	return content, kind, nil
 }
 
+// SnapshotFile represents a file in a remote snapshot.
+type SnapshotFile struct {
+	Path          string `json:"path"`
+	Digest        string `json:"digest"`
+	ContentDigest string `json:"contentDigest"`
+	Lang          string `json:"lang"`
+}
+
+// SnapshotFilesResponse is the response from the files endpoint.
+type SnapshotFilesResponse struct {
+	SnapshotDigest string         `json:"snapshotDigest"`
+	Files          []SnapshotFile `json:"files"`
+}
+
+// ListSnapshotFiles lists all files in a snapshot by ref name or hex digest.
+func (c *Client) ListSnapshotFiles(refOrDigest string) (*SnapshotFilesResponse, error) {
+	resp, err := c.get(c.repoPath() + "/v1/files/" + refOrDigest)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result SnapshotFilesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// GetRawContent fetches raw file content by digest.
+func (c *Client) GetRawContent(digest string) ([]byte, error) {
+	resp, err := c.get(c.repoPath() + "/v1/raw/" + digest)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("content not found: %s", digest)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
 // GetLogHead returns the current log head.
 func (c *Client) GetLogHead() ([]byte, error) {
 	resp, err := c.get(c.repoPath() + "/v1/log/head")
