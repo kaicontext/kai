@@ -1697,21 +1697,11 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	kaiPath := filepath.Join(cwd, kaiDir)
-	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
-		return fmt.Errorf("no .kai directory found — run 'kai init && kai capture' first")
-	}
-
-	dbPath := filepath.Join(kaiPath, dbFile)
-	objPath := filepath.Join(kaiPath, objectsDir)
-
-	db, err := graph.Open(dbPath, objPath)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer db.Close()
-
-	srv := kaimcp.NewServer(db, cwd)
+	// Server handles lazy initialization — no need to check for .kai here.
+	// If .kai exists, it opens immediately. If not, the first MCP data request
+	// triggers background initialization.
+	srv := kaimcp.NewServer(cwd)
+	defer srv.Close()
 	return srv.Serve(cmd.Context())
 }
 

@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -25,22 +27,74 @@ import (
 	"kai/internal/util"
 )
 
-// Server wraps the MCP server with access to the Kai graph database.
-type Server struct {
-	db       *graph.DB
-	resolver *ref.Resolver
-	snap     *snapshot.Creator
-	workDir  string // project root (where .kai lives)
+// --- Initialization State ---
+
+// initPhase represents the current phase of background initialization.
+type initPhase string
+
+const (
+	phaseDetecting  initPhase = "detecting_languages"
+	phaseScanning   initPhase = "scanning_files"
+	phaseCapturing  initPhase = "capturing_head"
+	phaseBuilding   initPhase = "building_graph"
+	phaseFinalizing initPhase = "finalizing"
+)
+
+// initState tracks the progress of a background initialization job.
+type initState struct {
+	phase     initPhase
+	message   string
+	fileCount int
+	startedAt time.Time
+	done      chan struct{} // closed when init completes
+	err       error        // non-nil if init failed
 }
 
-// NewServer creates a new MCP server backed by the given graph database.
-// workDir is the project root directory (parent of .kai).
-func NewServer(db *graph.DB, workDir string) *Server {
+// Server wraps the MCP server with access to the Kai graph database.
+// Supports lazy initialization: db may be nil until the first data request
+// triggers background indexing.
+type Server struct {
+	mu       sync.Mutex
+	db       *graph.DB          // nil until initialized
+	resolver *ref.Resolver      // nil until initialized
+	snap     *snapshot.Creator   // nil until initialized
+	workDir  string             // project root (where .kai lives)
+	kaiDir   string             // path to .kai directory
+	initJob  *initState         // non-nil while background init is running
+}
+
+// NewServer creates a new MCP server for the given project directory.
+// If .kai already exists and contains a valid database, it opens immediately.
+// Otherwise, initialization is deferred until the first data request.
+func NewServer(workDir string) *Server {
+	kaiDir := filepath.Join(workDir, ".kai")
+	s := &Server{
+		workDir: workDir,
+		kaiDir:  kaiDir,
+	}
+
+	// Fast path: if .kai exists, try to open the store immediately
+	dbPath := filepath.Join(kaiDir, "db.sqlite")
+	objPath := filepath.Join(kaiDir, "objects")
+	if _, err := os.Stat(dbPath); err == nil {
+		if db, err := graph.Open(dbPath, objPath); err == nil {
+			s.db = db
+			s.resolver = ref.NewResolver(db)
+			s.snap = snapshot.NewCreator(db, nil)
+		}
+	}
+
+	return s
+}
+
+// NewServerWithDB creates a server with a pre-opened database (for backward compatibility).
+func NewServerWithDB(db *graph.DB, workDir string) *Server {
 	return &Server{
 		db:       db,
 		resolver: ref.NewResolver(db),
 		snap:     snapshot.NewCreator(db, nil),
 		workDir:  workDir,
+		kaiDir:   filepath.Join(workDir, ".kai"),
 	}
 }
 
@@ -55,6 +109,226 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.registerTools(srv)
 
 	return server.ServeStdio(srv)
+}
+
+// Close cleans up resources.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// isReady returns true if the database is open and ready for queries.
+func (s *Server) isReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db != nil
+}
+
+// ensureReady checks if the store is ready. If not, it starts background
+// initialization and returns a structured "initializing" response.
+// Returns (nil, true) if ready, or (initResponse, false) if not ready.
+func (s *Server) ensureReady() (*mcp.CallToolResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Fast path: already initialized
+	if s.db != nil {
+		return nil, true
+	}
+
+	// Check if init is already running
+	if s.initJob != nil {
+		// Return current progress
+		result := s.initProgressLocked()
+		return result, false
+	}
+
+	// Start background initialization
+	s.startInitLocked()
+	result := s.initProgressLocked()
+	return result, false
+}
+
+// startInitLocked starts a background initialization goroutine.
+// Must be called with s.mu held.
+func (s *Server) startInitLocked() {
+	job := &initState{
+		phase:     phaseDetecting,
+		message:   "Initializing Kai semantic index...",
+		startedAt: time.Now(),
+		done:      make(chan struct{}),
+	}
+	s.initJob = job
+
+	go s.runInit(job)
+}
+
+// runInit performs the full initialization sequence in the background.
+func (s *Server) runInit(job *initState) {
+	defer close(job.done)
+
+	kaiDir := s.kaiDir
+	dbPath := filepath.Join(kaiDir, "db.sqlite")
+	objPath := filepath.Join(kaiDir, "objects")
+
+	// Step 1: Create .kai directory if needed
+	s.mu.Lock()
+	job.phase = phaseDetecting
+	job.message = "Creating Kai store..."
+	s.mu.Unlock()
+
+	if err := os.MkdirAll(kaiDir, 0755); err != nil {
+		s.mu.Lock()
+		job.err = fmt.Errorf("creating .kai directory: %w", err)
+		s.mu.Unlock()
+		return
+	}
+	if err := os.MkdirAll(objPath, 0755); err != nil {
+		s.mu.Lock()
+		job.err = fmt.Errorf("creating objects directory: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	// Step 2: Open database
+	db, err := graph.Open(dbPath, objPath)
+	if err != nil {
+		s.mu.Lock()
+		job.err = fmt.Errorf("opening database: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	// Step 3: Scan files
+	s.mu.Lock()
+	job.phase = phaseScanning
+	job.message = fmt.Sprintf("Scanning files in %s...", filepath.Base(s.workDir))
+	s.mu.Unlock()
+
+	source, err := dirio.OpenDirectory(s.workDir)
+	if err != nil {
+		db.Close()
+		s.mu.Lock()
+		job.err = fmt.Errorf("opening directory: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	files, err := source.GetFiles()
+	if err != nil {
+		db.Close()
+		s.mu.Lock()
+		job.err = fmt.Errorf("reading files: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	s.mu.Lock()
+	job.fileCount = len(files)
+	job.phase = phaseCapturing
+	job.message = fmt.Sprintf("Capturing %d files...", len(files))
+	s.mu.Unlock()
+
+	// Step 4: Load modules and create snapshot
+	modulesPath := filepath.Join(kaiDir, "rules", "modules.yaml")
+	matcher, _ := module.LoadRulesOrEmpty(modulesPath)
+	if len(matcher.GetAllModules()) == 0 {
+		legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
+		matcher, _ = module.LoadRulesOrEmpty(legacyPath)
+	}
+
+	creator := snapshot.NewCreator(db, matcher)
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		db.Close()
+		s.mu.Lock()
+		job.err = fmt.Errorf("creating snapshot: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	// Step 5: Analyze symbols and calls
+	s.mu.Lock()
+	job.phase = phaseBuilding
+	job.message = fmt.Sprintf("Building semantic graph for %d files...", len(files))
+	s.mu.Unlock()
+
+	// Non-fatal errors: continue even if some files fail to parse
+	_ = creator.AnalyzeSymbols(snapshotID, nil)
+	_ = creator.AnalyzeCalls(snapshotID, nil)
+
+	// Step 6: Update refs
+	s.mu.Lock()
+	job.phase = phaseFinalizing
+	job.message = "Finalizing index..."
+	s.mu.Unlock()
+
+	autoRefMgr := ref.NewAutoRefManager(db)
+	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+		db.Close()
+		s.mu.Lock()
+		job.err = fmt.Errorf("updating refs: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	// Success: install the DB into the server
+	s.mu.Lock()
+	s.db = db
+	s.resolver = ref.NewResolver(db)
+	s.snap = snapshot.NewCreator(db, nil)
+	job.message = fmt.Sprintf("Kai index ready (%d files)", len(files))
+	s.mu.Unlock()
+}
+
+// initProgressLocked returns a structured "initializing" MCP response.
+// Must be called with s.mu held.
+func (s *Server) initProgressLocked() *mcp.CallToolResult {
+	job := s.initJob
+	if job == nil {
+		result, _ := jsonResult(map[string]interface{}{
+			"status":  "uninitialized",
+			"message": "Kai has not been initialized for this repository.",
+			"repo":    s.workDir,
+		})
+		return result
+	}
+
+	// Check for failure
+	if job.err != nil {
+		result, _ := jsonResult(map[string]interface{}{
+			"status":           "init_failed",
+			"message":          fmt.Sprintf("Kai initialization failed: %v", job.err),
+			"reason":           job.err.Error(),
+			"retryable":        true,
+			"suggested_action": "Call kai_refresh to retry, or continue without Kai context.",
+		})
+		return result
+	}
+
+	elapsed := time.Since(job.startedAt)
+	retryAfter := 5 // default poll interval
+	if job.fileCount > 1000 {
+		retryAfter = 15
+	} else if job.fileCount > 100 {
+		retryAfter = 10
+	}
+
+	result, _ := jsonResult(map[string]interface{}{
+		"status":                     "initializing",
+		"message":                    job.message,
+		"repo":                       filepath.Base(s.workDir),
+		"phase":                      string(job.phase),
+		"file_count":                 job.fileCount,
+		"elapsed_seconds":            int(elapsed.Seconds()),
+		"retry_after":                retryAfter,
+		"can_continue_without_kai":   true,
+	})
+	return result
 }
 
 // readOnly returns tool options marking the tool as read-only, non-destructive, and idempotent.
@@ -167,16 +441,16 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		s.handleImpact,
 	)
 
-	// kai_status — check graph freshness
+	// kai_status — check graph freshness (does NOT trigger init)
 	srv.AddTool(
 		mcp.NewTool("kai_status",
 			readOnly(),
-			mcp.WithDescription("Check if the Kai semantic graph is fresh. Returns last capture time, current branch, HEAD commit, and any files that have changed since the last capture. Call this before using other kai tools to verify freshness. If stale_files exist, ask the user before calling kai_refresh."),
+			mcp.WithDescription("Check if the Kai semantic graph is fresh. Returns last capture time, current branch, HEAD commit, and any files that have changed since the last capture. Call this before using other kai tools to verify freshness. If stale_files exist, ask the user before calling kai_refresh. If status is 'uninitialized', call kai_refresh to build the index."),
 		),
 		s.handleStatus,
 	)
 
-	// kai_refresh — update the semantic graph
+	// kai_refresh — update the semantic graph (triggers init if needed)
 	srv.AddTool(
 		mcp.NewTool("kai_refresh",
 			mcp.WithToolAnnotation(mcp.ToolAnnotation{
@@ -191,6 +465,8 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		s.handleRefresh,
 	)
 }
+
+// --- Snapshot Resolution ---
 
 // latestSnapshotID resolves the most recent snapshot.
 func (s *Server) latestSnapshotID() ([]byte, error) {
@@ -257,6 +533,10 @@ func (s *Server) findSymbolByName(snapshotID, fileID []byte, symbolName string) 
 // --- Tool Handlers ---
 
 func (s *Server) handleSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -334,18 +614,16 @@ func (s *Server) handleSymbols(ctx context.Context, req mcp.CallToolRequest) (*m
 }
 
 func (s *Server) handleCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	symbolName, err := req.RequireString("symbol")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'symbol'"), nil
 	}
 	filePath := optString(req, "file")
 
-	// CALLS edges are File --CALLS--> File with a Call node as context (at).
-	// The Call node payload has "calleeName" which we match against symbolName.
-	// To find callers: find CALLS edges where the calleeName matches and
-	// optionally the target file matches.
-
-	// First try symbol-level edges (future-proof)
 	snapID, err := s.latestSnapshotID()
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -364,6 +642,10 @@ func (s *Server) handleCallers(ctx context.Context, req mcp.CallToolRequest) (*m
 }
 
 func (s *Server) handleCallees(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	symbolName, err := req.RequireString("symbol")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'symbol'"), nil
@@ -388,6 +670,10 @@ func (s *Server) handleCallees(ctx context.Context, req mcp.CallToolRequest) (*m
 }
 
 func (s *Server) handleDependents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -421,6 +707,10 @@ func (s *Server) handleDependents(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 func (s *Server) handleDependencies(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -464,6 +754,10 @@ func (s *Server) handleDependencies(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (s *Server) handleTests(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -518,6 +812,10 @@ func (s *Server) handleTests(ctx context.Context, req mcp.CallToolRequest) (*mcp
 }
 
 func (s *Server) handleDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	baseRef := optString(req, "base")
 	headRef := optString(req, "head")
 
@@ -582,6 +880,10 @@ func (s *Server) handleDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -718,6 +1020,10 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 }
 
 func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
 	filePath, err := req.RequireString("file")
 	if err != nil {
 		return mcp.NewToolResultError("missing required parameter 'file'"), nil
@@ -810,6 +1116,207 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		"affected_files": sourceFiles,
 		"affected_tests": testFiles,
 		"total_affected": len(results),
+	})
+}
+
+// --- Status & Refresh Handlers ---
+// These do NOT use ensureReady() — they handle uninitialized state explicitly.
+
+func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	result := map[string]interface{}{}
+
+	// Get git info (always available, doesn't need .kai)
+	if branch, err := gitOutput(s.workDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		result["branch"] = branch
+	}
+	if commit, err := gitOutput(s.workDir, "rev-parse", "--short", "HEAD"); err == nil {
+		result["head_commit"] = commit
+	}
+
+	// Check for uncommitted git changes
+	if status, err := gitOutput(s.workDir, "status", "--porcelain"); err == nil {
+		result["uncommitted_changes"] = status != ""
+	}
+
+	// Check if init is running
+	s.mu.Lock()
+	if s.initJob != nil && s.db == nil {
+		job := s.initJob
+		result["status"] = "initializing"
+		result["phase"] = string(job.phase)
+		result["message"] = job.message
+		result["file_count"] = job.fileCount
+		result["elapsed_seconds"] = int(time.Since(job.startedAt).Seconds())
+		if job.err != nil {
+			result["status"] = "init_failed"
+			result["error"] = job.err.Error()
+		}
+		s.mu.Unlock()
+		return jsonResult(result)
+	}
+	dbReady := s.db != nil
+	s.mu.Unlock()
+
+	// Not initialized at all
+	if !dbReady {
+		result["status"] = "uninitialized"
+		result["message"] = "Kai has not been initialized for this repository. Call kai_refresh to build the index, or any kai data tool to trigger automatic initialization."
+		return jsonResult(result)
+	}
+
+	// DB is ready — check freshness
+	result["status"] = "ready"
+
+	snapID, err := s.latestSnapshotID()
+	if err != nil {
+		result["status"] = "no_snapshots"
+		result["message"] = "Database exists but no snapshots found. Call kai_refresh to capture."
+		return jsonResult(result)
+	}
+
+	snapNode, err := s.db.GetNode(snapID)
+	if err == nil && snapNode != nil {
+		if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
+			captureTime := time.UnixMilli(int64(ts)).UTC()
+			result["last_capture"] = captureTime.Format(time.RFC3339)
+		}
+	}
+
+	// Compare working directory to snapshot
+	snapshotFiles, err := s.snapshotFiles(snapID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error reading snapshot: %v", err)), nil
+	}
+
+	source, err := dirio.OpenDirectory(s.workDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
+	}
+
+	currentFiles, err := source.GetFiles()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error reading files: %v", err)), nil
+	}
+
+	// Build current file map: path → content digest
+	currentMap := make(map[string]string, len(currentFiles))
+	for _, f := range currentFiles {
+		currentMap[f.Path] = util.Blake3HashHex(f.Content)
+	}
+
+	// Find stale files
+	var staleFiles []string
+	for path, currentDigest := range currentMap {
+		snapDigest, exists := snapshotFiles[path]
+		if !exists || currentDigest != snapDigest {
+			staleFiles = append(staleFiles, path)
+		}
+	}
+	// Files deleted since snapshot
+	for path := range snapshotFiles {
+		if _, exists := currentMap[path]; !exists {
+			staleFiles = append(staleFiles, path+" (deleted)")
+		}
+	}
+	sort.Strings(staleFiles)
+
+	result["stale"] = len(staleFiles) > 0
+	if len(staleFiles) > 0 {
+		result["stale_files"] = staleFiles
+	}
+	result["snapshot_files"] = len(snapshotFiles)
+	result["current_files"] = len(currentMap)
+
+	return jsonResult(result)
+}
+
+func (s *Server) handleRefresh(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	scope := optString(req, "scope")
+	if scope == "" {
+		scope = "all"
+	}
+
+	if scope != "all" && scope != "staged" {
+		return mcp.NewToolResultError("scope must be 'all' or 'staged'"), nil
+	}
+
+	// If DB doesn't exist yet, we need to create the .kai directory and open it
+	s.mu.Lock()
+	needsInit := s.db == nil
+	s.mu.Unlock()
+
+	if needsInit {
+		kaiDir := s.kaiDir
+		dbPath := filepath.Join(kaiDir, "db.sqlite")
+		objPath := filepath.Join(kaiDir, "objects")
+
+		// Create directories
+		if err := os.MkdirAll(kaiDir, 0755); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error creating .kai: %v", err)), nil
+		}
+		if err := os.MkdirAll(objPath, 0755); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error creating objects dir: %v", err)), nil
+		}
+
+		db, err := graph.Open(dbPath, objPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error opening database: %v", err)), nil
+		}
+
+		s.mu.Lock()
+		s.db = db
+		s.resolver = ref.NewResolver(db)
+		s.snap = snapshot.NewCreator(db, nil)
+		// Clear any failed init job
+		s.initJob = nil
+		s.mu.Unlock()
+	}
+
+	// Load modules
+	modulesPath := filepath.Join(s.kaiDir, "rules", "modules.yaml")
+	matcher, err := module.LoadRulesOrEmpty(modulesPath)
+	if err != nil {
+		// Try legacy location
+		legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
+		matcher, err = module.LoadRulesOrEmpty(legacyPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error loading modules: %v", err)), nil
+		}
+	}
+
+	creator := snapshot.NewCreator(s.db, matcher)
+
+	// Open directory source
+	source, err := dirio.OpenDirectory(s.workDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
+	}
+
+	// Create snapshot
+	snapshotID, err := creator.CreateSnapshot(source)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error creating snapshot: %v", err)), nil
+	}
+
+	// Analyze symbols (non-fatal)
+	_ = creator.AnalyzeSymbols(snapshotID, nil)
+
+	// Build call graph (non-fatal)
+	_ = creator.AnalyzeCalls(snapshotID, nil)
+
+	// Update refs
+	autoRefMgr := ref.NewAutoRefManager(s.db)
+	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error updating refs: %v", err)), nil
+	}
+
+	files, _ := source.GetFiles()
+
+	return jsonResult(map[string]interface{}{
+		"status":      "captured",
+		"snapshot_id": hex.EncodeToString(snapshotID)[:12],
+		"files":       len(files),
+		"scope":       scope,
 	})
 }
 
@@ -1085,152 +1592,6 @@ func (s *Server) snapshotFiles(snapshotID []byte) (map[string]string, error) {
 		}
 	}
 	return files, nil
-}
-
-// --- Status & Refresh Handlers ---
-
-func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	result := map[string]interface{}{}
-
-	// Get git info
-	if branch, err := gitOutput(s.workDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
-		result["branch"] = branch
-	}
-	if commit, err := gitOutput(s.workDir, "rev-parse", "--short", "HEAD"); err == nil {
-		result["head_commit"] = commit
-	}
-
-	// Get latest snapshot info
-	snapID, err := s.latestSnapshotID()
-	if err != nil {
-		result["last_capture"] = nil
-		result["stale"] = true
-		result["message"] = "No snapshots found. Run kai_refresh to capture."
-		return jsonResult(result)
-	}
-
-	snapNode, err := s.db.GetNode(snapID)
-	if err == nil && snapNode != nil {
-		if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
-			captureTime := time.UnixMilli(int64(ts)).UTC()
-			result["last_capture"] = captureTime.Format(time.RFC3339)
-		}
-	}
-
-	// Compare working directory to snapshot
-	snapshotFiles, err := s.snapshotFiles(snapID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading snapshot: %v", err)), nil
-	}
-
-	source, err := dirio.OpenDirectory(s.workDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
-	}
-
-	currentFiles, err := source.GetFiles()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading files: %v", err)), nil
-	}
-
-	// Build current file map: path → content digest
-	currentMap := make(map[string]string, len(currentFiles))
-	for _, f := range currentFiles {
-		currentMap[f.Path] = util.Blake3HashHex(f.Content)
-	}
-
-	// Find stale files
-	var staleFiles []string
-	for path, currentDigest := range currentMap {
-		snapDigest, exists := snapshotFiles[path]
-		if !exists || currentDigest != snapDigest {
-			staleFiles = append(staleFiles, path)
-		}
-	}
-	// Files deleted since snapshot
-	for path := range snapshotFiles {
-		if _, exists := currentMap[path]; !exists {
-			staleFiles = append(staleFiles, path+" (deleted)")
-		}
-	}
-	sort.Strings(staleFiles)
-
-	// Check for uncommitted git changes
-	if status, err := gitOutput(s.workDir, "status", "--porcelain"); err == nil {
-		result["uncommitted_changes"] = status != ""
-	}
-
-	result["stale"] = len(staleFiles) > 0
-	if len(staleFiles) > 0 {
-		result["stale_files"] = staleFiles
-	}
-	result["snapshot_files"] = len(snapshotFiles)
-	result["current_files"] = len(currentMap)
-
-	return jsonResult(result)
-}
-
-func (s *Server) handleRefresh(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	scope := optString(req, "scope")
-	if scope == "" {
-		scope = "all"
-	}
-
-	if scope != "all" && scope != "staged" {
-		return mcp.NewToolResultError("scope must be 'all' or 'staged'"), nil
-	}
-
-	// Load modules
-	modulesPath := filepath.Join(s.workDir, ".kai", "rules", "modules.yaml")
-	matcher, err := module.LoadRulesOrEmpty(modulesPath)
-	if err != nil {
-		// Try legacy location
-		legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
-		matcher, err = module.LoadRulesOrEmpty(legacyPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("error loading modules: %v", err)), nil
-		}
-	}
-
-	creator := snapshot.NewCreator(s.db, matcher)
-
-	// Open directory source
-	source, err := dirio.OpenDirectory(s.workDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
-	}
-
-	// Create snapshot
-	snapshotID, err := creator.CreateSnapshot(source)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error creating snapshot: %v", err)), nil
-	}
-
-	// Analyze symbols
-	if err := creator.AnalyzeSymbols(snapshotID, nil); err != nil {
-		// Non-fatal: continue with partial results
-		_ = err
-	}
-
-	// Build call graph
-	if err := creator.AnalyzeCalls(snapshotID, nil); err != nil {
-		_ = err
-	}
-
-	// Update refs
-	autoRefMgr := ref.NewAutoRefManager(s.db)
-	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error updating refs: %v", err)), nil
-	}
-
-	files, _ := source.GetFiles()
-
-	return jsonResult(map[string]interface{}{
-		"status":      "captured",
-		"snapshot_id": hex.EncodeToString(snapshotID)[:12],
-		"files":       len(files),
-		"scope":       scope,
-	})
 }
 
 // gitOutput runs a git command and returns trimmed stdout.
