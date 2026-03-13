@@ -1,0 +1,32 @@
+{
+  "name": "kai-mcp",
+  "version": "0.9.4",
+  "description": "MCP server for Kai — semantic code intelligence for AI coding assistants",
+  "bin": {
+    "kai-mcp": "bin/kai-mcp.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "kai",
+    "semantic",
+    "code-intelligence",
+    "claude",
+    "cursor"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kailayerhq/kai.git",
+    "directory": "packages/kai-mcp"
+  },
+  "homepage": "https://kailayer.com",
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ]
+}

@@ -1664,6 +1664,14 @@ func runTelemetryStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the kai version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("kai " + Version)
+	},
+}
+
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
 	Short: "MCP server for AI coding assistants",
@@ -1671,23 +1679,21 @@ var mcpCmd = &cobra.Command{
 
 var mcpServeCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start MCP server on stdio (used by Claude Code, Kilo Code, etc.)",
+	Short: "Start MCP server on stdio (used by Claude Code, Cursor, etc.)",
 	Long: `Start an MCP (Model Context Protocol) server that exposes Kai's semantic
 graph to AI coding assistants over stdio.
 
-Configure in Claude Code (.claude.json):
-  {
-    "mcpServers": {
-      "kai": {
-        "command": "kai",
-        "args": ["mcp", "serve"]
-      }
-    }
-  }
+Setup:
+  Claude Code:   claude mcp add kai -- kai mcp serve
+  Cursor:        Add to .cursor/mcp.json
+  npx:           claude mcp add kai -- npx -y kai-mcp
 
-The server exposes tools like kai_symbols, kai_callers, kai_context, kai_impact,
-kai_tests, kai_diff, and more. These give the AI assistant structured access to
-your codebase's dependency graph, call graph, and test coverage map.`,
+No setup required — the server lazily initializes the semantic graph on first
+use. If .kai/ already exists, it opens instantly.
+
+The server exposes 11 tools: kai_symbols, kai_callers, kai_callees,
+kai_dependents, kai_dependencies, kai_tests, kai_diff, kai_context,
+kai_impact, kai_status, and kai_refresh.`,
 	RunE: runMCPServe,
 }
 
@@ -1700,7 +1706,7 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	// Server handles lazy initialization — no need to check for .kai here.
 	// If .kai exists, it opens immediately. If not, the first MCP data request
 	// triggers background initialization.
-	srv := kaimcp.NewServer(cwd)
+	srv := kaimcp.NewServer(cwd, Version)
 	defer srv.Close()
 	return srv.Serve(cmd.Context())
 }
@@ -2223,6 +2229,9 @@ func init() {
 	telemetryCmd.AddCommand(telemetryDisableCmd)
 	telemetryCmd.AddCommand(telemetryStatusCmd)
 	rootCmd.AddCommand(telemetryCmd)
+
+	// Version subcommand
+	rootCmd.AddCommand(versionCmd)
 
 	// MCP server
 	mcpCmd.GroupID = groupAdvanced

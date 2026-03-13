@@ -59,17 +59,19 @@ type Server struct {
 	snap     *snapshot.Creator   // nil until initialized
 	workDir  string             // project root (where .kai lives)
 	kaiDir   string             // path to .kai directory
+	version  string             // CLI version for MCP handshake
 	initJob  *initState         // non-nil while background init is running
 }
 
 // NewServer creates a new MCP server for the given project directory.
 // If .kai already exists and contains a valid database, it opens immediately.
 // Otherwise, initialization is deferred until the first data request.
-func NewServer(workDir string) *Server {
+func NewServer(workDir, version string) *Server {
 	kaiDir := filepath.Join(workDir, ".kai")
 	s := &Server{
 		workDir: workDir,
 		kaiDir:  kaiDir,
+		version: version,
 	}
 
 	// Fast path: if .kai exists, try to open the store immediately
@@ -87,21 +89,26 @@ func NewServer(workDir string) *Server {
 }
 
 // NewServerWithDB creates a server with a pre-opened database (for backward compatibility).
-func NewServerWithDB(db *graph.DB, workDir string) *Server {
+func NewServerWithDB(db *graph.DB, workDir, version string) *Server {
 	return &Server{
 		db:       db,
 		resolver: ref.NewResolver(db),
 		snap:     snapshot.NewCreator(db, nil),
 		workDir:  workDir,
 		kaiDir:   filepath.Join(workDir, ".kai"),
+		version:  version,
 	}
 }
 
 // Serve starts the MCP server on stdio and blocks until the connection closes.
 func (s *Server) Serve(ctx context.Context) error {
+	version := s.version
+	if version == "" {
+		version = "0.0.0-dev"
+	}
 	srv := server.NewMCPServer(
 		"kai",
-		"0.1.0",
+		version,
 		server.WithToolCapabilities(true),
 	)
 

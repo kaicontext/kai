@@ -75,6 +75,9 @@ main() {
     echo "  kai init"
     echo "  kai capture"
     echo "  kai status"
+    echo ""
+    echo "Use as MCP server (Claude Code, Cursor, etc.):"
+    echo "  claude mcp add kai -- kai mcp serve"
 }
 
 main

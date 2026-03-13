@@ -77,6 +77,24 @@ For full command reference and workflow examples, see [docs/cli-reference.md](do
 
 ---
 
+## MCP Server
+
+Kai ships an [MCP](https://modelcontextprotocol.io) server that gives AI coding assistants access to call graphs, dependency maps, impact analysis, and test coverage.
+
+```bash
+# Claude Code
+claude mcp add kai -- kai mcp serve
+
+# Or without installing kai
+claude mcp add kai -- npx -y kai-mcp
+```
+
+No setup required — the server lazily initializes the semantic graph on first use.
+
+See [docs/mcp.md](docs/mcp.md) for editor setup, tool reference, and troubleshooting.
+
+---
+
 ## Architecture
 
 Kai is open-core: CLI and semantic engine are Apache 2.0.
