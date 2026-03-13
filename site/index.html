@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kai - Intent-Based Version Control</title>
+  <title>Kai - Semantic Infrastructure for Code Change</title>
   <style>
     :root {
       --bg: #0a0a0a;
@@ -40,6 +40,10 @@
     }
     .cta {
       margin-top: 2rem;
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
     }
     .btn {
       display: inline-block;
@@ -56,7 +60,6 @@
       background: transparent;
       border: 1px solid var(--muted);
       color: var(--fg);
-      margin-left: 1rem;
     }
     section {
       margin-bottom: 4rem;
@@ -130,6 +133,27 @@
       display: block;
       font-size: 0.85rem;
     }
+    .install-options {
+      display: grid;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .install-option {
+      background: var(--code-bg);
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      border: 1px solid #262626;
+    }
+    .install-option .label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+    .install-option code {
+      color: var(--fg);
+    }
     footer {
       text-align: center;
       color: var(--muted);
@@ -141,7 +165,6 @@
     @media (max-width: 600px) {
       h1 { font-size: 2rem; }
       .comparison { grid-template-columns: 1fr; }
-      .btn-secondary { margin-left: 0; margin-top: 0.5rem; display: block; text-align: center; }
     }
   </style>
 </head>
@@ -154,10 +177,11 @@
         <path id="Triangle-copy" fill="#c4c2bf" fill-rule="evenodd" stroke="none" d="M 159 70 L 159 200 L 234 200 Z"/>
         <path id="Shape" fill="#e5e5e5" fill-rule="evenodd" stroke="none" d="M 541.644775 211 C 543.365967 199.880295 545.224609 193.954742 546.972534 190.404175 C 548.689209 186.91716 552.159241 181.998627 554.683777 179.474106 C 557.208313 176.949585 561.574707 173.564224 564.386902 171.95108 C 567.199097 170.337936 572.200012 168.125748 575.5 167.03511 C 578.799988 165.944489 585.549988 164.34462 590.5 163.479874 C 595.450012 162.615128 607.539124 161.63205 617.364746 161.295273 L 635.229492 160.682938 L 634.806946 151.845383 C 634.433716 144.03949 634.039917 142.517639 631.433044 138.808563 C 629.738525 136.397491 626.501526 133.590271 623.831665 132.216309 C 620.56134 130.533356 616.838318 129.66272 611.283813 129.282013 C 605.921387 128.914459 600.760376 129.272675 595.207458 130.397827 C 590.709351 131.309265 583.817383 133.141571 579.892029 134.469604 C 575.966736 135.797638 569.200134 138.687988 564.855164 140.892609 L 556.955261 144.900986 L 557.227661 126.749786 L 557.5 108.598602 L 566.673035 104.871521 C 571.71814 102.821655 580.493164 99.996185 586.173035 98.592743 C 591.852844 97.189301 601.526489 95.55304 607.669983 94.956665 C 615.542236 94.192444 621.605408 94.180695 628.207214 94.91684 C 633.359253 95.491302 640.123535 96.838318 643.238892 97.910156 C 646.354309 98.982025 650.894287 101.025818 653.32782 102.451965 C 655.761292 103.878082 660.082458 107.508636 662.930298 110.519806 C 665.778137 113.531006 669.224365 118.432739 670.588623 121.412567 C 671.95282 124.392395 673.720642 129.906067 674.517151 133.665222 C 675.680908 139.15802 675.968689 151.446136 675.982666 196.25 L 676 252 L 657.135925 252 C 638.271851 252 638.271851 252 637.635925 247.360428 C 637.286194 244.80867 637 240.785095 637 238.419144 C 637 234.117432 637 234.117432 628.25 240.723267 C 623.4375 244.356461 616.61676 248.680573 613.092773 250.332382 C 609.568787 251.984177 604.168823 253.928101 601.092773 254.652206 C 598.016724 255.376312 592.349976 255.949844 588.5 255.926727 C 584.650024 255.903625 578.575012 255.120163 575 254.185715 C 571.424988 253.251266 566.28064 251.185287 563.568176 249.594635 C 560.855652 248.003998 556.709106 244.719589 554.353577 242.295944 C 551.998108 239.872314 548.671448 235.046799 546.961121 231.572586 C 545.223694 228.043396 543.364502 222.110275 542.748108 218.127899 L 541.644775 211 Z M 395 252 L 395 33 L 415.871338 33 L 436.742676 33 L 437.288635 43.75 C 437.588867 49.662506 437.734253 78.237488 437.611694 107.25 C 437.489136 136.262512 437.68634 160 438.049927 160 C 438.413513 160 450.138489 146.07402 464.105469 129.053406 L 489.5 98.106781 L 513.838867 98.053406 C 538.177795 98 538.177795 98 535.443542 101.25 C 533.939697 103.037506 520.209595 118.749359 504.93219 136.165222 L 477.155029 167.830475 L 507.991638 209.665237 L 538.828247 251.5 L 514.664124 251.777435 C 490.585449 252.053879 490.493408 252.046829 488.640503 249.781448 C 487.617798 248.531067 475.69281 231.850189 462.140503 212.71283 L 437.5 177.917603 L 437.237854 214.958801 L 436.975647 252 L 415.987854 252 L 395 252 Z M 705 252 L 705 98 L 725 98 L 745 98 L 745 175 L 745 252 L 725 252 L 705 252 Z M 605.02533 224.718475 C 611.202148 224.42157 613.661377 223.764786 618.748535 221.053329 C 622.157349 219.23645 627.208435 215.358124 629.973206 212.434814 C 635 207.11972 635 207.11972 635 196.55986 C 635 186 635 186 626.072388 186 C 621.16217 186 613.66217 186.484375 609.40564 187.076401 C 605.14917 187.668427 599.355957 189.017334 596.531799 190.073975 C 593.707703 191.130615 589.983337 193.45874 588.255554 195.247574 C 586.52771 197.036407 584.570496 200.54245 583.906128 203.038788 C 583.223511 205.603531 582.998596 209.178894 583.388855 211.259354 C 583.768738 213.284332 585.280579 216.368408 586.748413 218.112854 C 588.216309 219.857315 591.235901 222.138611 593.458618 223.182404 C 596.604797 224.659821 599.166931 225.000076 605.02533 224.718475 Z M 722.883972 77.999207 C 719.418396 77.998718 715.978577 77.245331 713.22998 75.884827 C 710.881531 74.722321 707.392212 71.939606 705.476013 69.700958 C 703.559814 67.462311 701.546326 64.026306 701.001587 62.065338 C 700.456848 60.104401 700.018555 56.25 700.027527 53.5 C 700.03656 50.75 700.879089 46.700012 701.899841 44.5 C 702.920593 42.299988 705.273254 39.062958 707.127869 37.30658 C 708.982544 35.550201 712.525024 33.197571 715 32.078552 C 717.474976 30.959503 721.332336 30.034027 723.571838 30.021973 C 725.811401 30.009888 729.709656 30.703918 732.23468 31.564301 C 734.759644 32.424652 738.495911 34.750793 740.537415 36.733459 C 742.578918 38.716156 745.083313 42.174744 746.102661 44.419189 C 747.227112 46.894958 747.964722 50.834045 747.978027 54.434265 C 747.992859 58.444855 747.323181 61.766693 745.912109 64.68161 C 744.763733 67.053772 742.067139 70.498596 739.919678 72.336761 C 737.772156 74.174927 734.272034 76.201141 732.141541 76.839447 C 730.011108 77.477753 725.845154 77.999634 722.883972 77.999207 Z"/>
       </svg>
-      <p class="tagline">Kai is a Git-compatible layer that automatically analyzes your code changes and generates meaningful descriptions of what changed and why. Works with your existing repositories—no migration required. We serve developers and engineering teams who need clearer code reviews, better changelogs, and semantic understanding of their codebase.</p>
+      <p class="tagline">Kai understands what code <em>means</em> — functions, dependencies, behavior impact — not just which lines changed. This semantic graph powers precise CI, context-aware AI coding assistants, and verifiable agents.</p>
       <div class="cta">
-        <a href="https://gitlab.com/rite-day/ivcs" class="btn">View on GitLab</a>
-        <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
+        <a href="https://github.com/kailayerhq/kai" class="btn">GitHub</a>
+        <a href="#install" class="btn btn-secondary">Install</a>
+        <a href="#mcp" class="btn btn-secondary">MCP Server</a>
       </div>
     </header>
 
@@ -165,105 +189,99 @@
       <h2>Why Kai?</h2>
       <div class="comparison">
         <div>
-          <h4>Git commit</h4>
-          <code class="dim">fix: update validation</code>
+          <h4>Git diff</h4>
+          <code class="dim">3 files changed, 47 insertions(+)</code>
         </div>
         <div>
-          <h4>Kai intent</h4>
-          <code class="highlight">Add formatDate and formatTime in Utils</code>
+          <h4>Kai diff</h4>
+          <code class="highlight">validateToken modified: added expiry check, 4 callers affected, 2 tests cover</code>
         </div>
       </div>
       <p style="margin-top: 1rem; color: var(--muted);">
-        Kai automatically analyzes your code changes and generates meaningful descriptions.
-        No more guessing what a commit did from a vague message.
+        Kai builds a semantic graph of your code — call graphs, dependency maps, impact analysis — and exposes it to your tools.
       </p>
     </section>
 
     <section>
-      <h2>Features</h2>
+      <h2>Use Cases</h2>
       <div class="features">
         <div class="feature">
-          <h3>Semantic Change Detection</h3>
-          <p>Detects function additions, API changes, condition modifications, and more using AST analysis.</p>
+          <h3>Selective CI</h3>
+          <p>Run only the tests affected by your changes. 80% CI time reduction for early users.</p>
         </div>
         <div class="feature">
-          <h3>Auto-Generated Intents</h3>
-          <p>Creates human-readable descriptions like "Add formatDate and formatTime in Utils" automatically.</p>
+          <h3>AI Code Context (MCP)</h3>
+          <p>11 tools give Claude Code, Cursor, and other AI assistants structured access to call graphs, dependencies, impact analysis, and test coverage.</p>
         </div>
         <div class="feature">
-          <h3>Module Mapping</h3>
-          <p>Map file paths to logical modules (Auth, API, Frontend) for better organization.</p>
+          <h3>Semantic Diff</h3>
+          <p>See what actually changed in meaning — function signatures, behavior, dependencies — not just line numbers.</p>
         </div>
         <div class="feature">
-          <h3>Content-Addressed Storage</h3>
-          <p>Files stored by BLAKE3 hash. Efficient, deduplicated, and verifiable.</p>
+          <h3>Impact Analysis</h3>
+          <p>Trace transitive downstream impact of any change through the dependency graph. Know what breaks before it breaks.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="mcp">
+      <h2>MCP Server</h2>
+      <p style="color: var(--muted); margin-bottom: 1.5rem;">Give your AI coding assistant access to Kai's semantic graph via the <a href="https://modelcontextprotocol.io" style="color: var(--accent); text-decoration: none;">Model Context Protocol</a>.</p>
+
+      <div class="install-options">
+        <div class="install-option">
+          <div class="label">Claude Code</div>
+          <code>claude mcp add kai -- kai mcp serve</code>
+        </div>
+        <div class="install-option">
+          <div class="label">Without installing Kai</div>
+          <code>claude mcp add kai -- npx -y kai-mcp</code>
+        </div>
+        <div class="install-option">
+          <div class="label">Cursor</div>
+          <code>Add to .cursor/mcp.json &mdash; <a href="https://github.com/kailayerhq/kai/blob/main/docs/mcp.md" style="color: var(--accent); text-decoration: none;">see docs</a></code>
+        </div>
+      </div>
+
+      <p style="color: var(--muted); margin-top: 1.5rem;">No setup required. The server lazily initializes the semantic graph on first use. Available on the <a href="https://registry.modelcontextprotocol.io" style="color: var(--accent); text-decoration: none;">MCP Registry</a> as <code>io.github.kailayerhq/kai</code>.</p>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <div class="install-options">
+        <div class="install-option">
+          <div class="label">curl</div>
+          <code>curl -sSL https://get.kailayer.com | sh</code>
+        </div>
+        <div class="install-option">
+          <div class="label">Homebrew</div>
+          <code>brew install kailayerhq/kai/kai</code>
+        </div>
+        <div class="install-option">
+          <div class="label">npm (MCP server only)</div>
+          <code>npx -y kai-mcp</code>
         </div>
       </div>
     </section>
 
     <section id="quickstart">
-      <h2>Quick Start (2 Minutes)</h2>
-
-      <h3>Get Started</h3>
-      <pre><code><span class="dim"># 1. Navigate to your project</span>
-cd /path/to/your-repo
-
-<span class="dim"># 2. Initialize Kai</span>
+      <h2>Quick Start</h2>
+      <pre><code><span class="dim"># Initialize and capture your project</span>
 kai init
-
-<span class="dim"># 3. Scan your project (creates baseline snapshot)</span>
 kai capture
 
-<span class="dim"># 4. Make some changes to your code...</span>
-
-<span class="dim"># 5. See what changed semantically</span>
+<span class="dim"># See what changed semantically</span>
 kai diff
 
-<span class="dim"># 6. Scan again to capture changes</span>
-kai capture
-
-<span class="dim"># 7. Open a review</span>
-kai review open --title "Add new feature"
-
-<span class="dim"># 8. Preview CI impact</span>
+<span class="dim"># Find affected tests</span>
 kai ci plan
 
-<span class="dim"># 9. Complete the review</span>
-kai review view &lt;id&gt;
-kai review approve &lt;id&gt;
-kai review close &lt;id&gt; --state merged</code></pre>
-
-      <h3>Core Commands</h3>
-      <pre><code>kai capture              <span class="dim"># Snapshot + analyze in one step</span>
-kai diff              <span class="dim"># Show semantic differences</span>
-kai review open       <span class="dim"># Create a code review</span>
-kai review view &lt;id&gt;  <span class="dim"># View review details</span>
-kai review approve    <span class="dim"># Approve a review</span>
-kai review close      <span class="dim"># Close (--state merged|abandoned)</span>
-kai ci plan           <span class="dim"># Compute affected tests</span></code></pre>
-
-      <h3>Learn More</h3>
-      <pre><code><span class="dim"># Use --explain on any command to understand what it does</span>
-kai capture --explain
-kai diff --explain
-kai ci plan --explain</code></pre>
-
-      <h3>Workspace Workflow (Advanced)</h3>
-      <pre><code><span class="dim"># Create a workspace for isolated work</span>
-kai ws create --name feature/login --base @snap:last
-
-<span class="dim"># Make changes, then stage them</span>
-kai ws stage --ws feature/login --dir ./src
-
-<span class="dim"># View workspace status</span>
-kai ws list
-
-<span class="dim"># Integrate changes when ready</span>
-kai integrate --ws feature/login --into @snap:last</code></pre>
+<span class="dim"># Check version</span>
+kai version</code></pre>
     </section>
 
     <footer>
-      <p>GPLv3 License &middot; <a href="https://gitlab.com/rite-day/ivcs">GitLab</a></p>
+      <p>Apache 2.0 License &middot; <a href="https://github.com/kailayerhq/kai">GitHub</a> &middot; <a href="https://github.com/kailayerhq/kai/blob/main/docs/mcp.md">MCP Docs</a> &middot; <a href="https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg">Slack</a></p>
     </footer>
   </div>
 </body>
