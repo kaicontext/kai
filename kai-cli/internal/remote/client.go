@@ -607,18 +607,32 @@ type Config struct {
 	Remotes map[string]*RemoteEntry `json:"remotes"` // name -> entry
 }
 
-// ConfigPath returns the path to the remote config file.
-func ConfigPath() string {
+// LocalConfigPath returns the project-local remote config path (.kai/remotes.json).
+func LocalConfigPath() string {
+	return filepath.Join(".kai", "remotes.json")
+}
+
+// GlobalConfigPath returns the global remote config path (~/.kai/remotes.json).
+func GlobalConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".kai", "remotes.json")
 }
 
-// LoadConfig loads the remote configuration.
-func LoadConfig() (*Config, error) {
-	path := ConfigPath()
+// ConfigPath returns the path to the remote config file.
+// Prefers local .kai/remotes.json if it exists, falls back to global.
+func ConfigPath() string {
+	local := LocalConfigPath()
+	if _, err := os.Stat(local); err == nil {
+		return local
+	}
+	return GlobalConfigPath()
+}
+
+// loadConfigFromPath loads config from a specific path.
+func loadConfigFromPath(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return &Config{Remotes: make(map[string]*RemoteEntry)}, nil
+		return nil, err
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
@@ -639,8 +653,6 @@ func LoadConfig() (*Config, error) {
 					Repo:   "main",
 				}
 			}
-			// Save migrated config
-			SaveConfig(&cfg)
 			return &cfg, nil
 		}
 		return nil, fmt.Errorf("parsing config: %w", err)
@@ -651,9 +663,31 @@ func LoadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveConfig saves the remote configuration.
+// LoadConfig loads the remote configuration.
+// Checks local .kai/remotes.json first, then falls back to global ~/.kai/remotes.json.
+func LoadConfig() (*Config, error) {
+	// Try local first
+	if cfg, err := loadConfigFromPath(LocalConfigPath()); err == nil {
+		return cfg, nil
+	}
+
+	// Fall back to global
+	if cfg, err := loadConfigFromPath(GlobalConfigPath()); err == nil {
+		return cfg, nil
+	}
+
+	return &Config{Remotes: make(map[string]*RemoteEntry)}, nil
+}
+
+// SaveConfig saves the remote configuration to the project-local .kai/remotes.json.
+// Falls back to global ~/.kai/remotes.json if .kai/ directory doesn't exist (no kai init).
 func SaveConfig(cfg *Config) error {
-	path := ConfigPath()
+	// Prefer local .kai/ if it exists (project has been initialized)
+	path := LocalConfigPath()
+	if _, err := os.Stat(".kai"); os.IsNotExist(err) {
+		path = GlobalConfigPath()
+	}
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
