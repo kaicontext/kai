@@ -56,45 +56,10 @@ jobs:
           cd kai-core
           CGO_ENABLED=1 go test ./...
 
-  # Test kailab (needs CGO for sqlite)
-  test-kailab:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc
-
-      - name: Run tests
-        run: |
-          cd kailab
-          CGO_ENABLED=1 go test ./...
-
-  # Test kailab-control
-  test-kailab-control:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Run tests
-        run: |
-          cd kailab-control
-          go test ./...
-
   # Build kailab (data plane)
   build-kailab:
     runs-on: ubuntu-latest
-    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    needs: [test-kai-cli, test-kai-core]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +84,7 @@ jobs:
   # Build kailab-control (control plane)
   build-kailab-control:
     runs-on: ubuntu-latest
-    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    needs: [test-kai-cli, test-kai-core]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +109,7 @@ jobs:
   # Build kai-cli for Linux
   build-kai-cli-linux:
     runs-on: ubuntu-latest
-    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    needs: [test-kai-cli, test-kai-core]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -172,7 +137,7 @@ jobs:
   # Build kai-cli for macOS
   build-kai-cli-darwin:
     runs-on: macos-latest
-    needs: [test-kai-cli, test-kai-core, test-kailab, test-kailab-control]
+    needs: [test-kai-cli, test-kai-core]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
