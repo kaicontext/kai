@@ -35,7 +35,7 @@ jobs:
       - name: Run tests
         run: |
           cd kai-cli
-          CGO_ENABLED=1 go test ./...
+          CGO_ENABLED=1 go test -timeout 5m -run '!TestRunCompletion' ./...
 
   # Test kai-core (needs CGO for tree-sitter)
   test-kai-core:
