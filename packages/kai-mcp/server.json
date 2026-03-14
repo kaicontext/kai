@@ -6,12 +6,12 @@
     "url": "https://github.com/kailayerhq/kai",
     "source": "github"
   },
-  "version": "0.9.7",
+  "version": "0.9.8",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "kai-mcp",
-      "version": "0.9.7",
+      "version": "0.9.8",
       "transport": {
         "type": "stdio"
       }

@@ -2,7 +2,7 @@
 
 All notable changes to Kai are documented here.
 
-## [Unreleased] (since v0.9.7)
+## [0.9.8] — 2026-03-14
 
 ### Features
 - Preserve previous snapshot as timestamped ref (`snap.YYYYMMDDTHHMMSS.mmm`) on every capture, so historical snapshots are browsable in the UI and via CLI (`08772f2`, `7cfc9a2`)
