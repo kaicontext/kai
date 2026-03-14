@@ -2982,6 +2982,17 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		fmt.Println("done")
 	}
 
+	// Preserve previous snapshot before overwriting snap.latest
+	if previousSnapID != nil {
+		ts := time.Now().UTC().Format("20060102T150405")
+		prevRefName := "snap." + ts
+		if err := refMgr.Set(prevRefName, previousSnapID, ref.KindSnapshot); err != nil {
+			debugf("warning: failed to preserve previous snapshot as %s: %v", prevRefName, err)
+		} else {
+			debugf("preserved previous snapshot as %s", prevRefName)
+		}
+	}
+
 	// Update refs - like git commit, capture always updates snap.latest
 	fmt.Print("Updating refs... ")
 	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
