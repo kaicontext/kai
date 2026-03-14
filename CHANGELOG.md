@@ -4,40 +4,44 @@ All notable changes to Kai are documented here.
 
 ## [0.9.9] — 2026-03-14
 
-### Features
+### MCP
+- **`kai_files` MCP tool** — list files in a repo with language, module, and glob pattern filters
+- **MCP call logging** — JSONL logging for measuring tool usage, gated on `KAI_MCP_LOG=1`. Captures tool name, params, duration, extracted file/symbol references per session
+- **SER analysis script** — `scripts/analyze-mcp-log.py` computes Structured Exploration Ratio with A/B comparison mode
+
+### Review System
 - **`kai review edit`** — update title, description, and assignees after creation
-- **Review model alignment** — assignees, comment threading (parentId), changesRequestedSummary/By, targetBranch now match server
-- **Review summary persistence** — `kai review summary` stores structured summary in review payload for server/web UI access
-- **Quiet capture/push** — one-line output by default, inline progress counters, full detail with `-v`
-- **Snapshot history** — `kai snapshot list` shows ref names; `@snap:` selector resolves ref names
-- **CI cleanup** — removed dead kailab/kailab-control jobs from OSS CI
+- **`kai review comment`** — add comments with `--file` and `--line` anchoring
+- **`kai review comments`** — list all comments on a review
+- **Review model alignment** — CLI and server now share the same data model: assignees, comment threading (parentId), changesRequestedSummary/By, targetBranch
+- **Review state validation** — state machine enforcement on both CLI and server (draft→open→approved/changes_requested→merged/abandoned)
+- **Review summary persistence** — `kai review summary` stores structured summary in the review payload, accessible via web UI
+- **Language-aware API surface detection** — Go (uppercase), Python (no `_` prefix), Ruby (all public), Rust (uppercase types), JS/TS (top-level functions/classes)
+- **Module-based file categorization** — review summaries load modules from `.kai/rules/modules.yaml` for meaningful grouping
+- **Unified diff in reviews** — `kai review view` shows proper unified diffs
 
-### Fixes
-- `@snap:snap.TIMESTAMP` selector now works (falls back to ref lookup)
-- kai-server CI auto-syncs kai-core from OSS repo before build
+### Capture & Push
+- **Quiet output** — one-line summary by default (`Captured abc123 (191 files, 20 modified)`), inline progress counters, full detail with `-v`
+- **Snapshot history** — each capture preserves the previous snapshot as `snap.YYYYMMDDTHHMMSS.mmm`, browsable in the web UI and CLI
+- **`kai snapshot list`** — now shows ref names alongside IDs
 
-## [0.9.8] — 2026-03-14
+### Snapshots & Refs
+- **`@snap:` ref resolution** — `@snap:snap.20260314T090755.729` and `@snap:20260314T090755.729` both work
+- **`kai diff` with historical snapshots** — `kai diff snap.20260314T085932 snap.latest --semantic`
 
-### Features
-- Preserve previous snapshot as timestamped ref (`snap.YYYYMMDDTHHMMSS.mmm`) on every capture, so historical snapshots are browsable in the UI and via CLI (`08772f2`, `7cfc9a2`)
-
-## [0.9.7] — 2026-03-14
-
-### Features
-- **`kai_files` MCP tool** — list files in a repo with language, module, and glob pattern filters, powered by inline snapshot metadata (`c698a26`)
-- **MCP call logging** — JSONL logging infrastructure for measuring tool usage, gated on `KAI_MCP_LOG=1`. Captures tool name, params, duration, extracted file/symbol references, and session ID (`c698a26`)
-- **Review comments** — `kai review comment` and `kai review comments` commands with file:line anchoring via `--file` and `--line` flags (`c698a26`)
-- **Review state validation** — state machine enforcement (draft→open→approved/changes_requested→merged/abandoned) prevents invalid transitions (`c698a26`)
-- **Language-aware API surface detection** — `isAPISymbol` now understands Go (exported = uppercase), Python (no `_` prefix), Ruby (all public), Rust (uppercase types), and JS/TS (top-level functions/classes) (`c698a26`)
-- **Module-based file categorization** — review summaries load modules from `.kai/rules/modules.yaml` for meaningful grouping instead of naive path heuristics (`c698a26`)
-- **Unified diff in reviews** — `kai review view` now shows proper unified diffs instead of the old simple format (`c698a26`)
-- **SER analysis script** — `scripts/analyze-mcp-log.py` computes Structured Exploration Ratio per session with A/B comparison mode (`c698a26`)
-
-### Fixes
-- MCP registry token files now gitignored (`1d25241`)
+### kailayer.com
+- **Web review creation** — "New Review" button on Reviews tab with changeset selector, title, and description fields
+- **Raw endpoint fix** — serves `text/plain` with `nosniff` header so HTML source is displayed, not rendered
+- **Skeleton loaders** — all loading states show animated skeleton placeholders matching the content shape
+- **File-first loading** — file content renders immediately while the file tree loads in the background
+- **Consistent page padding** — all repo pages now use matching `px-5 py-8`
+- **kai-core auto-sync** — CI pulls latest kai-core from OSS repo before every build, no more drift
+- **State transition validation** — server enforces same state machine as CLI
 
 ### Other
-- Updated README and site for MCP registry launch (`e695668`)
+- Removed dead kailab/kailab-control build jobs from OSS CI
+- MCP registry token files gitignored
+- Updated README and site for MCP registry launch
 
 ## [0.9.6] — 2026-03-09
 
