@@ -2850,14 +2850,14 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	// Load modules
-	fmt.Print("Loading module configuration... ")
+	debugf("Loading module configuration...")
 	matcher, err := loadMatcher()
 	if err != nil {
 		fmt.Println("failed")
 		return err
 	}
 	moduleCount := len(matcher.GetAllModules())
-	fmt.Printf("found %d modules\n", moduleCount)
+	debugf("found %d modules", moduleCount)
 	debugf("loaded %d modules", moduleCount)
 
 	// Show explanation if requested
@@ -2867,9 +2867,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 1: Create snapshot
-	fmt.Println()
-	fmt.Println("Step 1/3: Creating snapshot...")
-	fmt.Printf("Capturing directory: %s\n", capturePath)
+	debugf("Step 1/3: Creating snapshot from %s", capturePath)
 	phaseStart := time.Now()
 	source, err := dirio.OpenDirectory(capturePath)
 	if err != nil {
@@ -2880,7 +2878,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening directory: %w", err)
 	}
 
-	fmt.Print("Reading files... ")
+	debugf("Reading files...")
 	files, err := source.GetFiles()
 	if err != nil {
 		fmt.Println("failed")
@@ -2890,10 +2888,10 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("getting files: %w", err)
 	}
-	fmt.Printf("found %d files\n", len(files))
+	debugf("found %d files", len(files))
 	debugf("capture: %d files found in %s", len(files), capturePath)
 
-	fmt.Print("Creating snapshot... ")
+	debugf("Creating snapshot...")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
@@ -2904,7 +2902,6 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
-	fmt.Println("done")
 	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
 	if te != nil {
 		te.SetPhase("snapshot", time.Since(phaseStart).Milliseconds())
@@ -2913,50 +2910,40 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 2: Analyze symbols
-	fmt.Println()
-	fmt.Println("Step 2/3: Analyzing symbols...")
+	debugf("Step 2/3: Analyzing symbols...")
 	phaseStart = time.Now()
 	progress := func(current, total int, filename string) {
 		display := filename
 		if len(display) > 40 {
 			display = "..." + display[len(display)-37:]
 		}
-		fmt.Printf("\rAnalyzing... %d/%d %s", current, total, display)
-		fmt.Print("\033[K")
+		debugf("Analyzing... %d/%d %s", current, total, display)
 	}
 	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
-		fmt.Print("\rAnalyzing symbols... ")
-		fmt.Println("warning: some files failed")
+		debugf("Analyzing symbols: warning: some files failed")
 		fmt.Fprintf(os.Stderr, "  %v\n", err)
 	} else {
-		fmt.Print("\rAnalyzing symbols... done")
-		fmt.Print("\033[K")
-		fmt.Println()
+		debugf("Analyzing symbols: done")
 	}
 	if te != nil {
 		te.SetPhase("symbols", time.Since(phaseStart).Milliseconds())
 	}
 
 	// Step 3: Analyze calls (build call graph)
-	fmt.Println()
-	fmt.Println("Step 3/3: Building call graph...")
+	debugf("Step 3/3: Building call graph...")
 	phaseStart = time.Now()
 	callProgress := func(current, total int, filename string) {
 		display := filename
 		if len(display) > 40 {
 			display = "..." + display[len(display)-37:]
 		}
-		fmt.Printf("\rBuilding graph... %d/%d %s", current, total, display)
-		fmt.Print("\033[K")
+		debugf("Building graph... %d/%d %s", current, total, display)
 	}
 	if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
-		fmt.Print("\rBuilding call graph... ")
-		fmt.Println("warning: some files failed")
+		debugf("Building call graph: warning: some files failed")
 		fmt.Fprintf(os.Stderr, "  %v\n", err)
 	} else {
-		fmt.Print("\rBuilding call graph... done")
-		fmt.Print("\033[K")
-		fmt.Println()
+		debugf("Building call graph: done")
 	}
 	if te != nil {
 		te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
@@ -2976,10 +2963,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	// Compute change summary BEFORE updating refs (so @snap:last still points to old snapshot)
 	var changeSummary *captureSummary
 	if !isFirstScan {
-		fmt.Println()
-		fmt.Print("Computing changes... ")
+		debugf("Computing changes...")
 		changeSummary = computeCaptureSummary(db, snapshotID, matcher)
-		fmt.Println("done")
+		debugf("Computing changes: done")
 	}
 
 	// Preserve previous snapshot before overwriting snap.latest
@@ -2994,102 +2980,60 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update refs - like git commit, capture always updates snap.latest
-	fmt.Print("Updating refs... ")
+	debugf("Updating refs...")
 	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
 	autoRefMgr := ref.NewAutoRefManager(db)
 
 	// Always update snap.latest (like git commit updates HEAD)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
-		fmt.Println("failed")
-		fmt.Fprintf(os.Stderr, "warning: failed to update refs: %v\n", err)
+		debugf("warning: failed to update refs: %v", err)
 	} else {
-		fmt.Println("done")
 		debugf("refs updated successfully")
 	}
 
 	// Auto-create changeset if there are changes
-	var changesetID []byte
 	if changeSummary != nil && changeSummary.hasChanges && previousSnapID != nil {
-		fmt.Print("Creating changeset... ")
-		changesetID, err = createChangesetFromSnapshots(db, previousSnapID, snapshotID, "")
+		debugf("Creating changeset...")
+		_, err = createChangesetFromSnapshots(db, previousSnapID, snapshotID, "")
 		if err != nil {
-			fmt.Println("failed")
-			fmt.Fprintf(os.Stderr, "warning: failed to create changeset: %v\n", err)
+			debugf("warning: failed to create changeset: %v", err)
 		} else {
-			fmt.Println("done")
+			debugf("changeset created")
 		}
 	}
 
-	// Summary
-	fmt.Println()
-	fmt.Println("╭─────────────────────────────────────────────")
-	fmt.Println("│  ✓ Scan complete!")
-	fmt.Println("│")
-	fmt.Printf("│  Snapshot: %s\n", util.BytesToHex(snapshotID)[:12])
-	if changesetID != nil {
-		fmt.Printf("│  Changeset: %s\n", util.BytesToHex(changesetID)[:12])
-	}
-	fmt.Printf("│  Files: %d\n", len(files))
-	fmt.Printf("│  Modules: %d\n", moduleCount)
-
-	// Show change summary if available
+	// Summary — quiet by default, verbose for details
+	snapHex := util.BytesToHex(snapshotID)[:12]
 	if changeSummary != nil && changeSummary.hasChanges {
-		fmt.Println("│")
-		fmt.Println("│  Changes detected:")
-		fmt.Printf("│    %d file(s) modified\n", changeSummary.filesChanged)
-		if len(changeSummary.changeTypes) > 0 {
-			// Group into 3 buckets for cleaner display
-			buckets := bucketChangeTypes(changeSummary.changeTypes)
+		fmt.Printf("Captured %s (%d files, %d modified)\n", snapHex, len(files), changeSummary.filesChanged)
+	} else if isFirstScan {
+		fmt.Printf("Captured %s (%d files)\n", snapHex, len(files))
+	} else {
+		fmt.Printf("Captured %s (%d files, no changes)\n", snapHex, len(files))
+	}
 
-			// Display buckets in consistent order: Structural, Behavioral, API/Contract
+	// Verbose: detailed breakdown
+	if changeSummary != nil && changeSummary.hasChanges {
+		debugf("Changes detected: %d file(s) modified", changeSummary.filesChanged)
+		if len(changeSummary.changeTypes) > 0 {
+			buckets := bucketChangeTypes(changeSummary.changeTypes)
 			bucketOrder := []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract}
 			for _, bucket := range bucketOrder {
 				paths := buckets[bucket]
 				if len(paths) == 0 {
 					continue
 				}
-				if len(paths) == 1 {
-					fmt.Printf("│      %s: %s\n", bucket, paths[0])
-				} else if len(paths) <= 3 {
-					fmt.Printf("│      %s: %s\n", bucket, strings.Join(paths, ", "))
+				if len(paths) <= 3 {
+					debugf("  %s: %s", bucket, strings.Join(paths, ", "))
 				} else {
-					fmt.Printf("│      %s: %d files\n", bucket, len(paths))
+					debugf("  %s: %d files", bucket, len(paths))
 				}
 			}
 		}
 		if len(changeSummary.modules) > 0 {
-			fmt.Printf("│    Modules: %s\n", strings.Join(changeSummary.modules, ", "))
+			debugf("  Modules: %s", strings.Join(changeSummary.modules, ", "))
 		}
-	} else if changeSummary != nil {
-		fmt.Println("│")
-		fmt.Println("│  No changes since baseline.")
 	}
-
-	fmt.Println("│")
-	if isFirstScan {
-		fmt.Println("│  Snapshot created (snap.latest).")
-		fmt.Println("│")
-		fmt.Println("│  Next: make changes, then:")
-		fmt.Println("│    kai status         # See what changed")
-		fmt.Println("│    kai capture        # Capture changes")
-		fmt.Println("│    kai review open    # Create a review")
-	} else if changeSummary != nil && changeSummary.hasChanges {
-		fmt.Println("│  Snapshot updated (snap.latest).")
-		if changesetID != nil {
-			fmt.Println("│  Changeset created (cs.latest).")
-		}
-		fmt.Println("│")
-		fmt.Println("│  Next:")
-		fmt.Println("│    kai review summary # View semantic changes")
-		fmt.Println("│    kai review open    # Create a review")
-		fmt.Println("│    kai ci plan        # Get selective test plan")
-		fmt.Println("│    kai push           # Push to remote")
-	} else {
-		fmt.Println("│  Snapshot updated (snap.latest).")
-		fmt.Println("│")
-		fmt.Println("│  No changes from previous snapshot.")
-	}
-	fmt.Println("╰─────────────────────────────────────────────")
 
 	return nil
 }
@@ -3262,7 +3206,7 @@ func computeCaptureSummary(db *graph.DB, newSnapshotID []byte, matcher *module.M
 // createSnapshotFromDir creates a snapshot from the given directory and returns its ID.
 // This is a helper used by commands that need to auto-snapshot (e.g., ws create).
 func createSnapshotFromDir(db *graph.DB, dir string) ([]byte, error) {
-	fmt.Print("Loading module configuration... ")
+	debugf("Loading module configuration...")
 	matcher, err := loadMatcher()
 	if err != nil {
 		fmt.Println("failed")
@@ -3276,15 +3220,15 @@ func createSnapshotFromDir(db *graph.DB, dir string) ([]byte, error) {
 		return nil, fmt.Errorf("opening directory: %w", err)
 	}
 
-	fmt.Print("Reading files... ")
+	debugf("Reading files...")
 	files, err := source.GetFiles()
 	if err != nil {
 		fmt.Println("failed")
 		return nil, fmt.Errorf("getting files: %w", err)
 	}
-	fmt.Printf("found %d files\n", len(files))
+	debugf("found %d files", len(files))
 
-	fmt.Print("Creating snapshot... ")
+	debugf("Creating snapshot...")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
@@ -3307,13 +3251,11 @@ func createSnapshotFromDir(db *graph.DB, dir string) ([]byte, error) {
 		fmt.Println(" failed")
 		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed: %v\n", err)
 	} else {
-		fmt.Print("\rAnalyzing symbols... done")
-		fmt.Print("\033[K")
-		fmt.Println()
+		debugf("Analyzing symbols: done")
 	}
 
 	// Update auto-refs
-	fmt.Print("Updating refs... ")
+	debugf("Updating refs...")
 	autoRefMgr := ref.NewAutoRefManager(db)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
 		fmt.Println("failed")
@@ -3336,7 +3278,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	fmt.Print("Loading module configuration... ")
+	debugf("Loading module configuration...")
 	matcher, err := loadMatcher()
 	if err != nil {
 		fmt.Println("failed")
@@ -3415,16 +3357,16 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("snapshot source required: use --git <ref> or --dir <path>")
 	}
 
-	fmt.Print("Reading files... ")
+	debugf("Reading files...")
 	files, err := source.GetFiles()
 	if err != nil {
 		fmt.Println("failed")
 		return fmt.Errorf("getting files: %w", err)
 	}
-	fmt.Printf("found %d files\n", len(files))
+	debugf("found %d files", len(files))
 
 	debugf("snapshot: %d files read", len(files))
-	fmt.Print("Creating snapshot... ")
+	debugf("Creating snapshot...")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
@@ -3451,9 +3393,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		fmt.Println(" failed")
 		fmt.Fprintf(os.Stderr, "warning: symbol analysis failed: %v\n", err)
 	} else {
-		fmt.Print("\rAnalyzing symbols... done")
-		fmt.Print("\033[K")
-		fmt.Println()
+		debugf("Analyzing symbols: done")
 	}
 
 	// Add description if provided
@@ -3468,7 +3408,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update auto-refs
-	fmt.Print("Updating refs... ")
+	debugf("Updating refs...")
 	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
 	autoRefMgr := ref.NewAutoRefManager(db)
 	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
@@ -10622,9 +10562,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 			refsToSync = append(refsToSync, csRef)
 		}
 
-		fmt.Printf("  Base: %s\n", hex.EncodeToString(workspaceToPush.BaseSnapshot)[:12])
-		fmt.Printf("  Head: %s\n", hex.EncodeToString(workspaceToPush.HeadSnapshot)[:12])
-		fmt.Printf("  Changesets: %d\n", len(workspaceToPush.OpenChangeSets))
+		debugf("  Base: %s", hex.EncodeToString(workspaceToPush.BaseSnapshot)[:12])
+		debugf("  Head: %s", hex.EncodeToString(workspaceToPush.HeadSnapshot)[:12])
+		debugf("  Changesets: %d", len(workspaceToPush.OpenChangeSets))
 	}
 
 	// If pushing reviews, collect them and their target changesets
@@ -10714,9 +10654,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		fmt.Printf("  Review ID: %s\n", reviewShortID)
-		fmt.Printf("  State: %s\n", reviewToPush.State)
-		fmt.Printf("  Target: %s (%s)\n", hex.EncodeToString(reviewToPush.TargetID)[:12], reviewToPush.TargetKind)
+		debugf("  Review ID: %s", reviewShortID)
+		debugf("  State: %s", reviewToPush.State)
+		debugf("  Target: %s (%s)", hex.EncodeToString(reviewToPush.TargetID)[:12], reviewToPush.TargetKind)
 	}
 
 	if len(refsToSync) == 0 {
@@ -10789,7 +10729,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Pushing to %s (%s)...\n", remoteName, client.BaseURL)
+	debugf("Pushing to %s (%s)...", remoteName, client.BaseURL)
 
 	// Skip negotiate for small pushes (< 100 objects) - just send everything
 	// Server will dedupe on ingest. This saves a round-trip.
@@ -10809,7 +10749,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(missing) > 0 {
-		fmt.Printf("  Objects to push: %d\n", len(missing))
+		debugf("Objects to push: %d", len(missing))
 
 		// Build pack from missing objects
 		var packObjects []remote.PackObject
@@ -10896,7 +10836,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			})
 		}
 
-		fmt.Printf("  Including %d content blobs\n", len(contentDigestSet))
+		debugf("Including %d content blobs", len(contentDigestSet))
 
 		if len(packObjects) > 0 {
 			// Batch packs to stay under server size limit (target 50MB per batch)
@@ -10925,12 +10865,12 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 				// If adding this object would exceed limit, push current batch
 				if batchSize+objSize > maxBatchSize && len(batch) > 0 {
-					fmt.Printf("\r  Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
+					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 					result, err := client.PushPack(batch)
 					if err != nil {
 						return fmt.Errorf("pushing pack batch %d: %w", batchNum, err)
 					}
-					fmt.Printf(" segment %d\n", result.SegmentID)
+					debugf("segment %d", result.SegmentID)
 					batch = nil
 					batchSize = 0
 					batchNum++
@@ -10943,19 +10883,19 @@ func runPush(cmd *cobra.Command, args []string) error {
 			// Push remaining batch
 			if len(batch) > 0 {
 				if totalBatches > 1 {
-					fmt.Printf("\r  Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
+					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 				} else {
-					fmt.Printf("  Pushing %d objects...", len(batch))
+					debugf("Pushing %d objects...", len(batch))
 				}
 				result, err := client.PushPack(batch)
 				if err != nil {
 					return fmt.Errorf("pushing pack: %w", err)
 				}
-				fmt.Printf(" segment %d\n", result.SegmentID)
+				debugf("segment %d", result.SegmentID)
 			}
 		}
 	} else {
-		fmt.Println("  All objects already on server.")
+		debugf("All objects already on server.")
 	}
 
 	// Batch update refs (single round-trip instead of N)
@@ -10984,13 +10924,13 @@ func runPush(cmd *cobra.Command, args []string) error {
 				for _, upd := range batchUpdates {
 					res, err := client.UpdateRef(upd.Name, upd.Old, upd.New, upd.Force)
 					if err != nil {
-						fmt.Printf("  Failed to update ref %s: %v\n", upd.Name, err)
+						debugf("Failed to update ref %s: %v", upd.Name, err)
 						continue
 					}
 					if res.OK {
-						fmt.Printf("  %s -> %s (push %s)\n", upd.Name, hex.EncodeToString(upd.New)[:12], res.PushID[:8])
+						debugf("%s -> %s (push %s)", upd.Name, hex.EncodeToString(upd.New)[:12], res.PushID[:8])
 					} else {
-						fmt.Printf("  %s: %s\n", upd.Name, res.Error)
+						debugf("%s: %s", upd.Name, res.Error)
 					}
 				}
 			} else {
@@ -10999,9 +10939,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 		} else {
 			for _, res := range result.Results {
 				if res.OK {
-					fmt.Printf("  %s -> updated (push %s)\n", res.Name, result.PushID[:8])
+					debugf("%s -> updated (push %s)", res.Name, result.PushID[:8])
 				} else {
-					fmt.Printf("  %s: %s\n", res.Name, res.Error)
+					debugf("%s: %s", res.Name, res.Error)
 				}
 			}
 		}
@@ -11038,17 +10978,17 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(edgesToPush) > 0 {
-		fmt.Printf("  Pushing %d edges...", len(edgesToPush))
+		debugf("Pushing %d edges...", len(edgesToPush))
 		result, err := client.PushEdges(edgesToPush)
 		if err != nil {
 			// Don't fail the push if edge push fails - edges are supplementary
-			fmt.Printf(" warning: %v\n", err)
+			debugf("edge push warning: %v", err)
 		} else {
-			fmt.Printf(" %d inserted\n", result.Inserted)
+			debugf("%d edges inserted", result.Inserted)
 		}
 	}
 
-	fmt.Println("Push complete.")
+	fmt.Printf("Pushed to %s.\n", remoteName)
 	return nil
 }
 
