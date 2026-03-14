@@ -2984,7 +2984,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	// Preserve previous snapshot before overwriting snap.latest
 	if previousSnapID != nil {
-		ts := time.Now().UTC().Format("20060102T150405")
+		ts := time.Now().UTC().Format("20060102T150405.000")
 		prevRefName := "snap." + ts
 		if err := refMgr.Set(prevRefName, previousSnapID, ref.KindSnapshot); err != nil {
 			debugf("warning: failed to preserve previous snapshot as %s: %v", prevRefName, err)
