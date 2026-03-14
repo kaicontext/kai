@@ -10742,6 +10742,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	debugf("Pushing to %s (%s)...", remoteName, client.BaseURL)
+	fmt.Fprintf(os.Stderr, "\rPushing to %s... negotiating", remoteName)
 
 	// Skip negotiate for small pushes (< 100 objects) - just send everything
 	// Server will dedupe on ingest. This saves a round-trip.
@@ -10877,9 +10878,11 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 				// If adding this object would exceed limit, push current batch
 				if batchSize+objSize > maxBatchSize && len(batch) > 0 {
+					fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
 					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 					result, err := client.PushPack(batch)
 					if err != nil {
+						fmt.Fprintf(os.Stderr, "\r\033[K")
 						return fmt.Errorf("pushing pack batch %d: %w", batchNum, err)
 					}
 					debugf("segment %d", result.SegmentID)
@@ -10895,12 +10898,15 @@ func runPush(cmd *cobra.Command, args []string) error {
 			// Push remaining batch
 			if len(batch) > 0 {
 				if totalBatches > 1 {
+					fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
 					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 				} else {
+					fmt.Fprintf(os.Stderr, "\rPushing to %s... %d objects", remoteName, len(batch))
 					debugf("Pushing %d objects...", len(batch))
 				}
 				result, err := client.PushPack(batch)
 				if err != nil {
+					fmt.Fprintf(os.Stderr, "\r\033[K")
 					return fmt.Errorf("pushing pack: %w", err)
 				}
 				debugf("segment %d", result.SegmentID)
@@ -10990,6 +10996,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(edgesToPush) > 0 {
+		fmt.Fprintf(os.Stderr, "\rPushing to %s... %d edges", remoteName, len(edgesToPush))
 		debugf("Pushing %d edges...", len(edgesToPush))
 		result, err := client.PushEdges(edgesToPush)
 		if err != nil {
@@ -11000,6 +11007,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	fmt.Fprintf(os.Stderr, "\r\033[K")
 	fmt.Printf("Pushed to %s.\n", remoteName)
 	return nil
 }
