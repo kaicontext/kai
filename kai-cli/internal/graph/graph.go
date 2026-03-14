@@ -585,6 +585,24 @@ func (db *DB) InsertReview(tx *sql.Tx, id []byte, payload map[string]interface{}
 	return nil
 }
 
+// InsertReviewComment inserts a review comment with a provided ID (UUID-based).
+func (db *DB) InsertReviewComment(tx *sql.Tx, id []byte, payload map[string]interface{}) error {
+	payloadJSON, err := cas.CanonicalJSON(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO nodes (id, kind, payload, created_at)
+		VALUES (?, ?, ?, ?)
+	`, id, string(KindReviewComment), string(payloadJSON), cas.NowMs())
+	if err != nil {
+		return fmt.Errorf("inserting review comment: %w", err)
+	}
+
+	return nil
+}
+
 // GetWorkspaceByName finds a workspace by name.
 func (db *DB) GetWorkspaceByName(name string) (*Node, error) {
 	rows, err := db.conn.Query(`

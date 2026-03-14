@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 
 	"kai/internal/graph"
 	"kai/internal/util"
@@ -187,7 +188,16 @@ func (m *Manager) List() ([]*Review, error) {
 	return reviews, nil
 }
 
-// UpdateState changes the state of a review.
+// validTransitions defines which state transitions are allowed.
+var validTransitions = map[State][]State{
+	StateDraft:    {StateOpen, StateAbandoned},
+	StateOpen:     {StateApproved, StateChanges, StateMerged, StateAbandoned},
+	StateApproved: {StateMerged, StateChanges, StateAbandoned},
+	StateChanges:  {StateOpen, StateApproved, StateAbandoned},
+	// Terminal states: no transitions from StateMerged or StateAbandoned
+}
+
+// UpdateState changes the state of a review, validating the transition.
 func (m *Manager) UpdateState(reviewID []byte, newState State) error {
 	node, err := m.db.GetNode(reviewID)
 	if err != nil {
@@ -195,6 +205,24 @@ func (m *Manager) UpdateState(reviewID []byte, newState State) error {
 	}
 	if node == nil {
 		return fmt.Errorf("review not found")
+	}
+
+	currentState := State(node.Payload["state"].(string))
+
+	allowed, ok := validTransitions[currentState]
+	if !ok {
+		return fmt.Errorf("review is in terminal state %q and cannot be updated", currentState)
+	}
+
+	valid := false
+	for _, s := range allowed {
+		if s == newState {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("cannot transition from %q to %q", currentState, newState)
 	}
 
 	node.Payload["state"] = string(newState)
@@ -247,6 +275,146 @@ func (m *Manager) GetTarget(reviewID []byte) (*graph.Node, error) {
 	}
 
 	return m.db.GetNode(edges[0].Dst)
+}
+
+// AddComment adds a comment to a review, optionally anchored to a symbol or file:line.
+func (m *Manager) AddComment(reviewID []byte, author, body string, anchor *CommentAnchor) (*Comment, error) {
+	// Verify review exists
+	rev, err := m.Get(reviewID)
+	if err != nil {
+		return nil, err
+	}
+	if rev == nil {
+		return nil, fmt.Errorf("review not found")
+	}
+
+	commentID := make([]byte, 16)
+	if _, err := rand.Read(commentID); err != nil {
+		return nil, fmt.Errorf("generating comment ID: %w", err)
+	}
+
+	now := util.NowMs()
+	payload := map[string]interface{}{
+		"author":    author,
+		"body":      body,
+		"reviewId":  util.BytesToHex(reviewID),
+		"createdAt": now,
+	}
+
+	comment := &Comment{
+		ID:        commentID,
+		ReviewID:  reviewID,
+		Author:    author,
+		Body:      body,
+		CreatedAt: now,
+	}
+
+	if anchor != nil {
+		payload["filePath"] = anchor.FilePath
+		payload["line"] = anchor.Line
+		payload["anchorId"] = util.BytesToHex(anchor.NodeID)
+		comment.FilePath = anchor.FilePath
+		comment.Line = anchor.Line
+		comment.AnchorID = anchor.NodeID
+	}
+
+	tx, err := m.db.BeginTx()
+	if err != nil {
+		return nil, fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := m.db.InsertReviewComment(tx, commentID, payload); err != nil {
+		return nil, fmt.Errorf("inserting comment: %w", err)
+	}
+
+	// Link comment to review
+	if err := m.db.InsertEdge(tx, reviewID, graph.EdgeHasComment, commentID, nil); err != nil {
+		return nil, fmt.Errorf("inserting HAS_COMMENT edge: %w", err)
+	}
+
+	// If anchored to a node, create ANCHORS_TO edge
+	if anchor != nil && len(anchor.NodeID) > 0 {
+		if err := m.db.InsertEdge(tx, commentID, graph.EdgeAnchorsTo, anchor.NodeID, nil); err != nil {
+			return nil, fmt.Errorf("inserting ANCHORS_TO edge: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	// Update review's updatedAt
+	_ = m.touchReview(reviewID)
+
+	return comment, nil
+}
+
+// CommentAnchor specifies where a comment is anchored.
+type CommentAnchor struct {
+	NodeID   []byte // Symbol or File node ID
+	FilePath string // For file:line display
+	Line     int    // Line number (0 = not line-anchored)
+}
+
+// ListComments returns all comments for a review, ordered by creation time.
+func (m *Manager) ListComments(reviewID []byte) ([]*Comment, error) {
+	edges, err := m.db.GetEdges(reviewID, graph.EdgeHasComment)
+	if err != nil {
+		return nil, fmt.Errorf("getting comment edges: %w", err)
+	}
+
+	comments := make([]*Comment, 0, len(edges))
+	for _, edge := range edges {
+		node, err := m.db.GetNode(edge.Dst)
+		if err != nil || node == nil {
+			continue
+		}
+		c := nodeToComment(node)
+		comments = append(comments, c)
+	}
+
+	// Sort by creation time (oldest first)
+	sort.Slice(comments, func(i, j int) bool {
+		return comments[i].CreatedAt < comments[j].CreatedAt
+	})
+
+	return comments, nil
+}
+
+// touchReview updates the review's updatedAt timestamp.
+func (m *Manager) touchReview(reviewID []byte) error {
+	node, err := m.db.GetNode(reviewID)
+	if err != nil || node == nil {
+		return err
+	}
+	node.Payload["updatedAt"] = util.NowMs()
+	return m.db.UpdateNodePayload(reviewID, node.Payload)
+}
+
+// nodeToComment converts a graph node to a Comment.
+func nodeToComment(node *graph.Node) *Comment {
+	author, _ := node.Payload["author"].(string)
+	body, _ := node.Payload["body"].(string)
+	reviewHex, _ := node.Payload["reviewId"].(string)
+	filePath, _ := node.Payload["filePath"].(string)
+	line, _ := node.Payload["line"].(float64)
+	createdAt, _ := node.Payload["createdAt"].(float64)
+	anchorHex, _ := node.Payload["anchorId"].(string)
+
+	reviewID, _ := util.HexToBytes(reviewHex)
+	anchorID, _ := util.HexToBytes(anchorHex)
+
+	return &Comment{
+		ID:        node.ID,
+		ReviewID:  reviewID,
+		Author:    author,
+		Body:      body,
+		AnchorID:  anchorID,
+		FilePath:  filePath,
+		Line:      int(line),
+		CreatedAt: int64(createdAt),
+	}
 }
 
 // nodeToReview converts a graph node to a Review struct.

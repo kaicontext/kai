@@ -1445,6 +1445,29 @@ Examples:
 	RunE: runReviewExport,
 }
 
+var reviewCommentCmd = &cobra.Command{
+	Use:   "comment <review-id>",
+	Short: "Add a comment to a review",
+	Long: `Add a comment to a review, optionally anchored to a file:line.
+
+Examples:
+  kai review comment abc123 -m "Looks good"
+  kai review comment abc123 -m "Check nil case" --file auth.go --line 42`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewComment,
+}
+
+var reviewCommentsCmd = &cobra.Command{
+	Use:   "comments <review-id>",
+	Short: "List comments on a review",
+	Long: `List all comments on a review.
+
+Examples:
+  kai review comments abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewComments,
+}
+
 var reviewSummaryCmd = &cobra.Command{
 	Use:   "summary [changeset]",
 	Short: "Show semantic summary of a changeset",
@@ -1496,6 +1519,9 @@ var (
 	reviewSummary     bool // Show progressive disclosure summary
 	reviewInteractive bool // Interactive drill-down mode
 	reviewAI          bool // Run AI review
+	reviewCommentBody string
+	reviewCommentFile string
+	reviewCommentLine int
 
 	statusDir        string
 	statusAgainst    string
@@ -1951,6 +1977,11 @@ func init() {
 	reviewExportCmd.Flags().BoolVar(&reviewExportMD, "markdown", false, "Export as markdown")
 	reviewExportCmd.Flags().BoolVar(&reviewExportHTML, "html", false, "Export as HTML")
 
+	reviewCommentCmd.Flags().StringVarP(&reviewCommentBody, "message", "m", "", "Comment body (required)")
+	reviewCommentCmd.Flags().StringVar(&reviewCommentFile, "file", "", "Anchor comment to a file path")
+	reviewCommentCmd.Flags().IntVar(&reviewCommentLine, "line", 0, "Anchor comment to a line number (requires --file)")
+	reviewCommentCmd.MarkFlagRequired("message")
+
 	// Merge flags
 	mergeCmd.Flags().StringVar(&mergeLang, "lang", "", "Language (js, ts, py) - auto-detected from extension if not specified")
 	mergeCmd.Flags().StringVarP(&mergeOutput, "output", "o", "", "Output file path (defaults to stdout)")
@@ -2261,6 +2292,8 @@ func init() {
 	reviewCmd.AddCommand(reviewReadyCmd)
 	reviewCmd.AddCommand(reviewExportCmd)
 	reviewCmd.AddCommand(reviewSummaryCmd)
+	reviewCmd.AddCommand(reviewCommentCmd)
+	reviewCmd.AddCommand(reviewCommentsCmd)
 	reviewSummaryCmd.Flags().BoolVarP(&reviewInteractive, "interactive", "i", false, "Interactive drill-down mode")
 	reviewSummaryCmd.Flags().BoolVar(&reviewAI, "ai", false, "Run AI review (requires ANTHROPIC_API_KEY)")
 	rootCmd.AddCommand(reviewCmd)
@@ -12119,7 +12152,7 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 
 	// Progressive disclosure summary mode (default)
 	if reviewSummary && semanticDiff != nil {
-		summary := review.BuildReviewSummary(semanticDiff)
+		summary := review.BuildReviewSummary(semanticDiff, loadModuleCategorizer())
 		if rev.Title != "" {
 			summary.Title = rev.Title
 		}
@@ -12270,9 +12303,9 @@ func runReviewView(cmd *cobra.Command, args []string) error {
 				// Deleted file
 				fmt.Println("--- (deleted)")
 			} else if beforeContent != afterContent {
-				// Modified - show simple diff
+				// Modified - show unified diff
 				fmt.Println("+++ (modified)")
-				showSimpleDiff(beforeContent, afterContent)
+				showUnifiedDiff(beforeContent, afterContent)
 			} else {
 				fmt.Println("  (unchanged)")
 			}
@@ -12314,47 +12347,6 @@ func getFileContentFromSnapshot(db *graph.DB, sc *snapshot.Creator, snapID []byt
 		}
 	}
 	return ""
-}
-
-// showSimpleDiff displays a simple line-by-line diff
-func showSimpleDiff(before, after string) {
-	beforeLines := strings.Split(before, "\n")
-	afterLines := strings.Split(after, "\n")
-
-	// Simple diff: show first few changed lines
-	maxLines := 30
-	shown := 0
-
-	// Find differences
-	maxLen := len(beforeLines)
-	if len(afterLines) > maxLen {
-		maxLen = len(afterLines)
-	}
-
-	for i := 0; i < maxLen && shown < maxLines; i++ {
-		var beforeLine, afterLine string
-		if i < len(beforeLines) {
-			beforeLine = beforeLines[i]
-		}
-		if i < len(afterLines) {
-			afterLine = afterLines[i]
-		}
-
-		if beforeLine != afterLine {
-			if beforeLine != "" {
-				fmt.Printf("- %s\n", beforeLine)
-				shown++
-			}
-			if afterLine != "" {
-				fmt.Printf("+ %s\n", afterLine)
-				shown++
-			}
-		}
-	}
-
-	if shown >= maxLines {
-		fmt.Println("  ... (diff truncated)")
-	}
 }
 
 // showUnifiedDiff displays a unified diff using pure Go (no system dependency)
@@ -12594,6 +12586,90 @@ func runReviewReady(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runReviewComment(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	author := os.Getenv("USER")
+	if author == "" {
+		author = "unknown"
+	}
+
+	var anchor *review.CommentAnchor
+	if reviewCommentFile != "" {
+		anchor = &review.CommentAnchor{
+			FilePath: reviewCommentFile,
+			Line:     reviewCommentLine,
+		}
+	}
+
+	comment, err := mgr.AddComment(rev.ID, author, reviewCommentBody, anchor)
+	if err != nil {
+		return fmt.Errorf("adding comment: %w", err)
+	}
+
+	fmt.Printf("Comment added to review %s\n", review.IDToHex(rev.ID)[:12])
+	if comment.FilePath != "" {
+		if comment.Line > 0 {
+			fmt.Printf("  Anchored to %s:%d\n", comment.FilePath, comment.Line)
+		} else {
+			fmt.Printf("  Anchored to %s\n", comment.FilePath)
+		}
+	}
+
+	return nil
+}
+
+func runReviewComments(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	comments, err := mgr.ListComments(rev.ID)
+	if err != nil {
+		return fmt.Errorf("listing comments: %w", err)
+	}
+
+	if len(comments) == 0 {
+		fmt.Printf("No comments on review %s\n", review.IDToHex(rev.ID)[:12])
+		return nil
+	}
+
+	fmt.Printf("Comments on review %s (%d):\n\n", review.IDToHex(rev.ID)[:12], len(comments))
+	for _, c := range comments {
+		t := time.UnixMilli(c.CreatedAt).Format("2006-01-02 15:04")
+		if c.FilePath != "" {
+			if c.Line > 0 {
+				fmt.Printf("  [%s] %s on %s:%d\n", t, c.Author, c.FilePath, c.Line)
+			} else {
+				fmt.Printf("  [%s] %s on %s\n", t, c.Author, c.FilePath)
+			}
+		} else {
+			fmt.Printf("  [%s] %s\n", t, c.Author)
+		}
+		fmt.Printf("    %s\n\n", c.Body)
+	}
+
+	return nil
+}
+
 func runReviewExport(cmd *cobra.Command, args []string) error {
 	db, err := openDB()
 	if err != nil {
@@ -12713,7 +12789,7 @@ func runReviewSummary(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the summary
-	summary := review.BuildReviewSummary(semanticDiff)
+	summary := review.BuildReviewSummary(semanticDiff, loadModuleCategorizer())
 
 	// Use intent as title if available
 	if intentStr, ok := csNode.Payload["intent"].(string); ok && intentStr != "" {
@@ -13206,6 +13282,55 @@ func fetchReviewFromRemote(db *graph.DB, client *remote.Client, remoteName, revi
 // Modules command implementations
 
 const modulesRulesPath = ".kai/rules/modules.yaml"
+
+// loadModuleCategorizer returns a FileCategorizer that groups files by module name.
+// Falls back to nil (use heuristic) if no modules are configured.
+func loadModuleCategorizer() review.FileCategorizer {
+	matcher, err := module.LoadRulesOrEmpty(modulesRulesPath)
+	if err != nil || len(matcher.GetAllModules()) == 0 {
+		// Try legacy path
+		matcher, err = module.LoadRulesOrEmpty("kai.modules.yaml")
+		if err != nil || len(matcher.GetAllModules()) == 0 {
+			return nil
+		}
+	}
+
+	return func(path string) string {
+		modules := matcher.MatchPath(path)
+		if len(modules) > 0 {
+			return modules[0]
+		}
+		// Fall back to heuristic for unmatched files
+		return categorizeFileHeuristic(path)
+	}
+}
+
+// categorizeFileHeuristic is the path-based fallback when modules aren't available.
+func categorizeFileHeuristic(path string) string {
+	lower := strings.ToLower(path)
+
+	if strings.Contains(lower, "_test.") || strings.Contains(lower, ".test.") ||
+		strings.Contains(lower, "/test/") || strings.Contains(lower, "/tests/") ||
+		strings.HasSuffix(lower, "_test.go") || strings.HasSuffix(lower, ".spec.ts") {
+		return "test"
+	}
+	if strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".txt") ||
+		strings.Contains(lower, "/docs/") {
+		return "docs"
+	}
+	if strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".yaml") ||
+		strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".toml") ||
+		strings.Contains(lower, "config") || lower == "package.json" ||
+		lower == "go.mod" || lower == "go.sum" {
+		return "config"
+	}
+	if strings.Contains(lower, "/api/") || strings.Contains(lower, "/handler") ||
+		strings.Contains(lower, "/route") || strings.Contains(lower, "/endpoint") ||
+		strings.Contains(lower, "controller") {
+		return "api"
+	}
+	return "internal"
+}
 
 func runModulesInit(cmd *cobra.Command, args []string) error {
 	if !modulesInfer {

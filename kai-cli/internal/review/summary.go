@@ -82,15 +82,25 @@ type ReviewSummary struct {
 	SemanticDiff *diff.SemanticDiff
 }
 
+// FileCategorizer maps a file path to a category name for grouping.
+// If nil, the default heuristic (path-based) categorizer is used.
+type FileCategorizer func(path string) string
+
 // BuildReviewSummary creates a ReviewSummary from a SemanticDiff.
-func BuildReviewSummary(sd *diff.SemanticDiff) *ReviewSummary {
+// Pass a non-nil categorizer to group files by module instead of path heuristics.
+func BuildReviewSummary(sd *diff.SemanticDiff, categorizers ...FileCategorizer) *ReviewSummary {
+	var categorizer FileCategorizer
+	if len(categorizers) > 0 && categorizers[0] != nil {
+		categorizer = categorizers[0]
+	}
+
 	summary := &ReviewSummary{
 		SemanticDiff: sd,
 		TotalFiles:   len(sd.Files),
 	}
 
 	// Group changes by semantic meaning
-	changes := groupChanges(sd)
+	changes := groupChanges(sd, categorizer)
 	summary.Changes = changes
 
 	// Count API changes and breaking changes
@@ -114,21 +124,19 @@ func BuildReviewSummary(sd *diff.SemanticDiff) *ReviewSummary {
 }
 
 // groupChanges groups file/unit diffs into semantic changes.
-func groupChanges(sd *diff.SemanticDiff) []SemanticChange {
-	// Group by file category first
-	groups := map[string]*SemanticChange{
-		"api":      {Kind: KindFeature, Summary: "API changes"},
-		"internal": {Kind: KindRefactor, Summary: "Internal changes"},
-		"test":     {Kind: KindTest, Summary: "Test changes"},
-		"config":   {Kind: KindChore, Summary: "Configuration changes"},
-		"docs":     {Kind: KindDocs, Summary: "Documentation changes"},
+func groupChanges(sd *diff.SemanticDiff, categorizer FileCategorizer) []SemanticChange {
+	classify := categorizeFile
+	if categorizer != nil {
+		classify = categorizer
 	}
 
+	groups := map[string]*SemanticChange{}
+
 	for _, file := range sd.Files {
-		category := categorizeFile(file.Path)
+		category := classify(file.Path)
 		group := groups[category]
 		if group == nil {
-			group = &SemanticChange{Kind: KindChore, Summary: "Other changes"}
+			group = &SemanticChange{Kind: kindForCategory(category), Summary: category + " changes"}
 			groups[category] = group
 		}
 
@@ -148,17 +156,39 @@ func groupChanges(sd *diff.SemanticDiff) []SemanticChange {
 		}
 	}
 
-	// Convert to slice, filter empty groups
+	// Sort group keys for stable output
+	var keys []string
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var result []SemanticChange
-	order := []string{"api", "internal", "test", "config", "docs"}
-	for _, key := range order {
-		if g := groups[key]; g != nil && len(g.Files) > 0 {
+	for _, key := range keys {
+		g := groups[key]
+		if len(g.Files) > 0 {
 			g.Summary = buildGroupSummary(g)
 			result = append(result, *g)
 		}
 	}
 
 	return result
+}
+
+// kindForCategory maps a category name to a ChangeKind.
+func kindForCategory(category string) ChangeKind {
+	switch category {
+	case "api":
+		return KindFeature
+	case "test":
+		return KindTest
+	case "docs":
+		return KindDocs
+	case "config":
+		return KindChore
+	default:
+		return KindRefactor
+	}
 }
 
 // categorizeFile determines the category of a file.
@@ -277,11 +307,39 @@ func countFiles(changes []SemanticChange) int {
 }
 
 func isAPISymbol(sym SymbolChange) bool {
-	// Exported functions/types are API surface
-	if len(sym.Name) > 0 && sym.Name[0] >= 'A' && sym.Name[0] <= 'Z' {
-		return true
+	if len(sym.Name) == 0 {
+		return false
 	}
-	return false
+
+	// Infer language from file extension
+	ext := strings.ToLower(sym.File)
+	if idx := strings.LastIndex(ext, "."); idx >= 0 {
+		ext = ext[idx:]
+	}
+
+	switch ext {
+	case ".go":
+		// Go: exported if first letter is uppercase
+		return sym.Name[0] >= 'A' && sym.Name[0] <= 'Z'
+	case ".py":
+		// Python: public if doesn't start with underscore
+		return sym.Name[0] != '_'
+	case ".rb":
+		// Ruby: public by default; private/protected are method-level, not naming
+		// Treat all as API since we can't tell from name alone
+		return true
+	case ".rs":
+		// Rust: exported with `pub` keyword, but we only have the name here
+		// Fall back to uppercase-starting types being API
+		return sym.Name[0] >= 'A' && sym.Name[0] <= 'Z'
+	case ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs":
+		// JS/TS: exported via `export` keyword, not naming convention
+		// Without export info, treat all top-level functions/classes as API
+		return sym.Kind == diff.UnitFunction || sym.Kind == diff.UnitClass
+	default:
+		// Unknown language: uppercase = exported (Go convention as fallback)
+		return sym.Name[0] >= 'A' && sym.Name[0] <= 'Z'
+	}
 }
 
 // FormatSummary returns a CLI-friendly summary string.

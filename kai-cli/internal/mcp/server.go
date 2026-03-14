@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -348,6 +349,19 @@ func readOnly() mcp.ToolOption {
 }
 
 func (s *Server) registerTools(srv *server.MCPServer) {
+	// Initialize MCP call logging if enabled (KAI_MCP_LOG=1)
+	if mcpLogEnabled() {
+		initLogger(s.kaiDir)
+	}
+
+	// log wraps a handler with call logging when enabled, otherwise passes through.
+	log := func(name string, h server.ToolHandlerFunc) server.ToolHandlerFunc {
+		if globalLogger != nil {
+			return withLogging(name, h)
+		}
+		return h
+	}
+
 	// kai_symbols — list all symbols in a file
 	srv.AddTool(
 		mcp.NewTool("kai_symbols",
@@ -358,7 +372,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithBoolean("exported", mcp.Description("If true, only return exported/public symbols (Go: uppercase-first)")),
 			mcp.WithBoolean("signatures", mcp.Description("If true, include full signatures in output (default: false to save tokens)")),
 		),
-		s.handleSymbols,
+		log("kai_symbols", s.handleSymbols),
 	)
 
 	// kai_callers — find all callers of a symbol
@@ -369,7 +383,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callers of (e.g. validateToken, Resolve). Use bare function name — receiver prefixes like *Type. are stripped automatically.")),
 			mcp.WithString("file", mcp.Description("File where the symbol is defined, to disambiguate (e.g. auth/token.go)")),
 		),
-		s.handleCallers,
+		log("kai_callers", s.handleCallers),
 	)
 
 	// kai_callees — find all symbols called by a symbol
@@ -380,7 +394,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callees of")),
 			mcp.WithString("file", mcp.Description("File where the symbol is defined, to disambiguate")),
 		),
-		s.handleCallees,
+		log("kai_callees", s.handleCallees),
 	)
 
 	// kai_dependents — find files that import/depend on a file
@@ -390,7 +404,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Find all files that import or depend on the given file. Answers: 'what breaks if I change this file?'"),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
 		),
-		s.handleDependents,
+		log("kai_dependents", s.handleDependents),
 	)
 
 	// kai_dependencies — find files that a file imports
@@ -400,7 +414,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Find all files that the given file imports or depends on. Answers: 'what does this file need?'"),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
 		),
-		s.handleDependencies,
+		log("kai_dependencies", s.handleDependencies),
 	)
 
 	// kai_tests — find tests that cover a file or symbol
@@ -410,7 +424,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Find test files that cover the given source file. Uses both static analysis (TESTS edges) and coverage data if available."),
 			mcp.WithString("file", mcp.Required(), mcp.Description("Source file path to find tests for")),
 		),
-		s.handleTests,
+		log("kai_tests", s.handleTests),
 	)
 
 	// kai_diff — semantic diff between two refs
@@ -421,7 +435,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("base", mcp.Description("Base ref (snapshot ID, @snap:prev, or ref name). Defaults to @snap:prev")),
 			mcp.WithString("head", mcp.Description("Head ref (snapshot ID, @snap:last, or ref name). Defaults to @snap:last")),
 		),
-		s.handleDiff,
+		log("kai_diff", s.handleDiff),
 	)
 
 	// kai_context — bundled context for a location (the high-leverage tool)
@@ -433,7 +447,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("symbol", mcp.Description("Symbol name to focus on (optional, returns all symbols in file if omitted)")),
 			mcp.WithNumber("depth", mcp.Description("How many hops to traverse in the graph (default: 1)")),
 		),
-		s.handleContext,
+		log("kai_context", s.handleContext),
 	)
 
 	// kai_impact — transitive downstream impact analysis
@@ -444,7 +458,19 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path to analyze impact for")),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum graph traversal depth (default: 3)")),
 		),
-		s.handleImpact,
+		log("kai_impact", s.handleImpact),
+	)
+
+	// kai_files — list all files in the semantic graph
+	srv.AddTool(
+		mcp.NewTool("kai_files",
+			readOnly(),
+			mcp.WithDescription("List all files tracked in the semantic graph. Returns file paths, languages, and modules. Use 'lang' to filter by language (e.g. 'go', 'typescript'). Use 'module' to filter by module name. Use 'pattern' for glob-style path matching (e.g. 'src/**/*.go')."),
+			mcp.WithString("lang", mcp.Description("Filter by language (e.g. go, typescript, python)")),
+			mcp.WithString("module", mcp.Description("Filter by module name")),
+			mcp.WithString("pattern", mcp.Description("Glob pattern to match file paths (e.g. 'kai-core/**/*.go')")),
+		),
+		log("kai_files", s.handleFiles),
 	)
 
 	// kai_status — check graph freshness (does NOT trigger init)
@@ -453,7 +479,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			readOnly(),
 			mcp.WithDescription("Check if the Kai semantic graph is fresh. Returns last capture time, current branch, HEAD commit, and any files that have changed since the last capture. Call this before using other kai tools to verify freshness. If stale_files exist, ask the user before calling kai_refresh. If status is 'uninitialized', call kai_refresh to build the index."),
 		),
-		s.handleStatus,
+		log("kai_status", s.handleStatus),
 	)
 
 	// kai_refresh — update the semantic graph (triggers init if needed)
@@ -468,7 +494,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Re-capture the semantic graph. IMPORTANT: Ask the user for permission before calling this. Use kai_status first to check if refresh is needed. Scope controls what gets captured."),
 			mcp.WithString("scope", mcp.Description("What to capture: 'all' (full directory, default), 'staged' (git staged files only)")),
 		),
-		s.handleRefresh,
+		log("kai_refresh", s.handleRefresh),
 	)
 }
 
@@ -1122,6 +1148,93 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		"affected_files": sourceFiles,
 		"affected_tests": testFiles,
 		"total_affected": len(results),
+	})
+}
+
+func (s *Server) handleFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
+	langFilter := optString(req, "lang")
+	moduleFilter := optString(req, "module")
+	pattern := optString(req, "pattern")
+
+	snapID, err := s.latestSnapshotID()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	snapNode, err := s.db.GetNode(snapID)
+	if err != nil || snapNode == nil {
+		return mcp.NewToolResultError("cannot read snapshot"), nil
+	}
+
+	// Use the inline files metadata from the snapshot for fast listing
+	filesRaw, ok := snapNode.Payload["files"].([]interface{})
+	if !ok {
+		return mcp.NewToolResultError("snapshot has no file metadata — try kai_refresh"), nil
+	}
+
+	type fileEntry struct {
+		Path string `json:"path"`
+		Lang string `json:"lang,omitempty"`
+	}
+
+	var results []fileEntry
+	for _, raw := range filesRaw {
+		fm, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		path, _ := fm["path"].(string)
+		lang, _ := fm["lang"].(string)
+
+		// Apply language filter
+		if langFilter != "" && !strings.EqualFold(lang, langFilter) {
+			continue
+		}
+
+		// Apply glob pattern filter
+		if pattern != "" {
+			matched, _ := doublestar.Match(pattern, path)
+			if !matched {
+				continue
+			}
+		}
+
+		results = append(results, fileEntry{Path: path, Lang: lang})
+	}
+
+	// Apply module filter by checking which files belong to the module
+	if moduleFilter != "" {
+		modulesPath := filepath.Join(s.kaiDir, "rules", "modules.yaml")
+		matcher, _ := module.LoadRulesOrEmpty(modulesPath)
+		if len(matcher.GetAllModules()) == 0 {
+			legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
+			matcher, _ = module.LoadRulesOrEmpty(legacyPath)
+		}
+
+		var filtered []fileEntry
+		for _, f := range results {
+			modules := matcher.MatchPath(f.Path)
+			for _, m := range modules {
+				if strings.EqualFold(m, moduleFilter) {
+					filtered = append(filtered, f)
+					break
+				}
+			}
+		}
+		results = filtered
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Path < results[j].Path
+	})
+
+	return jsonResult(map[string]interface{}{
+		"count": len(results),
+		"files": results,
 	})
 }
 
