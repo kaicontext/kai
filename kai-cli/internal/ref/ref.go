@@ -295,7 +295,18 @@ func (r *Resolver) resolveSelector(input string, wantKind *Kind) (*ResolveResult
 		}
 		return r.resolveRef("snap.working", &kind)
 	default:
-		return nil, fmt.Errorf("unknown selector: %s (try 'last', 'prev', or 'working')", selector)
+		// Try resolving as a ref name (e.g. @snap:20260314T090755.729 or @snap:snap.20260314T090755.729)
+		// First try the selector as-is (already a full ref name like snap.20260314T...)
+		result, err := r.resolveRef(selector, &kind)
+		if err == nil && result != nil {
+			return result, nil
+		}
+		// Then try prefixing with the kind (e.g. "20260314T..." -> "snap.20260314T...")
+		result, err = r.resolveRef(kindStr+"."+selector, &kind)
+		if err == nil && result != nil {
+			return result, nil
+		}
+		return nil, fmt.Errorf("unknown selector: %s (try 'last', 'prev', 'working', or a ref name)", selector)
 	}
 }
 
