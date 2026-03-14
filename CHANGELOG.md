@@ -2,6 +2,20 @@
 
 All notable changes to Kai are documented here.
 
+## [0.9.9] — 2026-03-14
+
+### Features
+- **`kai review edit`** — update title, description, and assignees after creation
+- **Review model alignment** — assignees, comment threading (parentId), changesRequestedSummary/By, targetBranch now match server
+- **Review summary persistence** — `kai review summary` stores structured summary in review payload for server/web UI access
+- **Quiet capture/push** — one-line output by default, inline progress counters, full detail with `-v`
+- **Snapshot history** — `kai snapshot list` shows ref names; `@snap:` selector resolves ref names
+- **CI cleanup** — removed dead kailab/kailab-control jobs from OSS CI
+
+### Fixes
+- `@snap:snap.TIMESTAMP` selector now works (falls back to ref lookup)
+- kai-server CI auto-syncs kai-core from OSS repo before build
+
 ## [0.9.8] — 2026-03-14
 
 ### Features
