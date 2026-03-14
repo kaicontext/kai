@@ -2917,12 +2917,18 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		if len(display) > 40 {
 			display = "..." + display[len(display)-37:]
 		}
-		debugf("Analyzing... %d/%d %s", current, total, display)
+		if verbose {
+			debugf("Analyzing... %d/%d %s", current, total, display)
+		} else {
+			fmt.Fprintf(os.Stderr, "\rAnalyzing symbols... %d/%d", current, total)
+		}
 	}
 	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 		debugf("Analyzing symbols: warning: some files failed")
 		fmt.Fprintf(os.Stderr, "  %v\n", err)
 	} else {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 		debugf("Analyzing symbols: done")
 	}
 	if te != nil {
@@ -2937,12 +2943,18 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		if len(display) > 40 {
 			display = "..." + display[len(display)-37:]
 		}
-		debugf("Building graph... %d/%d %s", current, total, display)
+		if verbose {
+			debugf("Building graph... %d/%d %s", current, total, display)
+		} else {
+			fmt.Fprintf(os.Stderr, "\rBuilding graph... %d/%d", current, total)
+		}
 	}
 	if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 		debugf("Building call graph: warning: some files failed")
 		fmt.Fprintf(os.Stderr, "  %v\n", err)
 	} else {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
 		debugf("Building call graph: done")
 	}
 	if te != nil {
