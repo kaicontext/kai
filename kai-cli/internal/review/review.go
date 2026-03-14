@@ -250,6 +250,30 @@ func (m *Manager) UpdateState(reviewID []byte, newState State, actor, summary st
 	return m.db.UpdateNodePayload(reviewID, node.Payload)
 }
 
+// Update updates review metadata (title, description, assignees).
+func (m *Manager) Update(reviewID []byte, title, description *string, assignees []string) error {
+	node, err := m.db.GetNode(reviewID)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		return fmt.Errorf("review not found")
+	}
+
+	if title != nil {
+		node.Payload["title"] = *title
+	}
+	if description != nil {
+		node.Payload["description"] = *description
+	}
+	if assignees != nil {
+		node.Payload["assignees"] = assignees
+	}
+	node.Payload["updatedAt"] = util.NowMs()
+
+	return m.db.UpdateNodePayload(reviewID, node.Payload)
+}
+
 // Close closes a review with a final state.
 func (m *Manager) Close(reviewID []byte, state State) error {
 	if state != StateMerged && state != StateAbandoned {

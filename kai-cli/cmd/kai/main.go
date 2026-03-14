@@ -1426,6 +1426,19 @@ Examples:
 	RunE: runReviewClose,
 }
 
+var reviewEditCmd = &cobra.Command{
+	Use:   "edit <review-id>",
+	Short: "Update review title, description, or assignees",
+	Long: `Update review metadata after creation.
+
+Examples:
+  kai review edit abc123 --title "New title"
+  kai review edit abc123 --desc "Updated description"
+  kai review edit abc123 --assignees alice --assignees bob`,
+	Args: cobra.ExactArgs(1),
+	RunE: runReviewEdit,
+}
+
 var reviewReadyCmd = &cobra.Command{
 	Use:   "ready <review-id>",
 	Short: "Mark a draft review as ready for review",
@@ -1522,6 +1535,9 @@ var (
 	reviewCommentBody string
 	reviewCommentFile string
 	reviewCommentLine int
+	reviewEditTitle    string
+	reviewEditDesc     string
+	reviewEditAssignees []string
 
 	statusDir        string
 	statusAgainst    string
@@ -1974,6 +1990,10 @@ func init() {
 	reviewCloseCmd.Flags().StringVar(&reviewCloseState, "state", "", "Close state: merged or abandoned (required)")
 	reviewCloseCmd.MarkFlagRequired("state")
 
+	reviewEditCmd.Flags().StringVar(&reviewEditTitle, "title", "", "New title")
+	reviewEditCmd.Flags().StringVar(&reviewEditDesc, "desc", "", "New description")
+	reviewEditCmd.Flags().StringArrayVar(&reviewEditAssignees, "assignees", nil, "Assignees (can be specified multiple times)")
+
 	reviewExportCmd.Flags().BoolVar(&reviewExportMD, "markdown", false, "Export as markdown")
 	reviewExportCmd.Flags().BoolVar(&reviewExportHTML, "html", false, "Export as HTML")
 
@@ -2289,6 +2309,7 @@ func init() {
 	reviewCmd.AddCommand(reviewApproveCmd)
 	reviewCmd.AddCommand(reviewRequestChangesCmd)
 	reviewCmd.AddCommand(reviewCloseCmd)
+	reviewCmd.AddCommand(reviewEditCmd)
 	reviewCmd.AddCommand(reviewReadyCmd)
 	reviewCmd.AddCommand(reviewExportCmd)
 	reviewCmd.AddCommand(reviewSummaryCmd)
@@ -12534,6 +12555,44 @@ func runReviewClose(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Review %s closed as %s.\n", review.IDToHex(rev.ID)[:12], state)
+	return nil
+}
+
+func runReviewEdit(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mgr := review.NewManager(db)
+	rev, err := mgr.GetByShortID(args[0])
+	if err != nil {
+		return err
+	}
+
+	var title, desc *string
+	if cmd.Flags().Changed("title") {
+		title = &reviewEditTitle
+	}
+	if cmd.Flags().Changed("desc") {
+		desc = &reviewEditDesc
+	}
+
+	var assignees []string
+	if cmd.Flags().Changed("assignees") {
+		assignees = reviewEditAssignees
+	}
+
+	if title == nil && desc == nil && assignees == nil {
+		return fmt.Errorf("nothing to update (use --title, --desc, or --assignees)")
+	}
+
+	if err := mgr.Update(rev.ID, title, desc, assignees); err != nil {
+		return fmt.Errorf("updating review: %w", err)
+	}
+
+	fmt.Printf("Review %s updated.\n", review.IDToHex(rev.ID)[:12])
 	return nil
 }
 
