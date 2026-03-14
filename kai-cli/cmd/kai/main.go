@@ -7782,32 +7782,33 @@ func runListSnapshots(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-64s  %-10s  %-20s  %s\n", "ID", "TYPE", "SOURCE REF", "FILES")
-	fmt.Println(strings.Repeat("-", 110))
+	// Build ID -> ref name(s) map
+	refMgr := ref.NewRefManager(db)
+	allRefs, _ := refMgr.List(nil)
+	idToRefs := make(map[string][]string)
+	for _, r := range allRefs {
+		hex := util.BytesToHex(r.TargetID)
+		idToRefs[hex] = append(idToRefs[hex], r.Name)
+	}
+
+	fmt.Printf("%-30s  %-12s  %-10s  %s\n", "REF", "ID", "TYPE", "FILES")
+	fmt.Println(strings.Repeat("-", 80))
 	for _, node := range nodes {
-		// Support both old (gitRef) and new (sourceRef/sourceType) formats
 		sourceType, _ := node.Payload["sourceType"].(string)
-		sourceRef, _ := node.Payload["sourceRef"].(string)
-
-		// Backward compatibility: check old gitRef field
-		if sourceRef == "" {
-			if gitRef, ok := node.Payload["gitRef"].(string); ok {
-				sourceRef = gitRef
-				sourceType = "git"
-			}
-		}
-
-		// Truncate long sourceRef for display
-		displayRef := sourceRef
-		if len(displayRef) > 20 {
-			displayRef = displayRef[:17] + "..."
-		}
 
 		fileCount := ""
 		if fc, ok := node.Payload["fileCount"].(float64); ok {
 			fileCount = fmt.Sprintf("%.0f", fc)
 		}
-		fmt.Printf("%-64s  %-10s  %-20s  %s\n", util.BytesToHex(node.ID), sourceType, displayRef, fileCount)
+
+		hex := util.BytesToHex(node.ID)
+		refNames := idToRefs[hex]
+		refDisplay := "-"
+		if len(refNames) > 0 {
+			refDisplay = strings.Join(refNames, ", ")
+		}
+
+		fmt.Printf("%-30s  %-12s  %-10s  %s\n", refDisplay, hex[:12], sourceType, fileCount)
 	}
 
 	return nil
