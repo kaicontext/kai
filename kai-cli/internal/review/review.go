@@ -25,16 +25,20 @@ const (
 
 // Review represents a code review for a changeset or workspace.
 type Review struct {
-	ID          []byte
-	Title       string
-	Description string
-	State       State
-	Author      string
-	Reviewers   []string
-	TargetID    []byte // ChangeSet or Workspace ID
-	TargetKind  graph.NodeKind
-	CreatedAt   int64
-	UpdatedAt   int64
+	ID                      []byte
+	Title                   string
+	Description             string
+	State                   State
+	Author                  string
+	Reviewers               []string
+	Assignees               []string
+	TargetID                []byte // ChangeSet or Workspace ID
+	TargetKind              graph.NodeKind
+	TargetBranch            string
+	ChangesRequestedSummary string
+	ChangesRequestedBy      string
+	CreatedAt               int64
+	UpdatedAt               int64
 }
 
 // Comment represents a review comment.
@@ -46,6 +50,7 @@ type Comment struct {
 	AnchorID  []byte // Symbol or File node ID (optional)
 	FilePath  string // For file:line anchors
 	Line      int    // For file:line anchors
+	ParentID  string // For reply threading (optional)
 	CreatedAt int64
 }
 
@@ -60,7 +65,7 @@ func NewManager(db *graph.DB) *Manager {
 }
 
 // Open creates a new review for a changeset or workspace.
-func (m *Manager) Open(targetID []byte, title, description, author string, reviewers []string) (*Review, error) {
+func (m *Manager) Open(targetID []byte, title, description, author string, reviewers, assignees []string) (*Review, error) {
 	// Verify target exists and get its kind
 	target, err := m.db.GetNode(targetID)
 	if err != nil {
@@ -88,6 +93,7 @@ func (m *Manager) Open(targetID []byte, title, description, author string, revie
 		"state":       string(StateDraft),
 		"author":      author,
 		"reviewers":   reviewers,
+		"assignees":   assignees,
 		"targetId":    util.BytesToHex(targetID),
 		"targetKind":  string(target.Kind),
 		"createdAt":   now,
@@ -121,6 +127,7 @@ func (m *Manager) Open(targetID []byte, title, description, author string, revie
 		State:       StateDraft,
 		Author:      author,
 		Reviewers:   reviewers,
+		Assignees:   assignees,
 		TargetID:    targetID,
 		TargetKind:  target.Kind,
 		CreatedAt:   now,
@@ -198,7 +205,7 @@ var validTransitions = map[State][]State{
 }
 
 // UpdateState changes the state of a review, validating the transition.
-func (m *Manager) UpdateState(reviewID []byte, newState State) error {
+func (m *Manager) UpdateState(reviewID []byte, newState State, actor, summary string) error {
 	node, err := m.db.GetNode(reviewID)
 	if err != nil {
 		return err
@@ -228,6 +235,18 @@ func (m *Manager) UpdateState(reviewID []byte, newState State) error {
 	node.Payload["state"] = string(newState)
 	node.Payload["updatedAt"] = util.NowMs()
 
+	if newState == StateChanges {
+		if summary != "" {
+			node.Payload["changesRequestedSummary"] = summary
+		}
+		if actor != "" {
+			node.Payload["changesRequestedBy"] = actor
+		}
+	} else {
+		delete(node.Payload, "changesRequestedSummary")
+		delete(node.Payload, "changesRequestedBy")
+	}
+
 	return m.db.UpdateNodePayload(reviewID, node.Payload)
 }
 
@@ -236,17 +255,17 @@ func (m *Manager) Close(reviewID []byte, state State) error {
 	if state != StateMerged && state != StateAbandoned {
 		return fmt.Errorf("close state must be 'merged' or 'abandoned'")
 	}
-	return m.UpdateState(reviewID, state)
+	return m.UpdateState(reviewID, state, "", "")
 }
 
 // Approve marks a review as approved.
 func (m *Manager) Approve(reviewID []byte) error {
-	return m.UpdateState(reviewID, StateApproved)
+	return m.UpdateState(reviewID, StateApproved, "", "")
 }
 
 // RequestChanges marks a review as needing changes.
-func (m *Manager) RequestChanges(reviewID []byte) error {
-	return m.UpdateState(reviewID, StateChanges)
+func (m *Manager) RequestChanges(reviewID []byte, actor, summary string) error {
+	return m.UpdateState(reviewID, StateChanges, actor, summary)
 }
 
 // MarkReady transitions a review from draft to open.
@@ -261,7 +280,7 @@ func (m *Manager) MarkReady(reviewID []byte) error {
 	if review.State != StateDraft {
 		return fmt.Errorf("review is not in draft state")
 	}
-	return m.UpdateState(reviewID, StateOpen)
+	return m.UpdateState(reviewID, StateOpen, "", "")
 }
 
 // GetTarget retrieves the target (ChangeSet or Workspace) of a review.
@@ -278,7 +297,7 @@ func (m *Manager) GetTarget(reviewID []byte) (*graph.Node, error) {
 }
 
 // AddComment adds a comment to a review, optionally anchored to a symbol or file:line.
-func (m *Manager) AddComment(reviewID []byte, author, body string, anchor *CommentAnchor) (*Comment, error) {
+func (m *Manager) AddComment(reviewID []byte, author, body, parentID string, anchor *CommentAnchor) (*Comment, error) {
 	// Verify review exists
 	rev, err := m.Get(reviewID)
 	if err != nil {
@@ -306,7 +325,12 @@ func (m *Manager) AddComment(reviewID []byte, author, body string, anchor *Comme
 		ReviewID:  reviewID,
 		Author:    author,
 		Body:      body,
+		ParentID:  parentID,
 		CreatedAt: now,
+	}
+
+	if parentID != "" {
+		payload["parentId"] = parentID
 	}
 
 	if anchor != nil {
@@ -401,6 +425,7 @@ func nodeToComment(node *graph.Node) *Comment {
 	line, _ := node.Payload["line"].(float64)
 	createdAt, _ := node.Payload["createdAt"].(float64)
 	anchorHex, _ := node.Payload["anchorId"].(string)
+	parentID, _ := node.Payload["parentId"].(string)
 
 	reviewID, _ := util.HexToBytes(reviewHex)
 	anchorID, _ := util.HexToBytes(anchorHex)
@@ -413,6 +438,7 @@ func nodeToComment(node *graph.Node) *Comment {
 		AnchorID:  anchorID,
 		FilePath:  filePath,
 		Line:      int(line),
+		ParentID:  parentID,
 		CreatedAt: int64(createdAt),
 	}
 }
@@ -425,32 +451,42 @@ func nodeToReview(node *graph.Node) (*Review, error) {
 	author, _ := node.Payload["author"].(string)
 	targetHex, _ := node.Payload["targetId"].(string)
 	targetKind, _ := node.Payload["targetKind"].(string)
+	targetBranch, _ := node.Payload["targetBranch"].(string)
+	changesRequestedSummary, _ := node.Payload["changesRequestedSummary"].(string)
+	changesRequestedBy, _ := node.Payload["changesRequestedBy"].(string)
 	createdAt, _ := node.Payload["createdAt"].(float64)
 	updatedAt, _ := node.Payload["updatedAt"].(float64)
 
 	targetID, _ := util.HexToBytes(targetHex)
 
-	// Parse reviewers array
-	var reviewers []string
-	if arr, ok := node.Payload["reviewers"].([]interface{}); ok {
-		for _, v := range arr {
-			if s, ok := v.(string); ok {
-				reviewers = append(reviewers, s)
+	// Parse string arrays
+	parseStringArray := func(key string) []string {
+		var result []string
+		if arr, ok := node.Payload[key].([]interface{}); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok {
+					result = append(result, s)
+				}
 			}
 		}
+		return result
 	}
 
 	return &Review{
-		ID:          node.ID,
-		Title:       title,
-		Description: description,
-		State:       State(state),
-		Author:      author,
-		Reviewers:   reviewers,
-		TargetID:    targetID,
-		TargetKind:  graph.NodeKind(targetKind),
-		CreatedAt:   int64(createdAt),
-		UpdatedAt:   int64(updatedAt),
+		ID:                      node.ID,
+		Title:                   title,
+		Description:             description,
+		State:                   State(state),
+		Author:                  author,
+		Reviewers:               parseStringArray("reviewers"),
+		Assignees:               parseStringArray("assignees"),
+		TargetID:                targetID,
+		TargetKind:              graph.NodeKind(targetKind),
+		TargetBranch:            targetBranch,
+		ChangesRequestedSummary: changesRequestedSummary,
+		ChangesRequestedBy:      changesRequestedBy,
+		CreatedAt:               int64(createdAt),
+		UpdatedAt:               int64(updatedAt),
 	}, nil
 }
 

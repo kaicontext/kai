@@ -11909,7 +11909,7 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := review.NewManager(db)
-	rev, err := mgr.Open(targetID, reviewTitle, reviewDesc, author, reviewReviewers)
+	rev, err := mgr.Open(targetID, reviewTitle, reviewDesc, author, reviewReviewers, nil)
 	if err != nil {
 		return fmt.Errorf("opening review: %w", err)
 	}
@@ -12485,7 +12485,7 @@ func runReviewRequestChanges(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := mgr.RequestChanges(rev.ID); err != nil {
+	if err := mgr.RequestChanges(rev.ID, "", ""); err != nil {
 		return fmt.Errorf("requesting changes: %w", err)
 	}
 
@@ -12584,7 +12584,7 @@ func runReviewComment(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	comment, err := mgr.AddComment(rev.ID, author, reviewCommentBody, anchor)
+	comment, err := mgr.AddComment(rev.ID, author, reviewCommentBody, "", anchor)
 	if err != nil {
 		return fmt.Errorf("adding comment: %w", err)
 	}
