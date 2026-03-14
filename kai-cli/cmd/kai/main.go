@@ -12850,6 +12850,50 @@ func runReviewSummary(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Persist summary to any review targeting this changeset
+	reviews, _ := review.NewManager(db).List()
+	for _, rev := range reviews {
+		if util.BytesToHex(rev.TargetID) == util.BytesToHex(csID) {
+			summaryData := map[string]interface{}{
+				"text":          summary.FormatSummary(),
+				"totalFiles":    summary.TotalFiles,
+				"apiChanges":    summary.APIChanges,
+				"breakingCount": summary.BreakingCount,
+			}
+			// Build change groups for structured display
+			var changeGroups []map[string]interface{}
+			for _, c := range summary.Changes {
+				group := map[string]interface{}{
+					"summary": c.Summary,
+					"kind":    string(c.Kind),
+					"files":   c.Files,
+				}
+				var symbols []map[string]string
+				for _, s := range c.Symbols {
+					symbols = append(symbols, map[string]string{
+						"name":   s.Name,
+						"action": string(s.Action),
+						"file":   s.File,
+						"kind":   string(s.Kind),
+					})
+				}
+				if len(symbols) > 0 {
+					group["symbols"] = symbols
+				}
+				changeGroups = append(changeGroups, group)
+			}
+			summaryData["changes"] = changeGroups
+
+			node, _ := db.GetNode(rev.ID)
+			if node != nil {
+				node.Payload["summary"] = summaryData
+				node.Payload["updatedAt"] = util.NowMs()
+				db.UpdateNodePayload(rev.ID, node.Payload)
+				debugf("Persisted summary to review %s", review.IDToHex(rev.ID)[:12])
+			}
+		}
+	}
+
 	// Display the summary
 	fmt.Println(summary.FormatSummary())
 
