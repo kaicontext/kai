@@ -54,6 +54,7 @@ npx -y kai-mcp
 | `kai_diff` | Semantic diff between two refs |
 | `kai_context` | Bundled context for a file/symbol |
 | `kai_impact` | Transitive downstream impact analysis |
+| `kai_files` | List files in the repo with language/module filters |
 | `kai_status` | Check graph freshness |
 | `kai_refresh` | Re-capture the semantic graph |
 
