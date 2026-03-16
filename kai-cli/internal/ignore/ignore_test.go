@@ -116,20 +116,43 @@ func TestDefaults(t *testing.T) {
 		isDir bool
 		want  bool
 	}{
+		// Fully excluded (not in snapshot)
 		{"node_modules", true, true},
 		{"node_modules/lodash/index.js", false, true},
 		{".git", true, true},
 		{".kai", true, true},
-		{"dist", true, true},
-		{"build", true, true},
 		{".DS_Store", false, true},
 		{"src/app.ts", false, false},
+		// @semantic-ignore: captured but not analyzed
+		{"dist", true, false},  // Match() returns false (captured)
+		{"build", true, false}, // Match() returns false (captured)
 	}
 
 	for _, tt := range tests {
 		got := m.Match(tt.path, tt.isDir)
 		if got != tt.want {
-			t.Errorf("path %q (isDir=%v): got %v, want %v",
+			t.Errorf("Match(%q, isDir=%v): got %v, want %v",
+				tt.path, tt.isDir, got, tt.want)
+		}
+	}
+
+	// Test MatchSemantic — should match both excluded AND semantic-ignored
+	semanticTests := []struct {
+		path  string
+		isDir bool
+		want  bool
+	}{
+		{"node_modules", true, true},
+		{"dist", true, true},      // semantic-ignored
+		{"build", true, true},     // semantic-ignored
+		{"go.sum", false, true},   // semantic-ignored lock file
+		{"src/app.ts", false, false},
+	}
+
+	for _, tt := range semanticTests {
+		got := m.MatchSemantic(tt.path, tt.isDir)
+		if got != tt.want {
+			t.Errorf("MatchSemantic(%q, isDir=%v): got %v, want %v",
 				tt.path, tt.isDir, got, tt.want)
 		}
 	}
