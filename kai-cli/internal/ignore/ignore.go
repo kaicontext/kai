@@ -442,16 +442,8 @@ func (m *Matcher) LoadDefaults() {
 		"data/",
 		"dump/",
 
-		// ------------------------------
-		// Lock files (large, not useful for analysis)
-		// ------------------------------
-		"package-lock.json",
-		"yarn.lock",
-		"pnpm-lock.yaml",
-		"Pipfile.lock",
-		"poetry.lock",
-		"Cargo.lock",
-		"go.sum",
+		// Lock files: captured in snapshots (needed for CI builds)
+		// but skipped during symbol analysis (see snapshot.go isLockFile)
 	}
 	m.AddPatterns(defaults)
 }

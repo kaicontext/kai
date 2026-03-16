@@ -830,6 +830,11 @@ func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error
 // isBinaryOrImageFile returns true if the file extension indicates a binary or image file
 // that shouldn't be parsed for symbols.
 func isBinaryOrImageFile(filename string) bool {
+	// Check lock files by name (captured in snapshots for CI, but not analyzed)
+	if isLockFile(filename) {
+		return true
+	}
+
 	ext := strings.ToLower(filepath.Ext(filename))
 	switch ext {
 	// Images
@@ -852,6 +857,20 @@ func isBinaryOrImageFile(filename string) bool {
 		return true
 	// Other non-parseable
 	case ".lock", ".map", ".min.js", ".min.css":
+		return true
+	}
+	return false
+}
+
+// isLockFile returns true if the filename is a package manager lock file.
+// Lock files are included in snapshots (needed for CI builds) but skipped
+// during semantic analysis (no useful symbols/calls).
+func isLockFile(filename string) bool {
+	base := strings.ToLower(filepath.Base(filename))
+	switch base {
+	case "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+		"pipfile.lock", "poetry.lock", "cargo.lock",
+		"go.sum", "composer.lock", "gemfile.lock":
 		return true
 	}
 	return false
