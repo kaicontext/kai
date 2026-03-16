@@ -113,7 +113,9 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 		"fileCount":   len(files),
 		"fileDigests": fileDigests,
 		"files":       filesMetadata, // New: inline file metadata for fast listing
-		"createdAt":   util.NowMs(),
+		// Note: createdAt is NOT in the payload because snapshots are content-addressed.
+		// Including a timestamp would make identical directories produce different snapshot IDs.
+		// Use the ref's updatedAt for creation time.
 	}
 	snapshotID, err := c.db.InsertNode(tx, graph.KindSnapshot, snapshotPayload)
 	if err != nil {
