@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: golang:1.24-alpine
+    env:
+      GONOSUMCHECK: "*"
+      GONOSUMDB: "*"
+      GOFLAGS: "-mod=mod"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -24,6 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: golang:1.24-alpine
+    env:
+      GONOSUMCHECK: "*"
+      GONOSUMDB: "*"
+      GOFLAGS: "-mod=mod"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -38,6 +46,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: golang:1.24-alpine
+    env:
+      GONOSUMCHECK: "*"
+      GONOSUMDB: "*"
+      GOFLAGS: "-mod=mod"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
