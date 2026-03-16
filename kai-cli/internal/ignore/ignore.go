@@ -432,7 +432,6 @@ func (m *Matcher) LoadDefaults() {
 		// Misc runtime
 		// ------------------------------
 		"logs/",
-		"cache/",
 		"*.sqlite-journal",
 		"*.db-shm",
 		"*.db-wal",
