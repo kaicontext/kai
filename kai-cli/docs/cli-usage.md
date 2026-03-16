@@ -149,6 +149,38 @@ kai intent render @cs:last --explain-intent
 
 ---
 
+## Query
+
+Query the semantic graph directly from the terminal. These are CLI equivalents of the MCP tools (`kai_callers`, `kai_dependents`, `kai_impact`).
+
+### `kai query callers`
+
+Find all call sites of a symbol with file and line locations.
+
+```bash
+kai query callers getUser
+kai query callers handleRequest --file api/v1/users.ts
+```
+
+### `kai query dependents`
+
+Find all files that import a given file.
+
+```bash
+kai query dependents services/userService.ts
+```
+
+### `kai query impact`
+
+Transitive downstream impact analysis — walks import and call edges, shows hop distance, separates source files from tests.
+
+```bash
+kai query impact shared/types/user.ts
+kai query impact services/userService.ts --depth 5
+```
+
+---
+
 ## CI & Testing
 
 ### `kai ci plan`

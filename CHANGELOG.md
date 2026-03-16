@@ -2,6 +2,15 @@
 
 All notable changes to Kai are documented here.
 
+## [0.9.10] — 2026-03-16
+
+### CLI
+- **`kai query` command group** — query the semantic graph directly from the terminal:
+  - `kai query callers <symbol>` — find all call sites with file:line locations
+  - `kai query dependents <file>` — find all files that import a given file
+  - `kai query impact <file>` — transitive downstream impact analysis with hop distance, separating source files from tests
+- **`kai analyze` summary output** — `kai analyze symbols` and `kai analyze calls` now print what they found (e.g., "Found 61 symbols across 11 files", "Found 36 imports, 50 calls, 16 test links")
+
 ## [0.9.9] — 2026-03-14
 
 ### MCP

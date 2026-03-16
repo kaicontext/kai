@@ -543,7 +543,8 @@ kai analyze symbols 4a2556c086b1f664eaa5642e3bc0cddaa7423759d077701981e8e7e5ab0d
 
 **Output:**
 ```
-Symbol analysis complete
+Analyzing symbols... done
+Found 23 symbols across 5 files
 ```
 
 **What happens during symbol analysis:**
@@ -748,7 +749,8 @@ kai analyze symbols d9ec990243e5efea78878ffa8314a7fcdb3a69a4c89306c6e909950a4bfa
 
 **Output:**
 ```
-Symbol analysis complete
+Analyzing symbols... done
+Found 61 symbols across 11 files
 ```
 
 **Extracted symbols:**
@@ -789,10 +791,119 @@ kai analyze calls d9ec990243e5...
 - `File --CALLS--> File` (function call relationships)
 - `File --TESTS--> File` (test file to source file mapping)
 
+**Output:**
+```
+Analyzing calls... done
+Found 36 imports, 50 calls, 16 test links
+```
+
 **Enables:**
 - Finding all callers of a function
 - Determining which tests cover a file
 - Running only affected tests after changes
+
+---
+
+### `kai query callers`
+
+Find all files and locations that call a given symbol.
+
+```bash
+kai query callers <symbol> [--file <path>]
+```
+
+**Arguments:**
+- `<symbol>` - Symbol name to search for (e.g., `getUser`, `handleRequest`)
+
+**Flags:**
+- `--file` - Narrow search to callers of the symbol defined in this file
+
+**Examples:**
+```bash
+kai query callers getUser
+kai query callers handleRequest --file api/v1/users.ts
+```
+
+**Output:**
+```
+12 callers of getUser:
+  api/v1/orders.ts:10
+  services/notificationService.ts:18
+  services/notificationService.ts:33
+  services/orderService.ts:22
+  services/orderService.ts:54
+  tests/integration/user-flow.test.ts:16
+```
+
+---
+
+### `kai query dependents`
+
+Find all files that import a given file.
+
+```bash
+kai query dependents <file>
+```
+
+**Arguments:**
+- `<file>` - File path relative to repo root
+
+**Examples:**
+```bash
+kai query dependents shared/types/user.ts
+kai query dependents services/userService.ts
+```
+
+**Output:**
+```
+7 dependents of services/userService.ts:
+  api/v1/orders.ts
+  api/v1/users.ts
+  api/v2/users.ts
+  services/notificationService.ts
+  services/orderService.ts
+  tests/e2e/checkout.spec.ts
+  tests/integration/user-flow.test.ts
+```
+
+---
+
+### `kai query impact`
+
+Show the transitive downstream impact of changing a file. Walks both import and call edges, separating source files from test files.
+
+```bash
+kai query impact <file> [--depth <n>]
+```
+
+**Arguments:**
+- `<file>` - File path relative to repo root
+
+**Flags:**
+- `--depth` - Maximum graph traversal depth (default: 3)
+
+**Examples:**
+```bash
+kai query impact shared/types/user.ts
+kai query impact services/userService.ts --depth 5
+```
+
+**Output:**
+```
+8 files affected by changes to shared/types/user.ts:
+
+  Source files:
+    [hop 1] api/v1/users.ts
+    [hop 1] api/v2/users.ts
+    [hop 1] services/userService.ts
+    [hop 2] api/v1/orders.ts
+    [hop 2] services/notificationService.ts
+    [hop 2] services/orderService.ts
+
+  Tests:
+    [hop 2] tests/e2e/checkout.spec.ts
+    [hop 2] tests/integration/user-flow.test.ts
+```
 
 ---
 

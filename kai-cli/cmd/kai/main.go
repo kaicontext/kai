@@ -83,6 +83,7 @@ var rootCmd = &cobra.Command{
 const (
 	groupStart    = "start"
 	groupDiff     = "diff"
+	groupQuery    = "query"
 	groupCI       = "ci"
 	groupRemote   = "remote"
 	groupAdvanced = "advanced"
@@ -234,6 +235,56 @@ Example:
 	Args: cobra.ExactArgs(2),
 	RunE: runTestAffected,
 }
+
+// Query commands - inspect the semantic graph from the CLI
+var queryCmd = &cobra.Command{
+	Use:   "query",
+	Short: "Query the semantic graph",
+	Long: `Query commands let you inspect the semantic graph from the terminal.
+
+These are the same queries available via MCP tools (kai_callers, kai_dependents, etc.)
+but accessible directly from the command line.`,
+}
+
+var queryCallersCmd = &cobra.Command{
+	Use:   "callers <symbol> [--file <path>]",
+	Short: "Find all callers of a symbol",
+	Long: `Find all files and locations that call a given symbol.
+
+Examples:
+  kai query callers getUser
+  kai query callers handleRequest --file api/v1/users.ts`,
+	Args: cobra.ExactArgs(1),
+	RunE: runQueryCallers,
+}
+
+var queryDependentsCmd = &cobra.Command{
+	Use:   "dependents <file>",
+	Short: "Find all files that import a given file",
+	Long: `Find all files that depend on (import from) the given file.
+
+Examples:
+  kai query dependents shared/types/user.ts
+  kai query dependents services/userService.ts`,
+	Args: cobra.ExactArgs(1),
+	RunE: runQueryDependents,
+}
+
+var queryImpactCmd = &cobra.Command{
+	Use:   "impact <file> [--depth <n>]",
+	Short: "Show transitive downstream impact of changing a file",
+	Long: `Walks the import and call graph to find all files transitively affected
+by changes to the given file. Separates source files from test files.
+
+Examples:
+  kai query impact shared/types/user.ts
+  kai query impact services/userService.ts --depth 5`,
+	Args: cobra.ExactArgs(1),
+	RunE: runQueryImpact,
+}
+
+var queryFileFlag string
+var queryDepthFlag int
 
 // CI commands - runner-agnostic selective CI
 var ciCmd = &cobra.Command{
@@ -2118,6 +2169,13 @@ func init() {
 
 	testCmd.AddCommand(testAffectedCmd)
 
+	// Query commands
+	queryCmd.AddCommand(queryCallersCmd)
+	queryCmd.AddCommand(queryDependentsCmd)
+	queryCmd.AddCommand(queryImpactCmd)
+	queryCallersCmd.Flags().StringVar(&queryFileFlag, "file", "", "File where the symbol is defined (narrows search)")
+	queryImpactCmd.Flags().IntVar(&queryDepthFlag, "depth", 3, "Maximum graph traversal depth")
+
 	// CI commands
 	ciCmd.AddCommand(ciPlanCmd)
 	ciCmd.AddCommand(ciPrintCmd)
@@ -2183,6 +2241,7 @@ func init() {
 	rootCmd.AddGroup(
 		&cobra.Group{ID: groupStart, Title: "Getting Started:"},
 		&cobra.Group{ID: groupDiff, Title: "Diff & Review:"},
+		&cobra.Group{ID: groupQuery, Title: "Query:"},
 		&cobra.Group{ID: groupCI, Title: "CI & Testing:"},
 		&cobra.Group{ID: groupRemote, Title: "Remote & Sync:"},
 		&cobra.Group{ID: groupAdvanced, Title: "Advanced:"},
@@ -2215,6 +2274,10 @@ func init() {
 	rootCmd.AddCommand(integrateCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
+
+	// Query
+	queryCmd.GroupID = groupQuery
+	rootCmd.AddCommand(queryCmd)
 
 	// CI & Testing
 	ciCmd.GroupID = groupCI
@@ -3492,6 +3555,22 @@ func runAnalyzeSymbols(cmd *cobra.Command, args []string) error {
 	fmt.Print("\rAnalyzing symbols... done")
 	fmt.Print("\033[K")
 	fmt.Println()
+
+	// Print summary of what was found
+	fileEdges, err := db.GetEdges(snapshotID, graph.EdgeHasFile)
+	if err == nil {
+		totalSymbols := 0
+		filesWithSymbols := 0
+		for _, edge := range fileEdges {
+			symbols, err := creator.GetSymbolsInFile(edge.Dst, snapshotID)
+			if err == nil && len(symbols) > 0 {
+				totalSymbols += len(symbols)
+				filesWithSymbols++
+			}
+		}
+		fmt.Printf("Found %d symbols across %d files\n", totalSymbols, filesWithSymbols)
+	}
+
 	return nil
 }
 
@@ -3529,7 +3608,247 @@ func runAnalyzeCalls(cmd *cobra.Command, args []string) error {
 	fmt.Print("\rAnalyzing calls... done")
 	fmt.Print("\033[K")
 	fmt.Println()
+
+	// Print summary of edges created
+	importEdges, _ := db.GetEdgesOfType(graph.EdgeImports)
+	callEdges, _ := db.GetEdgesOfType(graph.EdgeCalls)
+	testEdges, _ := db.GetEdgesOfType(graph.EdgeTests)
+	fmt.Printf("Found %d imports, %d calls, %d test links\n", len(importEdges), len(callEdges), len(testEdges))
+
 	return nil
+}
+
+func runQueryCallers(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	symbolName := args[0]
+
+	// Normalize Go receiver-qualified names
+	if idx := strings.LastIndex(symbolName, "."); idx >= 0 {
+		symbolName = symbolName[idx+1:]
+	}
+
+	var edges []*graph.Edge
+	if queryFileFlag != "" {
+		edges, err = db.GetEdgesToByPath(queryFileFlag, graph.EdgeCalls)
+	} else {
+		edges, err = db.GetEdgesOfType(graph.EdgeCalls)
+	}
+	if err != nil {
+		return fmt.Errorf("querying call edges: %w", err)
+	}
+
+	type callerEntry struct {
+		file string
+		line int
+	}
+	var results []callerEntry
+	seen := make(map[string]bool)
+
+	for _, edge := range edges {
+		if len(edge.At) == 0 {
+			continue
+		}
+		callNode, err := db.GetNode(edge.At)
+		if err != nil || callNode == nil {
+			continue
+		}
+		calleeName, _ := callNode.Payload["calleeName"].(string)
+		if calleeName != symbolName {
+			continue
+		}
+		callerFile, _ := callNode.Payload["callerFile"].(string)
+		line := 0
+		if l, ok := callNode.Payload["line"].(float64); ok {
+			line = int(l)
+		}
+		key := fmt.Sprintf("%s:%d", callerFile, line)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, callerEntry{file: callerFile, line: line})
+	}
+
+	if len(results) == 0 {
+		fmt.Printf("No callers found for %q\n", symbolName)
+		return nil
+	}
+
+	fmt.Printf("%d callers of %s:\n", len(results), symbolName)
+	for _, r := range results {
+		if r.line > 0 {
+			fmt.Printf("  %s:%d\n", r.file, r.line)
+		} else {
+			fmt.Printf("  %s\n", r.file)
+		}
+	}
+	return nil
+}
+
+func runQueryDependents(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	filePath := args[0]
+
+	edges, err := db.GetEdgesToByPath(filePath, graph.EdgeImports)
+	if err != nil {
+		return fmt.Errorf("querying dependents: %w", err)
+	}
+
+	var dependents []string
+	seen := make(map[string]bool)
+	for _, edge := range edges {
+		node, err := db.GetNode(edge.Src)
+		if err != nil || node == nil {
+			continue
+		}
+		if path, ok := node.Payload["path"].(string); ok && !seen[path] {
+			dependents = append(dependents, path)
+			seen[path] = true
+		}
+	}
+	sort.Strings(dependents)
+
+	if len(dependents) == 0 {
+		fmt.Printf("No dependents found for %s\n", filePath)
+		return nil
+	}
+
+	fmt.Printf("%d dependents of %s:\n", len(dependents), filePath)
+	for _, d := range dependents {
+		fmt.Printf("  %s\n", d)
+	}
+	return nil
+}
+
+func runQueryImpact(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	filePath := args[0]
+	maxDepth := queryDepthFlag
+
+	type impactEntry struct {
+		path   string
+		hop    int
+		isTest bool
+	}
+
+	visited := make(map[string]int)
+	visited[filePath] = 0
+	frontier := []string{filePath}
+	var results []impactEntry
+
+	for hop := 1; hop <= maxDepth && len(frontier) > 0; hop++ {
+		var nextFrontier []string
+		for _, current := range frontier {
+			// Follow IMPORTS edges
+			importEdges, err := db.GetEdgesToByPath(current, graph.EdgeImports)
+			if err == nil {
+				for _, edge := range importEdges {
+					node, err := db.GetNode(edge.Src)
+					if err != nil || node == nil {
+						continue
+					}
+					path, ok := node.Payload["path"].(string)
+					if !ok {
+						continue
+					}
+					if _, already := visited[path]; already {
+						continue
+					}
+					visited[path] = hop
+					results = append(results, impactEntry{path: path, hop: hop, isTest: isTestFileCLI(path)})
+					nextFrontier = append(nextFrontier, path)
+				}
+			}
+
+			// Follow CALLS edges
+			callEdges, err := db.GetEdgesToByPath(current, graph.EdgeCalls)
+			if err == nil {
+				for _, edge := range callEdges {
+					node, err := db.GetNode(edge.Src)
+					if err != nil || node == nil {
+						continue
+					}
+					path, ok := node.Payload["path"].(string)
+					if !ok {
+						continue
+					}
+					if _, already := visited[path]; already {
+						continue
+					}
+					visited[path] = hop
+					results = append(results, impactEntry{path: path, hop: hop, isTest: isTestFileCLI(path)})
+					nextFrontier = append(nextFrontier, path)
+				}
+			}
+		}
+		frontier = nextFrontier
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].hop != results[j].hop {
+			return results[i].hop < results[j].hop
+		}
+		return results[i].path < results[j].path
+	})
+
+	if len(results) == 0 {
+		fmt.Printf("No downstream impact found for %s\n", filePath)
+		return nil
+	}
+
+	// Separate source and test files
+	var sourceFiles, testFiles []impactEntry
+	for _, r := range results {
+		if r.isTest {
+			testFiles = append(testFiles, r)
+		} else {
+			sourceFiles = append(sourceFiles, r)
+		}
+	}
+
+	fmt.Printf("%d files affected by changes to %s:\n", len(results), filePath)
+	if len(sourceFiles) > 0 {
+		fmt.Println("\n  Source files:")
+		for _, r := range sourceFiles {
+			fmt.Printf("    [hop %d] %s\n", r.hop, r.path)
+		}
+	}
+	if len(testFiles) > 0 {
+		fmt.Println("\n  Tests:")
+		for _, r := range testFiles {
+			fmt.Printf("    [hop %d] %s\n", r.hop, r.path)
+		}
+	}
+	return nil
+}
+
+// isTestFileCLI checks if a file path looks like a test file.
+func isTestFileCLI(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, "_test.") ||
+		strings.Contains(lower, ".test.") ||
+		strings.Contains(lower, ".spec.") ||
+		strings.Contains(lower, "test_") ||
+		strings.HasPrefix(lower, "tests/") ||
+		strings.HasPrefix(lower, "test/") ||
+		strings.Contains(lower, "__tests__/") ||
+		strings.Contains(lower, "/tests/") ||
+		strings.Contains(lower, "/test/")
 }
 
 func runTestAffected(cmd *cobra.Command, args []string) error {

@@ -30,6 +30,7 @@ brew install kailayerhq/kai/kai
 kai init
 kai capture
 kai diff                    # semantic change impact
+kai query impact src/user.ts  # transitive downstream impact
 kai ci plan                 # minimal test selection
 ```
 

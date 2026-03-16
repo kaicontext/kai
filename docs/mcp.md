@@ -104,6 +104,18 @@ No setup required before using the MCP server. When `kai mcp serve` starts:
 
 This means you can register the MCP server and start using it immediately — even in a fresh clone.
 
+## CLI Equivalents
+
+The most common MCP queries are also available as CLI commands for debugging and scripting:
+
+```bash
+kai query callers getUser                 # same as kai_callers
+kai query dependents services/user.ts     # same as kai_dependents
+kai query impact shared/types/user.ts     # same as kai_impact
+```
+
+See [cli-reference.md](cli-reference.md) for full documentation.
+
 ## Troubleshooting
 
 ### "kai: command not found"
