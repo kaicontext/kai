@@ -16,9 +16,7 @@ jobs:
         run: apk add --no-cache gcc musl-dev
       - name: Run tests
         run: |
-          export GONOSUMCHECK="*" GONOSUMDB="*" GOFLAGS="-mod=mod"
           cd kai-cli
-          go mod download
           CGO_ENABLED=1 go test -timeout 5m -run '!TestRunCompletion' ./...
 
   test-kai-core:
@@ -31,9 +29,7 @@ jobs:
         run: apk add --no-cache gcc musl-dev
       - name: Run tests
         run: |
-          export GONOSUMCHECK="*" GONOSUMDB="*" GOFLAGS="-mod=mod"
           cd kai-core
-          go mod download
           CGO_ENABLED=1 go test ./...
 
   correctness:
@@ -46,17 +42,13 @@ jobs:
         run: apk add --no-cache gcc musl-dev git sqlite
       - name: Run correctness test suite
         run: |
-          export GONOSUMCHECK="*" GONOSUMDB="*" GOFLAGS="-mod=mod"
           cd kai-cli
-          go mod download
           CGO_ENABLED=1 go test ./cmd/kai/ \
             -run "TestGraph_|TestSelection_|TestFalseNeg_|TestShadow_|TestFlaky_|TestCLI_|TestPerf_" \
             -v -count=1 -timeout 120s
       - name: Determinism check
         run: |
-          export GONOSUMCHECK="*" GONOSUMDB="*" GOFLAGS="-mod=mod"
           cd kai-cli
-          go mod download
           CGO_ENABLED=1 go build -o /tmp/kai ./cmd/kai
           mkdir -p /tmp/fixture/src /tmp/fixture/tests
           printf 'export function add(a: number, b: number) { return a + b; }' > /tmp/fixture/src/utils.ts
