@@ -580,6 +580,10 @@ var (
 	ciCommentRepo   string
 	ciCommentPR     int
 	ciCommentDryRun bool
+
+	// Remote CI flags
+	ciRunsLimit int
+	ciLogsJob   string
 )
 
 var changesetCmd = &cobra.Command{
@@ -2190,6 +2194,17 @@ func init() {
 	ciCmd.AddCommand(ciCommentCmd)
 	ciCommentCmd.Flags().StringVar(&ciCommentReport, "report", "", "Path to shadow report JSON")
 	ciCommentCmd.Flags().StringVar(&ciCommentToken, "token", "", "GitHub API token (default: $GITHUB_TOKEN)")
+
+	// Remote CI commands (per protocol spec docs/protocol.md section 3)
+	ciCmd.AddCommand(ciRunsCmd)
+	ciCmd.AddCommand(ciRunCmd)
+	ciCmd.AddCommand(ciLogsCmd)
+	ciCmd.AddCommand(ciCancelCmd)
+	ciCmd.AddCommand(ciRerunCmd)
+	ciCmd.AddCommand(ciSecretsCmd)
+	ciCmd.AddCommand(ciSecretSetCmd)
+	ciRunsCmd.Flags().IntVar(&ciRunsLimit, "limit", 10, "Number of runs to show")
+	ciLogsCmd.Flags().StringVar(&ciLogsJob, "job", "", "Job name (default: first failed or first job)")
 	ciCommentCmd.Flags().StringVar(&ciCommentRepo, "repo", "", "GitHub repo owner/name (default: $GITHUB_REPOSITORY)")
 	ciCommentCmd.Flags().IntVar(&ciCommentPR, "pr", 0, "PR number (default: auto-detect from $GITHUB_EVENT_PATH)")
 	ciCommentCmd.Flags().BoolVar(&ciCommentDryRun, "dry-run", false, "Print comment to stdout instead of posting")
@@ -16374,5 +16389,282 @@ func runShadowRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("shadow run verdict: missed (%d false negatives)", metrics.FalseNegatives)
 	}
 
+	return nil
+}
+
+// --- Remote CI Commands (protocol spec section 3) ---
+
+var ciRunsCmd = &cobra.Command{
+	Use:   "runs",
+	Short: "List CI runs from the remote server",
+	RunE:  runCIRuns,
+}
+
+var ciRunCmd = &cobra.Command{
+	Use:   "run <run-id-or-number>",
+	Short: "Show CI run details with job status",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCIRun,
+}
+
+var ciLogsCmd = &cobra.Command{
+	Use:   "logs <run-id-or-number>",
+	Short: "Show logs for a CI run",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCILogs,
+}
+
+var ciCancelCmd = &cobra.Command{
+	Use:   "cancel <run-id>",
+	Short: "Cancel a CI run",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCICancel,
+}
+
+var ciRerunCmd = &cobra.Command{
+	Use:   "rerun <run-id>",
+	Short: "Re-run a CI workflow",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runCIRerun,
+}
+
+var ciSecretsCmd = &cobra.Command{
+	Use:   "secrets",
+	Short: "List CI secrets",
+	RunE:  runCISecrets,
+}
+
+var ciSecretSetCmd = &cobra.Command{
+	Use:   "secret-set <name> <value>",
+	Short: "Set a CI secret",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runCISecretSet,
+}
+
+func getRemoteOrgRepo() (string, string, string, error) {
+	r, err := remote.GetRemote("origin")
+	if err != nil {
+		return "", "", "", fmt.Errorf("no remote configured (use 'kai remote set origin <url>')")
+	}
+	return r.URL, r.Tenant, r.Repo, nil
+}
+
+func resolveRunID(client *remote.ControlClient, org, repo, input string) string {
+	if _, err := strconv.Atoi(input); err == nil {
+		runs, _, err := client.ListCIRuns(org, repo, 100)
+		if err == nil {
+			num, _ := strconv.Atoi(input)
+			for _, r := range runs {
+				if r.RunNumber == num {
+					return r.ID
+				}
+			}
+		}
+	}
+	return input
+}
+
+func runCIRuns(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	runs, total, err := client.ListCIRuns(org, repo, ciRunsLimit)
+	if err != nil {
+		return fmt.Errorf("listing runs: %w", err)
+	}
+	if len(runs) == 0 {
+		fmt.Println("No CI runs.")
+		return nil
+	}
+	fmt.Printf("Showing %d of %d runs for %s/%s\n\n", len(runs), total, org, repo)
+	for _, r := range runs {
+		icon := "○"
+		switch {
+		case r.Status == "completed" && r.Conclusion == "success":
+			icon = "✓"
+		case r.Status == "completed" && r.Conclusion == "failure":
+			icon = "✕"
+		case r.Status == "in_progress":
+			icon = "●"
+		case r.Status == "queued":
+			icon = "◦"
+		}
+		ref := r.TriggerRef
+		if strings.HasPrefix(ref, "refs/heads/") {
+			ref = strings.TrimPrefix(ref, "refs/heads/")
+		}
+		sha := ""
+		if len(r.TriggerSHA) >= 7 {
+			sha = r.TriggerSHA[:7]
+		}
+		status := r.Status
+		if r.Conclusion != "" {
+			status = r.Conclusion
+		}
+		fmt.Printf("%s #%-4d %-12s %-10s %s %s\n", icon, r.RunNumber, r.WorkflowName, status, ref, sha)
+	}
+	return nil
+}
+
+func runCIRun(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	runID := resolveRunID(client, org, repo, args[0])
+	run, err := client.GetCIRun(org, repo, runID)
+	if err != nil {
+		return fmt.Errorf("getting run: %w", err)
+	}
+	status := run.Status
+	if run.Conclusion != "" {
+		status = run.Conclusion
+	}
+	fmt.Printf("%s #%d  %s\n", run.WorkflowName, run.RunNumber, status)
+	fmt.Printf("  trigger: %s on %s\n", run.TriggerEvent, run.TriggerRef)
+	if len(run.TriggerSHA) >= 12 {
+		fmt.Printf("  sha:     %s\n", run.TriggerSHA[:12])
+	}
+	fmt.Println()
+	jobs, err := client.ListCIJobs(org, repo, runID)
+	if err != nil {
+		return fmt.Errorf("listing jobs: %w", err)
+	}
+	for _, j := range jobs {
+		icon := "○"
+		switch {
+		case j.Conclusion == "success":
+			icon = "✓"
+		case j.Conclusion == "failure":
+			icon = "✕"
+		case j.Status == "in_progress":
+			icon = "●"
+		}
+		jStatus := j.Status
+		if j.Conclusion != "" {
+			jStatus = j.Conclusion
+		}
+		fmt.Printf("  %s %-25s %s\n", icon, j.Name, jStatus)
+		for _, s := range j.Steps {
+			sIcon := "○"
+			switch {
+			case s.Conclusion == "success":
+				sIcon = "✓"
+			case s.Conclusion == "failure":
+				sIcon = "✕"
+			}
+			exitStr := ""
+			if s.ExitCode != nil && *s.ExitCode != 0 {
+				exitStr = fmt.Sprintf(" (exit %d)", *s.ExitCode)
+			}
+			fmt.Printf("    %s %s%s\n", sIcon, s.Name, exitStr)
+		}
+	}
+	return nil
+}
+
+func runCILogs(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	runID := resolveRunID(client, org, repo, args[0])
+	jobs, err := client.ListCIJobs(org, repo, runID)
+	if err != nil {
+		return fmt.Errorf("listing jobs: %w", err)
+	}
+	var targetJob *remote.CIJob
+	if ciLogsJob != "" {
+		for i, j := range jobs {
+			if j.Name == ciLogsJob {
+				targetJob = &jobs[i]
+				break
+			}
+		}
+		if targetJob == nil {
+			return fmt.Errorf("job %q not found", ciLogsJob)
+		}
+	} else {
+		for i, j := range jobs {
+			if j.Conclusion == "failure" {
+				targetJob = &jobs[i]
+				break
+			}
+		}
+		if targetJob == nil && len(jobs) > 0 {
+			targetJob = &jobs[0]
+		}
+	}
+	if targetJob == nil {
+		return fmt.Errorf("no jobs found")
+	}
+	fmt.Printf("=== %s ===\n\n", targetJob.Name)
+	logs, err := client.GetCILogs(org, repo, runID, targetJob.ID)
+	if err != nil {
+		return fmt.Errorf("getting logs: %w", err)
+	}
+	for _, entry := range logs {
+		fmt.Print(entry.Content)
+	}
+	return nil
+}
+
+func runCICancel(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	return client.CancelCIRun(org, repo, args[0])
+}
+
+func runCIRerun(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	newID, err := client.RerunCI(org, repo, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Re-run created: %s\n", newID)
+	return nil
+}
+
+func runCISecrets(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	names, err := client.ListCISecrets(org, repo)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		fmt.Println("No secrets configured.")
+		return nil
+	}
+	for _, n := range names {
+		fmt.Printf("  %s\n", n)
+	}
+	return nil
+}
+
+func runCISecretSet(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	if err := client.SetCISecret(org, repo, args[0], args[1]); err != nil {
+		return err
+	}
+	fmt.Printf("Secret %s set.\n", args[0])
 	return nil
 }

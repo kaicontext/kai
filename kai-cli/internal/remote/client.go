@@ -1176,3 +1176,203 @@ func (c *ControlClient) CreateRepo(orgSlug, name, visibility string) (*RepoInfo,
 
 	return &result, nil
 }
+
+// --- CI Protocol (per docs/protocol.md section 3) ---
+
+// CIRun represents a workflow run from the remote server.
+type CIRun struct {
+	ID           string `json:"id"`
+	RunNumber    int    `json:"run_number"`
+	WorkflowName string `json:"workflow_name"`
+	TriggerEvent string `json:"trigger_event"`
+	TriggerRef   string `json:"trigger_ref"`
+	TriggerSHA   string `json:"trigger_sha"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	CreatedAt    string `json:"created_at"`
+	StartedAt    string `json:"started_at"`
+	CompletedAt  string `json:"completed_at"`
+}
+
+// CIJob represents a job within a run.
+type CIJob struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Status      string   `json:"status"`
+	Conclusion  string   `json:"conclusion"`
+	ExitCode    *int     `json:"exit_code,omitempty"`
+	StartedAt   string   `json:"started_at"`
+	CompletedAt string   `json:"completed_at"`
+	Steps       []CIStep `json:"steps,omitempty"`
+}
+
+// CIStep represents a step within a job.
+type CIStep struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+}
+
+// CILogEntry represents a log chunk.
+type CILogEntry struct {
+	Content  string `json:"content"`
+	ChunkSeq int   `json:"chunk_seq"`
+}
+
+func (c *ControlClient) ciGet(path string) ([]byte, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func (c *ControlClient) ciPost(path string) ([]byte, error) {
+	req, err := http.NewRequest("POST", c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// ListCIRuns lists workflow runs for a repo.
+func (c *ControlClient) ListCIRuns(org, repo string, limit int) ([]CIRun, int, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs?limit=%d", org, repo, limit))
+	if err != nil {
+		return nil, 0, err
+	}
+	var result struct {
+		Runs  []CIRun `json:"runs"`
+		Total int     `json:"total"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, 0, err
+	}
+	return result.Runs, result.Total, nil
+}
+
+// GetCIRun gets a single workflow run.
+func (c *ControlClient) GetCIRun(org, repo, runID string) (*CIRun, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s", org, repo, runID))
+	if err != nil {
+		return nil, err
+	}
+	var run CIRun
+	if err := json.Unmarshal(data, &run); err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+// ListCIJobs lists jobs for a run.
+func (c *ControlClient) ListCIJobs(org, repo, runID string) ([]CIJob, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/jobs", org, repo, runID))
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Jobs []CIJob `json:"jobs"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result.Jobs, nil
+}
+
+// GetCILogs gets logs for a job.
+func (c *ControlClient) GetCILogs(org, repo, runID, jobID string) ([]CILogEntry, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/jobs/%s/logs", org, repo, runID, jobID))
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Logs []CILogEntry `json:"logs"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result.Logs, nil
+}
+
+// CancelCIRun cancels a workflow run.
+func (c *ControlClient) CancelCIRun(org, repo, runID string) error {
+	_, err := c.ciPost(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/cancel", org, repo, runID))
+	return err
+}
+
+// RerunCI re-runs a workflow run.
+func (c *ControlClient) RerunCI(org, repo, runID string) (string, error) {
+	data, err := c.ciPost(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/rerun", org, repo, runID))
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(data, &result)
+	return result.ID, nil
+}
+
+// SetCISecret sets a CI secret.
+func (c *ControlClient) SetCISecret(org, repo, name, value string) error {
+	body, _ := json.Marshal(map[string]string{"value": value})
+	req, err := http.NewRequest("PUT", c.BaseURL+fmt.Sprintf("/api/v1/orgs/%s/repos/%s/secrets/%s", org, repo, name), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ListCISecrets lists CI secret names.
+func (c *ControlClient) ListCISecrets(org, repo string) ([]string, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/secrets", org, repo))
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Secrets []struct {
+			Name string `json:"name"`
+		} `json:"secrets"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	names := make([]string, len(result.Secrets))
+	for i, s := range result.Secrets {
+		names[i] = s.Name
+	}
+	return names, nil
+}
