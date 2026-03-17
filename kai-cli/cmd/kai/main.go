@@ -11099,12 +11099,16 @@ func runPush(cmd *cobra.Command, args []string) error {
 	debugf("Pushing to %s (%s)...", remoteName, client.BaseURL)
 	fmt.Fprintf(os.Stderr, "\rPushing to %s... negotiating", remoteName)
 
-	// Skip negotiate for small pushes (< 100 objects) - just send everything
+	// Skip negotiate for small pushes (< 100 objects) or force pushes
 	// Server will dedupe on ingest. This saves a round-trip.
 	const negotiateThreshold = 100
 	var missing [][]byte
 
-	if len(allDigests) >= negotiateThreshold {
+	if pushForce {
+		// Force push: skip negotiate, send everything
+		debugf("Force push: skipping negotiate, sending all %d objects", len(allDigests))
+		missing = allDigests
+	} else if len(allDigests) >= negotiateThreshold {
 		// Negotiate for larger pushes
 		var err error
 		missing, err = client.Negotiate(allDigests)
