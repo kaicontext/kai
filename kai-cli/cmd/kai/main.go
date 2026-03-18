@@ -10733,6 +10733,11 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Get latest git commit message for CI context
+	if gitMsg, err := exec.Command("git", "log", "-1", "--format=%s").Output(); err == nil {
+		client.Message = strings.TrimSpace(string(gitMsg))
+	}
+
 	// Check server health
 	debugf("push: connecting to %s", client.BaseURL)
 	if err := client.Health(); err != nil {

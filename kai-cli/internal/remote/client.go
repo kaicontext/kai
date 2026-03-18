@@ -31,6 +31,7 @@ type Client struct {
 	HTTPClient *http.Client
 	Actor      string
 	AuthToken  string
+	Message    string // Optional push message (e.g., git commit message)
 }
 
 // NewClient creates a new Kailab client.
@@ -276,6 +277,9 @@ func (c *Client) BatchUpdateRefs(updates []BatchRefUpdate) (*BatchRefUpdateRespo
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.Message != "" {
+		httpReq.Header.Set("X-Kailab-Message", c.Message)
+	}
 	if c.AuthToken != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
 	}
