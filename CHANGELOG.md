@@ -2,6 +2,48 @@
 
 All notable changes to Kai are documented here.
 
+## [0.9.11] — 2026-03-18
+
+### CLI
+- **`kai capture -m`** — attach a message to a snapshot, shown as the CI run headline on push
+- **`kai fetch --review`** — syncs review comments from the server to the local CLI
+- **Push sends git commit message** — `kai push` includes the latest git HEAD message via `X-Kailab-Message` header, used as CI trigger message. Falls back to changeset intent.
+- **Review fetch handles duplicates** — re-fetching an existing review syncs comments without erroring
+
+### Reviews (kailayer.com)
+- **Comments fixed** — review comments now work end-to-end (SQLite→Postgres migration: repo_id scoping, placeholder syntax, NOT NULL edge constraint)
+- **Review page UX** — relative timestamps ("2h ago"), singular/plural grammar fix ("1 file changed"), Merge/Abandon buttons separated with confirmation dialogs, clearer Semantic/Lines toggle active state
+- **GetObject API fix** — returns raw content with `X-Kailab-Kind` header for CLI compatibility
+
+### CI
+- **Commit messages as run headlines** — CI runs show the git commit message or `kai capture -m` message instead of generic "CI"
+- **30-minute default timeouts** — job and step timeouts reduced from 6 hours to 30 minutes (overridable via `timeout-minutes` in workflow YAML)
+- **Checkout reliability** — HTTP status checks, 3x retry with backoff, concurrency reduced from 20 to 10 parallel downloads
+- **SSE fixes** — fixed `/events` 500 (Flusher passthrough on response wrapper), EventSource cleanup on tab navigation
+- **Auto-scroll logs** — log viewer scrolls to bottom on new output
+
+### File View (kailayer.com)
+- **File search** — fuzzy filter above the tree with auto-expand on matching directories
+- **Type-specific icons** — Go, Markdown, YAML/JSON, Shell files get distinct icons
+- **IDE layout** — fixed-height container with independent panel scrolling (tree + content)
+- **Better indentation** — 20px per nesting level
+- **Loading fix** — no more flash of "No files in this snapshot" while loading
+
+### Header (kailayer.com)
+- **Logo mark** — favicon icon next to "Kai" wordmark
+- **Refined spacing** — smaller wordmark (18px), consistent 24px nav gaps, `text-sm` nav items
+- **Soft shadow** — `box-shadow` instead of hard 1px border
+- **Desaturated avatar** — muted gray tint instead of saturated blue
+
+### Infrastructure
+- **GCS blob storage** — segments stored inline in Postgres + GCS with range reads for fast file access. Always stores inline as safety net; GCS write is best-effort.
+- **Postgres upgraded** — `db-custom-1-3840` (1 vCPU, 3.75GB RAM), max connections raised to 200
+- **Connection pool fix** — `SetMaxOpenConns(10)` on both data plane and control plane to prevent pool exhaustion
+
+### Other
+- **README links** — SPA navigation for internal links in rendered markdown
+- **`kai push --force`** — skips negotiate for data recovery (re-sends all objects)
+
 ## [0.9.10] — 2026-03-16
 
 ### CLI
