@@ -13705,6 +13705,31 @@ func fetchReviewFromRemote(db *graph.DB, client *remote.Client, remoteName, revi
 	title, _ := reviewPayload["title"].(string)
 	fmt.Printf("  Created review: %s (%s)\n", hex.EncodeToString(revID)[:12], title)
 	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(reviewRef.Target)[:12])
+
+	// Fetch comments from the server
+	commentsResp, err := client.GetReviewComments(reviewID)
+	if err == nil && len(commentsResp) > 0 {
+		fmt.Printf("  Fetching %d comment(s)...\n", len(commentsResp))
+		mgr := review.NewManager(db)
+		for _, c := range commentsResp {
+			body, _ := c["body"].(string)
+			author, _ := c["author"].(string)
+			parentID, _ := c["parentId"].(string)
+			if body == "" {
+				continue
+			}
+			var anchor *review.CommentAnchor
+			if fp, ok := c["filePath"].(string); ok && fp != "" {
+				line, _ := c["line"].(float64)
+				anchor = &review.CommentAnchor{FilePath: fp, Line: int(line)}
+			}
+			_, err := mgr.AddComment(revID, author, body, parentID, anchor)
+			if err != nil {
+				debugf("warning: failed to add comment: %v", err)
+			}
+		}
+	}
+
 	fmt.Println("Fetch complete.")
 	return nil
 }

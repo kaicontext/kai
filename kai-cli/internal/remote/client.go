@@ -381,6 +381,27 @@ func (c *Client) GetObject(digest []byte) ([]byte, string, error) {
 	return content, kind, nil
 }
 
+// GetReviewComments fetches comments for a review from the server.
+func (c *Client) GetReviewComments(reviewID string) ([]map[string]interface{}, error) {
+	resp, err := c.get(c.repoPath() + "/v1/reviews/" + reviewID + "/comments")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result struct {
+		Comments []map[string]interface{} `json:"comments"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Comments, nil
+}
+
 // SnapshotFile represents a file in a remote snapshot.
 type SnapshotFile struct {
 	Path          string `json:"path"`
