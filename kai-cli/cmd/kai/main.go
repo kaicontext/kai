@@ -13672,40 +13672,44 @@ func fetchReviewFromRemote(db *graph.DB, client *remote.Client, remoteName, revi
 		}
 	}
 
-	// Insert review node
+	// Insert or update review node
+	reviewExists := false
 	if err := db.InsertReview(tx, revID, reviewPayload); err != nil {
-		return fmt.Errorf("inserting review: %w", err)
-	}
-
-	// Create REVIEW_OF edge to target
-	if targetHex, ok := reviewPayload["targetId"].(string); ok && targetHex != "" {
-		if targetID, err := util.HexToBytes(targetHex); err == nil {
-			if err := db.InsertEdge(tx, revID, graph.EdgeReviewOf, targetID, nil); err != nil {
-				fmt.Printf("  Warning: failed to insert REVIEW_OF edge: %v\n", err)
+		// Review already exists locally
+		tx.Rollback()
+		reviewExists = true
+		fmt.Printf("  Review exists locally, syncing comments...\n")
+	} else {
+		// Create REVIEW_OF edge to target
+		if targetHex, ok := reviewPayload["targetId"].(string); ok && targetHex != "" {
+			if targetID, err := util.HexToBytes(targetHex); err == nil {
+				if err := db.InsertEdge(tx, revID, graph.EdgeReviewOf, targetID, nil); err != nil {
+					fmt.Printf("  Warning: failed to insert REVIEW_OF edge: %v\n", err)
+				}
 			}
 		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("committing transaction: %w", err)
+		}
+
+		// Create local review ref
+		refMgr := ref.NewRefManager(db)
+		if err := refMgr.Set(refName, reviewRef.Target, ref.KindReview); err != nil {
+			return fmt.Errorf("setting local ref: %w", err)
+		}
+
+		// Also store remote tracking ref
+		remoteRefName := fmt.Sprintf("remote/%s/%s", remoteName, refName)
+		if err := refMgr.Set(remoteRefName, reviewRef.Target, ref.KindReview); err != nil {
+			fmt.Printf("  Warning: failed to set remote tracking ref: %v\n", err)
+		}
+
+		title, _ := reviewPayload["title"].(string)
+		fmt.Printf("  Created review: %s (%s)\n", hex.EncodeToString(revID)[:12], title)
+		fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(reviewRef.Target)[:12])
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-
-	// Create local review ref
-	refMgr := ref.NewRefManager(db)
-	if err := refMgr.Set(refName, reviewRef.Target, ref.KindReview); err != nil {
-		return fmt.Errorf("setting local ref: %w", err)
-	}
-
-	// Also store remote tracking ref
-	remoteRefName := fmt.Sprintf("remote/%s/%s", remoteName, refName)
-	if err := refMgr.Set(remoteRefName, reviewRef.Target, ref.KindReview); err != nil {
-		fmt.Printf("  Warning: failed to set remote tracking ref: %v\n", err)
-	}
-
-	title, _ := reviewPayload["title"].(string)
-	fmt.Printf("  Created review: %s (%s)\n", hex.EncodeToString(revID)[:12], title)
-	fmt.Printf("  %s -> %s\n", refName, hex.EncodeToString(reviewRef.Target)[:12])
-
+	_ = reviewExists
 	// Fetch comments from the server
 	commentsResp, err := client.GetReviewComments(reviewID)
 	if err == nil && len(commentsResp) > 0 {
