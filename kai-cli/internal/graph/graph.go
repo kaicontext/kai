@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -104,7 +105,76 @@ func (db *DB) ApplySchema(schemaPath string) error {
 		return fmt.Errorf("applying schema: %w", err)
 	}
 
+	// Run migrations
+	db.migrateEdgesPK()
+
 	return nil
+}
+
+// migrateEdgesPK fixes the edges table PK from (src,type,dst,at) to (src,type,dst).
+// The old PK included nullable `at`, and SQLite treats each NULL as unique,
+// causing unbounded edge accumulation on every capture.
+func (db *DB) migrateEdgesPK() {
+	// Check if migration is needed by looking for duplicate (src,type,dst) tuples
+	var dupeCount int
+	err := db.conn.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT src, type, dst FROM edges GROUP BY src, type, dst HAVING COUNT(*) > 1 LIMIT 1
+		)
+	`).Scan(&dupeCount)
+	if err != nil || dupeCount == 0 {
+		return // no dupes or error — skip migration
+	}
+
+	log.Printf("Migrating edges table: deduplicating...")
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	// Create new table with correct PK
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS edges_new (
+			src BLOB NOT NULL,
+			type TEXT NOT NULL,
+			dst BLOB NOT NULL,
+			at BLOB,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (src, type, dst)
+		)
+	`)
+	if err != nil {
+		return
+	}
+
+	// Copy deduplicated rows (keep the one with the latest created_at)
+	_, err = tx.Exec(`
+		INSERT OR IGNORE INTO edges_new (src, type, dst, at, created_at)
+		SELECT src, type, dst, at, MAX(created_at)
+		FROM edges
+		GROUP BY src, type, dst
+	`)
+	if err != nil {
+		return
+	}
+
+	// Swap tables
+	tx.Exec(`DROP TABLE edges`)
+	tx.Exec(`ALTER TABLE edges_new RENAME TO edges`)
+
+	// Recreate indexes
+	tx.Exec(`CREATE INDEX IF NOT EXISTS edges_src ON edges(src)`)
+	tx.Exec(`CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst)`)
+	tx.Exec(`CREATE INDEX IF NOT EXISTS edges_type ON edges(type)`)
+	tx.Exec(`CREATE INDEX IF NOT EXISTS edges_at ON edges(at)`)
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Edge migration failed: %v", err)
+		return
+	}
+	log.Printf("Edge migration complete: deduplicated edges table")
 }
 
 // BeginTx starts a new transaction.
@@ -280,7 +350,7 @@ func (db *DB) GetNodesByKind(kind NodeKind) ([]*Node, error) {
 // GetEdges retrieves edges from a source node.
 func (db *DB) GetEdges(src []byte, edgeType EdgeType) ([]*Edge, error) {
 	rows, err := db.conn.Query(`
-		SELECT dst, at, created_at FROM edges WHERE src = ? AND type = ?
+		SELECT DISTINCT dst, at, created_at FROM edges WHERE src = ? AND type = ?
 	`, src, string(edgeType))
 	if err != nil {
 		return nil, fmt.Errorf("querying edges: %w", err)
@@ -689,7 +759,7 @@ func (db *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
 // GetEdgesTo retrieves edges pointing to a destination node.
 func (db *DB) GetEdgesTo(dst []byte, edgeType EdgeType) ([]*Edge, error) {
 	rows, err := db.conn.Query(`
-		SELECT src, at, created_at FROM edges WHERE dst = ? AND type = ?
+		SELECT DISTINCT src, at, created_at FROM edges WHERE dst = ? AND type = ?
 	`, dst, string(edgeType))
 	if err != nil {
 		return nil, fmt.Errorf("querying edges: %w", err)

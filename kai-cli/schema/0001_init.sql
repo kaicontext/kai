@@ -12,9 +12,9 @@ CREATE TABLE IF NOT EXISTS edges (
   src BLOB NOT NULL,
   type TEXT NOT NULL,          -- CONTAINS | DEFINES_IN | HAS_FILE | MODIFIES | HAS | AFFECTS
   dst BLOB NOT NULL,
-  at  BLOB,                    -- snapshot or changeset context
+  at  BLOB,                    -- snapshot or changeset context (metadata, not in PK)
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (src, type, dst, at)
+  PRIMARY KEY (src, type, dst)
 );
 
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
