@@ -1639,7 +1639,8 @@ var (
 	snapshotGitRef  string // explicit git ref for disambiguation
 
 	// Capture flags
-	captureExplain bool
+	captureExplain  bool
+	captureMessage  string
 
 	// Global explain flag
 	explainFlag bool
@@ -1921,6 +1922,7 @@ func init() {
 
 	// Capture command flags
 	captureCmd.Flags().BoolVar(&captureExplain, "explain", false, "Show detailed explanation of what this command does")
+	captureCmd.Flags().StringVarP(&captureMessage, "message", "m", "", "Capture message (shown as CI run headline)")
 	intentRenderCmd.Flags().StringVar(&editText, "edit", "", "Set the intent text directly")
 	intentRenderCmd.Flags().BoolVar(&regenerateIntent, "regenerate", false, "Force regenerate intent (ignore saved)")
 	intentRenderCmd.Flags().BoolVar(&showAlternatives, "show-alternatives", false, "Show alternative intent suggestions")
@@ -3111,6 +3113,13 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		} else {
 			debugf("changeset created")
 		}
+	}
+
+	// Save capture message for push (like git stores commit message)
+	if captureMessage != "" {
+		kaiDir := filepath.Join(capturePath, ".kai")
+		os.MkdirAll(kaiDir, 0755)
+		os.WriteFile(filepath.Join(kaiDir, "message"), []byte(captureMessage), 0644)
 	}
 
 	// Summary — quiet by default, verbose for details
@@ -10733,8 +10742,11 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Get latest git commit message for CI context
-	if gitMsg, err := exec.Command("git", "log", "-1", "--format=%s").Output(); err == nil {
+	// Get push message: prefer kai capture -m, fall back to git commit message
+	if msgBytes, err := os.ReadFile(".kai/message"); err == nil && len(msgBytes) > 0 {
+		client.Message = strings.TrimSpace(string(msgBytes))
+		os.Remove(".kai/message") // consumed
+	} else if gitMsg, err := exec.Command("git", "log", "-1", "--format=%s").Output(); err == nil {
 		client.Message = strings.TrimSpace(string(gitMsg))
 	}
 
