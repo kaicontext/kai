@@ -3010,56 +3010,65 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		te.Stats["modules"] = int64(moduleCount)
 	}
 
-	// Step 2: Analyze symbols
-	debugf("Step 2/3: Analyzing symbols...")
-	phaseStart = time.Now()
-	progress := func(current, total int, filename string) {
-		display := filename
-		if len(display) > 40 {
-			display = "..." + display[len(display)-37:]
-		}
-		if verbose {
-			debugf("Analyzing... %d/%d %s", current, total, display)
-		} else {
-			fmt.Fprintf(os.Stderr, "\rAnalyzing symbols... %d/%d", current, total)
-		}
-	}
-	if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-		debugf("Analyzing symbols: warning: some files failed")
-		fmt.Fprintf(os.Stderr, "  %v\n", err)
-	} else {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-		debugf("Analyzing symbols: done")
-	}
-	if te != nil {
-		te.SetPhase("symbols", time.Since(phaseStart).Milliseconds())
-	}
+	// Check if snapshot is identical to previous — skip analysis if nothing changed.
+	// Snapshot IDs are content-addressed, so same ID = same files = same symbols/graph.
+	existingLatestRef, _ := ref.NewRefManager(db).Get("snap.latest")
+	skipAnalysis := existingLatestRef != nil && bytes.Equal(snapshotID, existingLatestRef.TargetID)
 
-	// Step 3: Analyze calls (build call graph)
-	debugf("Step 3/3: Building call graph...")
-	phaseStart = time.Now()
-	callProgress := func(current, total int, filename string) {
-		display := filename
-		if len(display) > 40 {
-			display = "..." + display[len(display)-37:]
-		}
-		if verbose {
-			debugf("Building graph... %d/%d %s", current, total, display)
-		} else {
-			fmt.Fprintf(os.Stderr, "\rBuilding graph... %d/%d", current, total)
-		}
-	}
-	if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-		debugf("Building call graph: warning: some files failed")
-		fmt.Fprintf(os.Stderr, "  %v\n", err)
+	if skipAnalysis {
+		debugf("Snapshot unchanged, skipping analysis")
 	} else {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-		debugf("Building call graph: done")
-	}
-	if te != nil {
-		te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
+		// Step 2: Analyze symbols
+		debugf("Step 2/3: Analyzing symbols...")
+		phaseStart = time.Now()
+		progress := func(current, total int, filename string) {
+			display := filename
+			if len(display) > 40 {
+				display = "..." + display[len(display)-37:]
+			}
+			if verbose {
+				debugf("Analyzing... %d/%d %s", current, total, display)
+			} else {
+				fmt.Fprintf(os.Stderr, "\rAnalyzing symbols... %d/%d", current, total)
+			}
+		}
+		if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
+			fmt.Fprintf(os.Stderr, "\r\033[K")
+			debugf("Analyzing symbols: warning: some files failed")
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "\r\033[K")
+			debugf("Analyzing symbols: done")
+		}
+		if te != nil {
+			te.SetPhase("symbols", time.Since(phaseStart).Milliseconds())
+		}
+
+		// Step 3: Analyze calls (build call graph)
+		debugf("Step 3/3: Building call graph...")
+		phaseStart = time.Now()
+		callProgress := func(current, total int, filename string) {
+			display := filename
+			if len(display) > 40 {
+				display = "..." + display[len(display)-37:]
+			}
+			if verbose {
+				debugf("Building graph... %d/%d %s", current, total, display)
+			} else {
+				fmt.Fprintf(os.Stderr, "\rBuilding graph... %d/%d", current, total)
+			}
+		}
+		if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
+			fmt.Fprintf(os.Stderr, "\r\033[K")
+			debugf("Building call graph: warning: some files failed")
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "\r\033[K")
+			debugf("Building call graph: done")
+		}
+		if te != nil {
+			te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
+		}
 	}
 
 	// Check if this is the first scan (no snap.latest ref exists)
