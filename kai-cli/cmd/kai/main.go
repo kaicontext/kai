@@ -2982,6 +2982,21 @@ CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
 				fmt.Println("    Kai will auto-capture after each git commit.")
 			}
 		}
+
+		// Detect GitHub/GitLab and offer CI sync config
+		ciPlatform := detectCIPlatform()
+		if ciPlatform != "" {
+			fmt.Println()
+			fmt.Printf("  %s detected.\n", ciPlatform)
+			fmt.Printf("  Add CI workflow to auto-sync Kai on push? [y/N]: ")
+			input, _ = reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "y" || input == "yes" {
+				if err := generateCIConfig(ciPlatform); err != nil {
+					fmt.Printf("  Warning: CI config generation failed: %v\n", err)
+				}
+			}
+		}
 	}
 
 	return nil
@@ -3065,6 +3080,130 @@ func runGitImport(db *graph.DB) error {
 	fmt.Printf("  ✓ Imported %d commits as snapshots\n", len(commits))
 	fmt.Println("  Run 'kai capture' to add full semantic analysis to the current snapshot.")
 
+	return nil
+}
+
+// detectCIPlatform checks the git remote URL to determine GitHub vs GitLab.
+func detectCIPlatform() string {
+	out, err := exec.Command("git", "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(string(out))
+	if strings.Contains(url, "github.com") {
+		return "GitHub"
+	}
+	if strings.Contains(url, "gitlab") {
+		return "GitLab"
+	}
+	return ""
+}
+
+// generateCIConfig creates a CI workflow file for GitHub Actions or GitLab CI.
+func generateCIConfig(platform string) error {
+	switch platform {
+	case "GitHub":
+		return generateGitHubActions()
+	case "GitLab":
+		return generateGitLabCI()
+	default:
+		return fmt.Errorf("unsupported platform: %s", platform)
+	}
+}
+
+func generateGitHubActions() error {
+	dir := ".github/workflows"
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	path := filepath.Join(dir, "kai-sync.yml")
+	if _, err := os.Stat(path); err == nil {
+		fmt.Println("  .github/workflows/kai-sync.yml already exists, skipping.")
+		return nil
+	}
+
+	config := `# Kai Sync — keeps semantic graph up to date on every push
+# Requires KAI_TOKEN secret (get from: kai auth token)
+name: Kai Sync
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Kai
+        run: curl -sSL https://get.kailayer.com | sh
+      - name: Capture and push
+        env:
+          KAI_TOKEN: ${{ secrets.KAI_TOKEN }}
+        run: |
+          kai auth login --token "$KAI_TOKEN"
+          kai capture -m "${{ github.event.head_commit.message }}"
+          kai push
+`
+	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("  ✓ Created .github/workflows/kai-sync.yml")
+	fmt.Println()
+	fmt.Println("  Next steps:")
+	fmt.Println("    1. Run: kai auth token")
+	fmt.Println("    2. Add the token as a GitHub secret named KAI_TOKEN")
+	fmt.Println("       Settings → Secrets → Actions → New repository secret")
+	fmt.Println("    3. Commit and push the workflow file")
+	return nil
+}
+
+func generateGitLabCI() error {
+	path := ".kai-sync.gitlab-ci.yml"
+
+	// Check if .gitlab-ci.yml already has kai sync
+	if existing, err := os.ReadFile(".gitlab-ci.yml"); err == nil {
+		if strings.Contains(string(existing), "kai-sync") || strings.Contains(string(existing), "kai capture") {
+			fmt.Println("  .gitlab-ci.yml already contains kai sync, skipping.")
+			return nil
+		}
+	}
+
+	config := `# Kai Sync — keeps semantic graph up to date on every push
+# Include this in your .gitlab-ci.yml:
+#   include:
+#     - local: .kai-sync.gitlab-ci.yml
+#
+# Requires KAI_TOKEN CI variable (get from: kai auth token)
+# Settings → CI/CD → Variables → Add variable
+
+kai-sync:
+  stage: .post
+  image: alpine:3.19
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - apk add --no-cache curl
+    - curl -sSL https://get.kailayer.com | sh
+    - kai auth login --token "$KAI_TOKEN"
+    - kai capture -m "$CI_COMMIT_MESSAGE"
+    - kai push
+`
+	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("  ✓ Created .kai-sync.gitlab-ci.yml")
+	fmt.Println()
+	fmt.Println("  Next steps:")
+	fmt.Println("    1. Add to your .gitlab-ci.yml:")
+	fmt.Println("       include:")
+	fmt.Println("         - local: .kai-sync.gitlab-ci.yml")
+	fmt.Println("    2. Run: kai auth token")
+	fmt.Println("    3. Add the token as a GitLab CI variable named KAI_TOKEN")
+	fmt.Println("       Settings → CI/CD → Variables → Add variable")
+	fmt.Println("    4. Commit and push both files")
 	return nil
 }
 
