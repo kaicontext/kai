@@ -168,6 +168,40 @@ The capture command is the first step in the "2-minute value path":
 	RunE: runCapture,
 }
 
+var (
+	importAll bool
+)
+
+var importCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Import git history as semantic snapshots",
+	Long: `Replays git commits as Kai snapshots, building semantic history.
+
+By default imports the last 50 commits. Use --all for full history.
+
+Examples:
+  kai import              # Import last 50 commits
+  kai import --all        # Import entire git history
+  kai import --all --max 200  # Import last 200 commits`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := os.Stat(".git"); os.IsNotExist(err) {
+			return fmt.Errorf("not a git repository")
+		}
+		db, err := openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		if importAll {
+			importMaxCommits = 999999
+		}
+		return runGitImport(db)
+	},
+}
+
+var importMaxCommits = 50
+
 var analyzeCmd = &cobra.Command{
 	Use:   "analyze",
 	Short: "Analysis commands",
@@ -2270,6 +2304,10 @@ func init() {
 	initCmd.Flags().BoolVar(&initExplain, "explain", false, "Show detailed explanation of what this command does")
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(captureCmd)
+	rootCmd.AddCommand(importCmd)
+	importCmd.GroupID = groupStart
+	importCmd.Flags().BoolVar(&importAll, "all", false, "Import entire git history")
+	importCmd.Flags().IntVar(&importMaxCommits, "max", 50, "Maximum number of commits to import")
 
 	// Diff & Review
 	diffCmd.GroupID = groupDiff
@@ -2911,6 +2949,155 @@ CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
 	fmt.Println("│")
 	fmt.Println("│  Use --explain on any command to learn more.")
 	fmt.Println("╰─────────────────────────────────────────────")
+
+	// Detect git repo and offer import + auto-sync
+	if _, err := os.Stat(".git"); err == nil {
+		fmt.Println()
+		fmt.Println("  Git repository detected.")
+		fmt.Println()
+
+		reader := bufio.NewReader(os.Stdin)
+
+		// Offer to import git history
+		fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "y" || input == "yes" {
+			fmt.Println()
+			if err := runGitImport(db); err != nil {
+				fmt.Printf("  Warning: import failed: %v\n", err)
+			}
+		}
+
+		// Offer to install post-commit hook
+		fmt.Println()
+		fmt.Print("  Install git hook to auto-capture on commit? [y/N]: ")
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "y" || input == "yes" {
+			if err := installGitHook(); err != nil {
+				fmt.Printf("  Warning: hook install failed: %v\n", err)
+			} else {
+				fmt.Println("  ✓ Installed .git/hooks/post-commit")
+				fmt.Println("    Kai will auto-capture after each git commit.")
+			}
+		}
+	}
+
+	return nil
+}
+
+// runGitImport replays git history as semantic snapshots.
+func runGitImport(db *graph.DB) error {
+	// Get commit count
+	countOut, err := exec.Command("git", "rev-list", "--count", "HEAD").Output()
+	if err != nil {
+		return fmt.Errorf("counting commits: %w", err)
+	}
+	totalCommits, _ := strconv.Atoi(strings.TrimSpace(string(countOut)))
+
+	maxCommits := importMaxCommits
+	if totalCommits > maxCommits {
+		fmt.Printf("  Repository has %d commits. Importing last %d.\n", totalCommits, maxCommits)
+		fmt.Printf("  (Use 'kai import --git --all' for full history)\n")
+	} else {
+		maxCommits = totalCommits
+		fmt.Printf("  Importing %d commits...\n", maxCommits)
+	}
+
+	// Get commit list (oldest first)
+	listCmd := exec.Command("git", "rev-list", "--reverse", fmt.Sprintf("--max-count=%d", maxCommits), "HEAD")
+	listOut, err := listCmd.Output()
+	if err != nil {
+		return fmt.Errorf("listing commits: %w", err)
+	}
+	commits := strings.Split(strings.TrimSpace(string(listOut)), "\n")
+
+	// Save current branch to restore later
+	currentBranch, _ := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	currentRef := strings.TrimSpace(string(currentBranch))
+	defer func() {
+		exec.Command("git", "checkout", currentRef).Run()
+	}()
+
+	creator := snapshot.NewCreator(db, nil)
+	refMgr := ref.NewRefManager(db)
+
+	for i, commitHash := range commits {
+		commitHash = strings.TrimSpace(commitHash)
+		if commitHash == "" {
+			continue
+		}
+
+		// Get commit message
+		msgOut, _ := exec.Command("git", "log", "-1", "--format=%s", commitHash).Output()
+		msg := strings.TrimSpace(string(msgOut))
+
+		fmt.Fprintf(os.Stderr, "\r  [%d/%d] %s %.7s", i+1, len(commits), msg, commitHash)
+
+		// Checkout this commit
+		if err := exec.Command("git", "checkout", "--quiet", commitHash).Run(); err != nil {
+			continue
+		}
+
+		// Create snapshot (no analysis — too slow for bulk import)
+		source, serr := dirio.OpenDirectory(".")
+		if serr != nil {
+			continue
+		}
+		snapshotID, err := creator.CreateSnapshot(source)
+		if err != nil {
+			continue
+		}
+
+		// Update refs
+		autoRefMgr := ref.NewAutoRefManager(db)
+		autoRefMgr.OnSnapshotCreated(snapshotID)
+
+		// Store commit message for push
+		os.MkdirAll(".kai", 0755)
+		os.WriteFile(".kai/message", []byte(msg), 0644)
+
+		_ = refMgr
+	}
+
+	fmt.Fprintf(os.Stderr, "\r\033[K")
+	fmt.Printf("  ✓ Imported %d commits as snapshots\n", len(commits))
+	fmt.Println("  Run 'kai capture' to add full semantic analysis to the current snapshot.")
+
+	return nil
+}
+
+// installGitHook installs a post-commit hook that auto-captures.
+func installGitHook() error {
+	hookDir := ".git/hooks"
+	hookPath := filepath.Join(hookDir, "post-commit")
+
+	// Don't overwrite existing hooks
+	if _, err := os.Stat(hookPath); err == nil {
+		// Append to existing hook
+		existing, _ := os.ReadFile(hookPath)
+		if strings.Contains(string(existing), "kai capture") {
+			return nil // already installed
+		}
+		f, err := os.OpenFile(hookPath, os.O_APPEND|os.O_WRONLY, 0755)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		f.WriteString("\n# Kai auto-capture\nkai capture -m \"$(git log -1 --format=%s)\" 2>/dev/null &\n")
+		return nil
+	}
+
+	// Create new hook
+	hook := `#!/bin/sh
+# Kai auto-capture — runs after each git commit
+# Captures a semantic snapshot with the commit message
+kai capture -m "$(git log -1 --format=%s)" 2>/dev/null &
+`
+	if err := os.WriteFile(hookPath, []byte(hook), 0755); err != nil {
+		return err
+	}
 	return nil
 }
 
