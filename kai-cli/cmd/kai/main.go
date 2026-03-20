@@ -16800,7 +16800,7 @@ var ciLogsCmd = &cobra.Command{
 }
 
 var ciCancelCmd = &cobra.Command{
-	Use:   "cancel <run-id>",
+	Use:   "cancel <run-id-or-number>",
 	Short: "Cancel a CI run",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runCICancel,
@@ -17004,7 +17004,12 @@ func runCICancel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	client := remote.NewControlClient(baseURL)
-	return client.CancelCIRun(org, repo, args[0])
+	runID := resolveRunID(client, org, repo, args[0])
+	if err := client.CancelCIRun(org, repo, runID); err != nil {
+		return fmt.Errorf("cancelling run: %w", err)
+	}
+	fmt.Printf("Cancelled run %s\n", args[0])
+	return nil
 }
 
 func runCIRerun(cmd *cobra.Command, args []string) error {
