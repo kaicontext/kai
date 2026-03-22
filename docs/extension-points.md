@@ -1,6 +1,6 @@
-# Extension Points for Future SaaS Features
+# Extension Points
 
-This document identifies stable internal APIs and extension points where Kai Cloud features can be attached without refactoring the OSS core.
+This document identifies stable internal APIs and extension points where server features (in [kai-server](https://github.com/kailayerhq/kai-server)) can be attached without refactoring the core engine.
 
 ## 1. Storage Backends
 
@@ -22,7 +22,7 @@ type Store interface {
 
 **Current implementation:** SQLite (in kai-cli/internal/graph/)
 
-**Future SaaS extension:** Remote graph store backed by a hosted database. The interface is stable — a remote implementation would wrap HTTP calls to a graph API service.
+**Server extension:** Remote graph store backed by a hosted database. The interface is stable — a remote implementation would wrap HTTP calls to a graph API service.
 
 ### File Source — `kai-cli/internal/filesource.FileSource`
 
@@ -59,7 +59,7 @@ KaiRunCompleted {
 }
 ```
 
-These events feed org-wide analytics dashboards in Kai Cloud. The OSS telemetry path stays opt-in and anonymous.
+These events feed org-wide analytics dashboards. The CLI telemetry path stays opt-in and anonymous.
 
 ## 3. CI Plan Output
 
@@ -81,7 +81,7 @@ The `kai ci plan` command outputs a deterministic JSON plan:
 **Extension points:**
 - **Schema versioning:** Add a `version` field to the plan output so cloud analytics can track plan format changes
 - **Plan upload hook:** After plan generation, optionally POST the plan to a cloud endpoint for historical tracking
-- **Risk scoring override:** Cloud can provide org-level risk scores that augment local analysis
+- **Risk scoring override:** Server can provide org-level risk scores that augment local analysis
 
 ## 4. Authentication and Identity
 
@@ -101,7 +101,7 @@ Auth is handled via magic link → JWT flow, stored in `~/.kai/credentials.json`
 Module rules and CI policies are file-based.
 
 **Extension points:**
-- **Remote policy fetch:** Pull org-level policies from Kai Cloud
+- **Remote policy fetch:** Pull org-level policies from a Kai server
 - **Policy composition:** Merge local rules with org defaults
 - **Rule versioning:** Track which policy version produced each CI plan
 
@@ -116,7 +116,7 @@ Module rules and CI policies are file-based.
 
 ## Stable Internal APIs
 
-These APIs should remain backward-compatible to support SaaS extension without breaking OSS:
+These APIs should remain backward-compatible to support server extension without breaking the core:
 
 | API | Location | Stability |
 |-----|----------|-----------|
@@ -129,9 +129,9 @@ These APIs should remain backward-compatible to support SaaS extension without b
 
 ## Design Principle
 
-SaaS features attach to these extension points via:
+Server features attach to these extension points via:
 1. **Alternative implementations** of existing interfaces (e.g., remote Store)
 2. **Post-hooks** on existing commands (e.g., upload plan after generation)
 3. **Configuration overlays** (e.g., org policies merged with local)
 
-The OSS core never imports SaaS code. SaaS code imports and wraps OSS interfaces.
+The core engine never imports server code. Server code imports and wraps core interfaces.

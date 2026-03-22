@@ -6,7 +6,7 @@ Have questions? Join us on [Slack](https://join.slack.com/t/kailayer/shared_invi
 
 ## Scope
 
-Kai is an open-core project. The OSS repo contains the core engine and CLI. The hosted cloud service is separate and closed-source.
+Kai is fully open source under Apache 2.0. This repo contains the core engine and CLI. The server components live in the [kai-server](https://github.com/kailayerhq/kai-server) repo.
 
 ### What we accept
 
@@ -19,15 +19,15 @@ Kai is an open-core project. The OSS repo contains the core engine and CLI. The 
 - Test coverage improvements
 - CLI UX improvements
 
-### What we will not accept
+Server and cloud contributions (authentication, multi-tenancy, hosting, RBAC, SSO, etc.) are welcome in the [kai-server](https://github.com/kailayerhq/kai-server) repo.
 
-- Cloud or server implementations (authentication, multi-tenancy, hosting)
-- Enterprise features (RBAC, SSO, billing, audit logging)
+### What we will not accept in this repo
+
 - Changes that introduce network dependencies into kai-core
 - Breaking changes without prior discussion in an issue
 - License changes
 
-These boundaries protect the open-core architecture. See [docs/architecture-boundary.md](docs/architecture-boundary.md) for the full breakdown.
+These boundaries protect the architectural separation between the core engine and server. See [docs/architecture-boundary.md](docs/architecture-boundary.md) for details.
 
 ## Pull Request Process
 
@@ -74,14 +74,14 @@ cd kai-cli && CGO_ENABLED=1 go test ./cmd/kai/ \
 
 If your change produces different output for the same input, it must be discussed in an issue first.
 
-## Open-Core Boundary Rules
+## Architectural Boundary Rules
 
 The `scripts/check-core-purity.sh` script enforces these rules in CI:
 
 - No `net/http` imports in kai-core
 - No cloud SDK dependencies in kai-core
 - No cloud provider URLs in kai-core
-- No proprietary concepts (`tenant`, `org_id`, `sso`, `billing`) in kai-core
+- No server-specific concepts (`tenant`, `org_id`, `sso`, `billing`) in kai-core
 
 Run it locally before submitting:
 

@@ -130,8 +130,8 @@ agent executes with proof, not generation with hope.
 
 ## Architecture
 
-Kai is open-core: CLI and semantic engine are Apache 2.0.
-Kai Cloud adds hosted infrastructure and team features.
+Kai is fully open source under Apache 2.0: core engine, CLI, and server.
+Kai Cloud is the hosted version — same code, managed infrastructure.
 
 ```
 kai capture → local semantic graph (SQLite)

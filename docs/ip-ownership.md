@@ -30,16 +30,15 @@ No additional IP assignment (CLA) is required from external contributors. The co
 Any pre-existing intellectual property incorporated into Kai is documented and licensed appropriately:
 - Third-party dependencies are tracked in `go.mod` files with compatible licenses
 - Tree-sitter grammars are MIT/Apache licensed
-- No proprietary third-party code is included in the OSS repository
+- No proprietary third-party code is included in either repository
 
 ## License Structure
 
 | Asset | Ownership | License |
 |-------|-----------|---------|
-| kai-core, kai-cli, kailab source | Company | Apache 2.0 (public) |
-| kailab-control source | Company | Apache 2.0 (public) |
-| Kai Cloud infrastructure | Company | Proprietary |
-| Kai Cloud features (analytics, scoring, enterprise) | Company | Proprietary |
+| kai-core, kai-cli source | Company | Apache 2.0 (public) |
+| kailab, kailab-control source | Company | Apache 2.0 (public) |
+| Kai Cloud infrastructure (hosting, ops) | Company | N/A (operational, not software) |
 | External contributions | Contributors | Apache 2.0 (licensed to project) |
 | Kai trademark and branding | Company | Not licensed |
 
@@ -50,7 +49,6 @@ The Kai name and logo are trademarks of the company. Apache 2.0 does not grant t
 ## Summary
 
 - All core IP is owned by the company
-- OSS code is licensed under Apache 2.0 (permissive, with patent grant)
+- All code is licensed under Apache 2.0 (permissive, with patent grant)
 - External contributions are licensed, not assigned
-- Proprietary features remain closed source
 - Clean IP chain from founders → company → public license

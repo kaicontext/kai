@@ -16,17 +16,6 @@ Contributors grant a perpetual, worldwide, royalty-free patent license for their
 
 **This is good for enterprise adoption.** Companies can use Kai without patent risk for any functionality in the OSS codebase.
 
-## Proprietary Components — Rights Retained
-
-Patent rights for Kai Cloud features are retained by the company:
-
-- Hosted multi-repo graph indexing
-- Cross-branch artifact reuse algorithms
-- Org-wide risk scoring and ML models
-- Enterprise policy engine
-
-These features are not included in the OSS release and are not covered by the Apache 2.0 patent grant.
-
 ## Contributor Patent Grant
 
 By contributing to Kai under Apache 2.0, contributors grant a patent license that covers their specific contributions. This is implicit in the license — no additional patent assignment is required.
@@ -37,6 +26,5 @@ The DCO (Developer Certificate of Origin) confirms that contributors have the ri
 
 | Scope | Patent position |
 |-------|----------------|
-| OSS code (kai-core, kai-cli, kailab) | Apache 2.0 patent grant to all users |
-| Kai Cloud features | Patent rights retained by the company |
+| All Kai code (kai-core, kai-cli, kailab, kailab-control) | Apache 2.0 patent grant to all users |
 | Contributor code | Apache 2.0 patent grant via contribution |

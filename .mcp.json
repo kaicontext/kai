@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kai": {
+      "command": "/Users/jacobschatz/projects/kai/kai-cli/kai",
+      "args": ["mcp", "serve"]
+    }
+  }
+}

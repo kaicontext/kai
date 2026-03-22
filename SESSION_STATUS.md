@@ -1,79 +1,119 @@
-# Session Status - Git Replacement Readiness
+# Session Status
 
-## Where we are
+Last updated: 2026-03-18 (v0.9.11)
 
-### Implemented
-- SSH git upload-pack/receive-pack path works (clone/fetch/push).
-- Protocol v0 support with capabilities parsing and negotiation.
-- Minimal protocol v2 support: `ls-refs` + `fetch` with `packfile` section.
-- Shallow support (depth=1 only): advertises `shallow`, validates `deepen=1`, emits shallow lines before ACK.
-- Side-band-64k output supported for upload-pack.
-- Git ref mapping between Kai and Git: heads/tags/kai refs, create/update/delete on receive-pack.
-- Delete ref support in store and mirror deletion.
-- Basic metrics: expvar `/metrics` + HTTP/SSH counters.
-- Compatibility matrix documented in README.
-- Toolchain validation checklist doc created.
+## What's Working
 
-### Tests added
-- Integration tests (build tag `integration`) for:
-  - SSH clone
-  - shallow clone
-  - receive-pack push
-- Unit tests for:
-  - pkt-line delimiter `0001`
-  - caps parsing
-  - shallow validation
-  - ref mapping
+### Infrastructure
+- **Postgres data plane** — migrated from SQLite+PVC to shared Postgres (`db-custom-1-3840`, 200 max connections)
+- **GCS blob storage** — segments stored inline in Postgres + GCS (`preplanai-kailab-blobs`), range reads for fast file access. Inline is safety net; GCS is best-effort.
+- **Zero-downtime deploys** — 2 replicas with RollingUpdate (maxUnavailable=0), health probes
+- **GitLab CI/CD** — push to `gitlab.com:rite-day/kaylayerhq/kai-server` triggers test → build → deploy pipeline
+- **Cache headers** — `no-cache` on HTML (prevents stale JS chunk 404s after deploy), `immutable` on hashed assets
 
-## What is left (Future Work)
+### CLI (v0.9.11)
+- `kai capture -m "message"` — attach message to snapshot, shown as CI run headline
+- `kai push` — sends git HEAD commit message via `X-Kailab-Message` header
+- `kai push --force` — skips negotiate, re-sends all objects (data recovery)
+- `kai review open/approve/close/comment` — full review lifecycle
+- `kai fetch --review <id>` — syncs review + comments from server to local
+- `kai ci runs/run/logs/cancel/rerun` — remote CI management
+- `kai ws create/checkout/list` — workspace management
+- `kai mcp serve` — MCP server for AI coding assistants (12 tools)
 
-Tracked in 1Medium → Space **Future Work**
+### Web UI (kailayer.com)
+- **File view** — IDE-style split panel (tree + content), file search/filter, type-specific icons, language breakdown bar, keyboard navigation, breadcrumb, doc tabs (README/CONTRIBUTING/LICENSE/SECURITY)
+- **CI runs** — commit messages as headlines, SSE live updates, auto-scroll logs, 30min default timeouts, pod GC for stale jobs
+- **Reviews** — create/view/approve/merge/abandon, inline line commenting, semantic + line diff toggle, threaded comments, relative timestamps
+- **Header** — logo mark, refined spacing, soft shadow, desaturated avatar
+- **History** — batched changeset fetches (5 concurrent, max 20)
+- **README links** — SPA navigation for internal links
 
-**Project: Git Replacement Remaining**
-- Protocol v2 full capabilities + fetch options (task `f893d38b-baaf-4127-9816-e1cc9438b577`)
-- multi_ack / multi_ack_detailed (task `89273e1d-cabb-4ffa-944c-7c567421fe6e`)
-- Partial clone / promisor remotes (task `037d2927-3f8c-4962-be0d-072bc10c3196`)
-- Pack optimizations (bitmaps/commit-graph) (task `5f1c77c8-7c32-476b-be33-e28fa9417c91`)
-- Toolchain validation matrix (CI/IDEs/Git GUIs) (task `b3333720-c82a-493c-8d0d-8d52d10e1813`)
+### Email Notifications (Postmark)
+- CI pipeline results → snapshot author
+- Review comments → review author
+- Review state changes (approved, merged, abandoned, changes requested)
+- @mention notifications
+- Org invitation/removal
 
-**Project: Git Pack Deltas**
-- Real thin-pack/delta pack generation (task `1f7cc02f-f645-4114-a54a-f7dc67677ebd`)
+### Review System (end-to-end)
+- CLI: `kai review open` → creates review targeting changeset
+- CLI: `kai push` → sends review + changeset to server
+- Web: view review, see semantic diff, add inline comments
+- CLI: `kai fetch --review` → syncs comments back to local
+- Web: approve/merge → updates `snap.main` to changeset head
+- Email: notifications on all state changes
 
-## Files touched recently (high level)
-- `kailab/sshserver/handler.go`: protocol v2 handling, shallow flow, caps parsing, side-band, ref mapping
-- `kailab/sshserver/receive_pack.go`: git ref updates/creates/deletes
-- `kailab/sshserver/protocol.go`: pkt-line delimiter support, side-band writer
-- `kailab/store/sqlite.go`: delete ref support
-- `kailab/metrics/metrics.go`: expvar counters
-- `kailab/api/routes.go`: /metrics endpoint + HTTP metrics wrapper
-- `kailab/sshserver/ssh_integration_test.go`: clone/shallow/push integration tests
-- `kailab/sshserver/sshserver_test.go`: protocol unit tests
-- `README.md`: compatibility matrix + operational notes
-- `kailab/docs/toolchain_validation.md`: validation checklist
+## Known Issues
 
-## Quick start for manual toolchain validation (Sublime Merge / others)
+### Edge Accumulation (partially fixed)
+- **Root cause**: SQLite treats NULL as unique in PRIMARY KEY, so `INSERT OR IGNORE` on `(src, type, dst, at)` with `at=NULL` never ignored duplicates
+- **Fix applied**: Changed PK to `(src, type, dst)`, auto-migration deduplicates on first run, `DISTINCT` on queries
+- **Status**: HAS_FILE edges stable at 197. DEFINES_IN/IMPORTS edges still accumulate on re-capture because `AnalyzeSymbols` creates new edges each time. The `skipAnalysis` optimization helps when snapshot ID is unchanged.
+- **Files**: `kai-cli/internal/graph/graph.go`, `kai-cli/schema/0001_init.sql`, `kai-cli/internal/snapshot/snapshot.go`
 
-Start server:
+### Capture Performance
+- Full capture (197 files): ~4 seconds (first run), ~7 seconds (subsequent due to symbol edge accumulation)
+- `skipAnalysis` triggers when snapshot ID is byte-identical to `snap.latest` (no file changes)
+- Incremental per-file analysis not yet implemented — all files re-parsed even when only one changed
+
+### Push Performance
+- Sends ALL edges every push (~20K), not just new ones
+- Edge negotiate/dedup not implemented on the push protocol
+- Segments accumulate in Postgres (408MB for kai repo across 28 segments)
+
+### CI
+- Stale job pods can exhaust namespace quota — mitigated by GC (deletes pods >30min old every 5min)
+- Runner image built separately from main pipeline (Dockerfile.runner)
+
+## Architecture
+
+```
+kai-cli (local)
+  ├── .kai/db.sqlite     — local graph (nodes, edges, refs)
+  ├── .kai/objects/       — content-addressed file blobs
+  └── .kai/message        — capture message (consumed by push)
+
+kai push → kailab (data plane)
+  ├── Postgres            — segments, objects, refs, edges, ref_history
+  ├── GCS                 — segment blobs (range reads)
+  └── notifyPushCI →
+
+kailab-control (control plane)
+  ├── Postgres (shared)   — users, orgs, repos, workflows, CI runs
+  ├── SvelteKit frontend  — embedded in Go binary
+  ├── Postmark            — email notifications
+  └── kailab-runner (CI)  — K8s pods per job, 3 runner replicas
+```
+
+## Deployment
+
+### kai-server (GitLab)
 ```bash
-cd /Users/jacobschatz/projects/kai/kailab
-KAILAB_DISABLE_GIT_RECEIVE_PACK=false \
-  go run ./cmd/kailabd --data /tmp/kai-smerge --listen 127.0.0.1:7447 --ssh-listen 127.0.0.1:2222
+git push  # triggers: test → build → deploy
 ```
 
-Create repo:
+### kai CLI (GitHub)
 ```bash
-curl -s -X POST http://127.0.0.1:7447/admin/v1/repos \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"test","repo":"smerge"}'
+# Build and install locally
+cd kai-cli && go build -o kai-darwin-arm64 ./cmd/kai
+cp kai-darwin-arm64 ~/go/bin/kai
+
+# Push to kai (captures + pushes semantic graph)
+kai capture -m "message" && kai push
 ```
 
-Clone URL:
-```
-ssh://git@127.0.0.1:2222/test/smerge
-```
+### Manual operations
+```bash
+# Check CI pods
+kubectl get pods -n kailab-ci
 
-## Notes
-- Thin-pack/delta negotiation flags are wired but still emit full packs.
-- Shallow is limited to depth=1 and uses synthetic commits (no parent graph).
-- Protocol v2 is minimal; no advanced options yet.
+# Clean stale CI pods
+kubectl delete pod -n kailab-ci -l app=kailab-ci --field-selector=status.phase!=Running
 
+# Check Postgres connections
+kubectl exec -n kailab deployment/kailab -- sh -c 'apk add --no-cache postgresql-client > /dev/null 2>&1; PGPASSWORD="..." psql "postgres://..." -c "SELECT count(*) FROM pg_stat_activity;"'
+
+# GCS bucket
+gsutil ls -lh gs://preplanai-kailab-blobs/
+```

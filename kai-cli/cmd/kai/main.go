@@ -2847,6 +2847,9 @@ Run ` + "`" + `kai --help` + "`" + ` or ` + "`" + `kai <command> --help` + "`" +
 		}
 	}
 
+	// Write AI coding tool context files (CLAUDE.md, .github/copilot-instructions.md, etc.)
+	writeAIContextFiles()
+
 	// Open database and apply schema
 	dbPath := filepath.Join(kaiDir, dbFile)
 	db, err := graph.Open(dbPath, objPath)
@@ -3000,6 +3003,43 @@ CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
 	}
 
 	return nil
+}
+
+const kaiMCPSection = `## Code Analysis
+
+When exploring code, analyzing diffs, or searching for patterns, prefer the Kai MCP tools
+(kai_diff, kai_context, kai_callers, kai_callees, kai_impact, etc.) over raw
+Read/Grep/git-diff. Only fall back to direct tools when Kai doesn't cover the need.
+`
+
+// writeAIContextFiles creates context files for AI coding tools (CLAUDE.md,
+// .github/copilot-instructions.md, etc.) if they don't already exist.
+// If a file exists but doesn't contain the Kai section, it prepends it.
+func writeAIContextFiles() {
+	kaiMarker := "Kai MCP tools"
+
+	files := []string{
+		"CLAUDE.md",
+		".github/copilot-instructions.md",
+		".cursorrules",
+		"CODEX.md",
+		"AGENTS.md",
+	}
+
+	for _, path := range files {
+		existing, err := os.ReadFile(path)
+		if err != nil {
+			continue // file doesn't exist, skip
+		}
+		if strings.Contains(string(existing), kaiMarker) {
+			continue // already has the section
+		}
+		// Prepend the Kai section
+		updated := kaiMCPSection + "\n" + string(existing)
+		if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+			debugf("warning: could not update %s: %v", path, err)
+		}
+	}
 }
 
 // runGitImport replays git history as semantic snapshots.

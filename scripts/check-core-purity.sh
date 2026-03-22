@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Verify the OSS repo has no cloud/server code or proprietary coupling.
-# Run this in CI to enforce the open-core boundary.
+# Verify kai-core has no network dependencies or server coupling.
+# Run this in CI to enforce the architectural boundary between core and server.
 
 set -euo pipefail
 
 ERRORS=0
 
-echo "=== Open-Core Purity Check ==="
+echo "=== Core Purity Check ==="
 echo ""
 
 # 1. No server directories tracked in git
 echo "Checking: no server/cloud directories tracked in git..."
 for dir in cloud server enterprise billing sso rbac audit kailab kailab-control; do
     if git ls-files --error-unmatch "$dir" >/dev/null 2>&1; then
-        echo "  FAIL: directory '$dir' must not be tracked in OSS repo"
+        echo "  FAIL: directory '$dir' must not be tracked in this repo"
         ERRORS=$((ERRORS + 1))
     fi
 done
@@ -58,10 +58,10 @@ done
 echo "  PASS"
 
 # 6. No forbidden strings in core packages (excluding tests and taxonomy keywords)
-echo "Checking: no proprietary concepts in kai-core..."
+echo "Checking: no server-specific concepts in kai-core..."
 if grep -rEi '(tenant|org_id|sso|billing|cloud_url|KAI_CLOUD)' kai-core/ --include='*.go' \
     | grep -v '_test\.go' | grep -v 'taxonomy\.go' 2>/dev/null; then
-    echo "  FAIL: kai-core contains proprietary concepts"
+    echo "  FAIL: kai-core contains server-specific concepts"
     ERRORS=$((ERRORS + 1))
 else
     echo "  PASS"

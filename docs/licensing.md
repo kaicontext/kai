@@ -16,18 +16,19 @@ Yes. You can fork, modify, and distribute Kai under the terms of Apache 2.0. You
 
 No. Apache 2.0 is a permissive license. You can use Kai as a library or tool in proprietary software without open-sourcing your own code.
 
-## What's the difference between Kai OSS and Kai Cloud?
+## What's the difference between self-hosting and Kai Cloud?
 
-| | Kai OSS | Kai Cloud |
-|--|---------|-----------|
-| License | Apache 2.0 | Proprietary |
-| CLI + core engine | Included | Included |
-| Local graph store | Included | Included |
-| Self-hosted data plane | Included | Included |
-| Hosted multi-repo graph | - | Included |
-| Org analytics + dashboards | - | Included |
-| Enterprise SSO/RBAC/audit | - | Included |
-| Cross-branch artifact cache | - | Included |
+All Kai software is open source under Apache 2.0. Kai Cloud is a hosted service running the same code — you're paying for managed infrastructure, not proprietary features.
+
+| | Self-hosted | Kai Cloud |
+|--|------------|-----------|
+| License | Apache 2.0 | Apache 2.0 |
+| CLI + core engine | You run it | Included |
+| Data plane + control plane | You host it | Managed |
+| Multi-repo graph index | You host it | Managed |
+| Analytics + dashboards | You host it | Managed |
+| SSO/RBAC/audit | You configure it | Managed |
+| Infrastructure + ops | Your responsibility | Managed |
 
 See [architecture-boundary.md](architecture-boundary.md) for the full breakdown.
 
