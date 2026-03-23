@@ -6,7 +6,7 @@ Have questions? Join us on [Slack](https://join.slack.com/t/kailayer/shared_invi
 
 ## Scope
 
-Kai is fully open source under Apache 2.0. This repo contains the core engine and CLI. The server components live in the [kai-server](https://github.com/kailayerhq/kai-server) repo.
+Kai is fully open source under Apache 2.0. This repo contains the core engine and CLI. The server components live in the [kai-server](https://github.com/kaicontext/kai-server) repo.
 
 ### What we accept
 
@@ -19,7 +19,7 @@ Kai is fully open source under Apache 2.0. This repo contains the core engine an
 - Test coverage improvements
 - CLI UX improvements
 
-Server and cloud contributions (authentication, multi-tenancy, hosting, RBAC, SSO, etc.) are welcome in the [kai-server](https://github.com/kailayerhq/kai-server) repo.
+Server and cloud contributions (authentication, multi-tenancy, hosting, RBAC, SSO, etc.) are welcome in the [kai-server](https://github.com/kaicontext/kai-server) repo.
 
 ### What we will not accept in this repo
 
@@ -207,4 +207,4 @@ Vulnerabilities should not be submitted as public issues. See [SECURITY.md](SECU
 
 ## Questions
 
-Open a [discussion](https://github.com/kailayerhq/kai/discussions) or join [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg).
+Open a [discussion](https://github.com/kaicontext/kai/discussions) or join [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg).

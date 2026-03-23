@@ -1,6 +1,6 @@
 # kai-mcp
 
-MCP server for [Kai](https://kailayer.com) — semantic code intelligence for AI coding assistants.
+MCP server for [Kai](https://kaicontext.com) — semantic code intelligence for AI coding assistants.
 
 ## Quick Install
 
@@ -62,6 +62,6 @@ No setup required — the server lazily initializes the Kai semantic graph on fi
 
 ## Links
 
-- [Full docs](https://github.com/kailayerhq/kai/blob/main/docs/mcp.md)
-- [Kai](https://kailayer.com)
-- [GitHub](https://github.com/kailayerhq/kai)
+- [Full docs](https://github.com/kaicontext/kai/blob/main/docs/mcp.md)
+- [Kai](https://kaicontext.com)
+- [GitHub](https://github.com/kaicontext/kai)

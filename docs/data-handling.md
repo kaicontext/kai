@@ -98,7 +98,7 @@ When enabled, Kai reports:
 
 **Never collected:** file names, file paths, file contents, symbol names, repository URLs, Git refs, usernames, or any identifier tied to your codebase.
 
-Telemetry is batched locally (`~/.kai/telemetry.jsonl`, max 1 MB) and uploaded at most once per 24 hours to `https://kailayer.com/v1/telemetry/batch`.
+Telemetry is batched locally (`~/.kai/telemetry.jsonl`, max 1 MB) and uploaded at most once per 24 hours to `https://kaicontext.com/v1/telemetry/batch`.
 
 ## Summary
 

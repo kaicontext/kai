@@ -51,4 +51,4 @@ Events are spooled locally and uploaded in a gzip-compressed batch at most once 
 
 ## Upload endpoint
 
-`POST https://kailayer.com/v1/telemetry/batch` (gzip-compressed JSON array).
+`POST https://kaicontext.com/v1/telemetry/batch` (gzip-compressed JSON array).

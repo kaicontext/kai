@@ -21,7 +21,7 @@ Last updated: 2026-03-18 (v0.9.11)
 - `kai ws create/checkout/list` — workspace management
 - `kai mcp serve` — MCP server for AI coding assistants (12 tools)
 
-### Web UI (kailayer.com)
+### Web UI (kaicontext.com)
 - **File view** — IDE-style split panel (tree + content), file search/filter, type-specific icons, language breakdown bar, keyboard navigation, breadcrumb, doc tabs (README/CONTRIBUTING/LICENSE/SECURITY)
 - **CI runs** — commit messages as headlines, SSE live updates, auto-scroll logs, 30min default timeouts, pod GC for stale jobs
 - **Reviews** — create/view/approve/merge/abandon, inline line commenting, semantic + line diff toggle, threaded comments, relative timestamps

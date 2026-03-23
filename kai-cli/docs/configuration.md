@@ -176,7 +176,7 @@ See [telemetry.md](telemetry.md) for full details.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `KAI_SERVER` | Remote server URL | `https://kailayer.com` |
+| `KAI_SERVER` | Remote server URL | `https://kaicontext.com` |
 | `KAI_SSH_SIGN_KEY` | SSH key for signing operations | — |
 
 ## Authentication

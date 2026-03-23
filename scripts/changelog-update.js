@@ -4,7 +4,7 @@
 // @tz America/New_York
 // @title Kai Changelog Update
 
-const REPO = "kailayerhq/kai";
+const REPO = "kaicontext/kai";
 const HEADER = "# Changelog\n\nAll notable changes to Kai are documented here.\n\n";
 
 // Get latest release to know the cutoff

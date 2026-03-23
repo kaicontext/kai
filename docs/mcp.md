@@ -14,7 +14,7 @@ claude mcp add kai -- npx -y kai-mcp
 
 ```bash
 # Install kai
-curl -sSL https://get.kailayer.com | sh
+curl -sSL https://get.kaicontext.com | sh
 
 # Register with Claude Code
 claude mcp add kai -- kai mcp serve
@@ -23,7 +23,7 @@ claude mcp add kai -- kai mcp serve
 ### Homebrew
 
 ```bash
-brew install kailayerhq/kai/kai
+brew install kaicontext/kai/kai
 claude mcp add kai -- kai mcp serve
 ```
 
@@ -122,7 +122,7 @@ See [cli-reference.md](cli-reference.md) for full documentation.
 
 Install kai:
 ```bash
-curl -sSL https://get.kailayer.com | sh
+curl -sSL https://get.kaicontext.com | sh
 ```
 
 Or use the npx wrapper which bundles the binary:

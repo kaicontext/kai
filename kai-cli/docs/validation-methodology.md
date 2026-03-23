@@ -159,7 +159,7 @@ A change in a shared library can affect tests across multiple modules. Kai's mod
 
 ```bash
 # Install Kai CLI
-curl -fsSL https://kailayer.com/install.sh | sh
+curl -fsSL https://kaicontext.com/install.sh | sh
 
 # Verify
 kai --version

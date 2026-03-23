@@ -6,7 +6,7 @@ Kai CI computes which tests need to run based on code changes. Instead of runnin
 
 ```bash
 # Install kai
-curl -fsSL https://kailayer.com/install.sh | sh
+curl -fsSL https://kaicontext.com/install.sh | sh
 
 # Generate a test plan from git changes
 kai ci plan --git-range $BASE_SHA..$HEAD_SHA --out plan.json
@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0  # Need full history for change detection
 
       - name: Install Kai
-        run: curl -fsSL https://kailayer.com/install.sh | sh
+        run: curl -fsSL https://kaicontext.com/install.sh | sh
 
       - name: Generate test plan
         id: plan
@@ -125,7 +125,7 @@ plan:
   stage: plan
   image: golang:1.22
   script:
-    - curl -fsSL https://kailayer.com/install.sh | sh
+    - curl -fsSL https://kaicontext.com/install.sh | sh
     - kai ci plan --git-range $CI_MERGE_REQUEST_DIFF_BASE_SHA..$CI_COMMIT_SHA --out plan.json
     - cat plan.json
   artifacts:

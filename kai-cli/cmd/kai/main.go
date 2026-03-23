@@ -1336,15 +1336,15 @@ var cloneCmd = &cobra.Command{
 Creates a new directory, initializes Kai, sets up the remote, and fetches all refs.
 
 URL formats:
-  org/repo                         Shorthand (uses default server: kailayer.com)
+  org/repo                         Shorthand (uses default server: kaicontext.com)
   http://server/tenant/repo        Full URL with server
 
 The default server can be overridden with the KAI_SERVER environment variable.
 
 Examples:
-  kai clone 1m/myrepo                                   # Clone from kailayer.com
+  kai clone 1m/myrepo                                   # Clone from kaicontext.com
   kai clone 1m/myrepo myproject                         # Clone into 'myproject' directory
-  kai clone https://kailayer.com/myorg/myrepo             # Full URL
+  kai clone https://kaicontext.com/myorg/myrepo             # Full URL
   kai clone http://localhost:8080/myorg/myrepo          # Local development
   kai clone http://localhost:8080 --tenant myorg --repo myrepo`,
 	Args: cobra.RangeArgs(1, 2),
@@ -3176,7 +3176,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Kai
-        run: curl -sSL https://get.kailayer.com | sh
+        run: curl -sSL https://get.kaicontext.com | sh
       - name: Capture and push
         env:
           KAI_TOKEN: ${{ secrets.KAI_TOKEN }}
@@ -3225,7 +3225,7 @@ kai-sync:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - apk add --no-cache curl
-    - curl -sSL https://get.kailayer.com | sh
+    - curl -sSL https://get.kaicontext.com | sh
     - kai auth login --token "$KAI_TOKEN"
     - kai capture -m "$CI_COMMIT_MESSAGE"
     - kai push
@@ -15217,7 +15217,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	binaryName := fmt.Sprintf("kai-%s-%s", goos, goarch)
 
 	// GitHub releases URL
-	downloadURL := fmt.Sprintf("https://github.com/kailayerhq/kai/releases/latest/download/%s.gz", binaryName)
+	downloadURL := fmt.Sprintf("https://github.com/kaicontext/kai/releases/latest/download/%s.gz", binaryName)
 
 	fmt.Printf("Current version: %s\n", Version)
 	fmt.Printf("Binary: %s\n", binaryName)
@@ -15231,7 +15231,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if resp.StatusCode == 404 {
 		fmt.Printf("No binary available for %s/%s\n", goos, goarch)
-		fmt.Println("Try: go install github.com/kailayerhq/kai/kai-cli/cmd/kai@latest")
+		fmt.Println("Try: go install github.com/kaicontext/kai/kai-cli/cmd/kai@latest")
 		return nil
 	}
 

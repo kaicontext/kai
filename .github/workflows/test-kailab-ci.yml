@@ -12,9 +12,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.KAILAB_SSH_KEY }}" > ~/.ssh/kailab
           chmod 600 ~/.ssh/kailab
-          ssh-keyscan -H git.kailayer.com >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H git.kaicontext.com >> ~/.ssh/known_hosts 2>/dev/null
           cat >> ~/.ssh/config << EOF
-          Host git.kailayer.com
+          Host git.kaicontext.com
             IdentityFile ~/.ssh/kailab
             IdentitiesOnly yes
           EOF
@@ -24,7 +24,7 @@ jobs:
           mkdir test-ci-project
           cd test-ci-project
           git init
-          git config user.email "ci@kailayer.com"
+          git config user.email "ci@kaicontext.com"
           git config user.name "Kailab CI Test"
 
           # Create go files
@@ -90,7 +90,7 @@ jobs:
       - name: Push to Kailab
         run: |
           cd test-ci-project
-          git remote add origin git@git.kailayer.com:kailayer/test.git
+          git remote add origin git@git.kaicontext.com:kailayer/test.git
           git push -u origin main --force
           echo "Pushed to Kailab successfully"
 
@@ -104,5 +104,5 @@ jobs:
           echo "Checking CI run status..."
           # Use curl to check the workflow runs API
           # Note: This requires the control plane to be accessible
-          curl -s "https://kailayer.com/api/v1/orgs/kailayer/repos/test/runs" \
+          curl -s "https://kaicontext.com/api/v1/orgs/kailayer/repos/test/runs" \
             -H "Authorization: Bearer ${{ secrets.KAILAB_TOKEN }}" || echo "Could not check CI status (auth required)"

@@ -21,10 +21,10 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kailayerhq/kai.git",
+    "url": "https://github.com/kaicontext/kai.git",
     "directory": "packages/kai-mcp"
   },
-  "homepage": "https://kailayer.com",
+  "homepage": "https://kaicontext.com",
   "files": [
     "bin/",
     "install.js",

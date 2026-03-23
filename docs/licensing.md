@@ -45,7 +45,7 @@ Kai CLI includes opt-in anonymous telemetry. It is:
 
 ## How do you handle security disclosures?
 
-See [SECURITY.md](../SECURITY.md). Report vulnerabilities to security@kailayer.com. We follow coordinated disclosure with a 48-hour acknowledgment SLA.
+See [SECURITY.md](../SECURITY.md). Report vulnerabilities to security@kaicontext.com. We follow coordinated disclosure with a 48-hour acknowledgment SLA.
 
 ## What about patents?
 

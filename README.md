@@ -10,7 +10,7 @@ Kai understands what code *means* — functions, dependencies, behavior impact �
 not just which lines changed. This semantic graph powers precise CI,
 context-aware IDEs, and verifiable AI coding agents.
 
-[kailayer.com](https://kailayer.com) · [Docs](https://docs.kailayer.com) · [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg)
+[kaicontext.com](https://kaicontext.com) · [Docs](https://docs.kaicontext.com) · [Slack](https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg)
 
 ---
 
@@ -18,10 +18,10 @@ context-aware IDEs, and verifiable AI coding agents.
 
 ```bash
 # curl
-curl -sSL https://get.kailayer.com | sh
+curl -sSL https://get.kaicontext.com | sh
 
 # Homebrew
-brew install kailayerhq/kai/kai
+brew install kaicontext/kai/kai
 ```
 
 ## Quick Start
@@ -29,7 +29,7 @@ brew install kailayerhq/kai/kai
 ```bash
 kai init                      # Detects git, offers history import + auto-sync
 kai capture -m "Initial"      # Snapshot your code with a message
-kai push                      # Push to kailayer.com
+kai push                      # Push to kaicontext.com
 kai diff                      # Semantic change impact
 ```
 
@@ -69,7 +69,7 @@ Kai reviews are anchored to semantic changesets, not line diffs.
 
 ```bash
 kai review open --title "Add auth middleware"   # Create a review
-kai push                                         # Push to kailayer.com
+kai push                                         # Push to kaicontext.com
 kai fetch --review abc123                        # Sync comments from web
 kai review comments abc123                       # View inline comments locally
 ```
@@ -135,7 +135,7 @@ Kai Cloud is the hosted version — same code, managed infrastructure.
 
 ```
 kai capture → local semantic graph (SQLite)
-kai push    → kailayer.com (Postgres + GCS)
+kai push    → kaicontext.com (Postgres + GCS)
                 ├── File viewer with search, language breakdown
                 ├── CI with SSE live updates
                 ├── Code reviews with semantic diffs

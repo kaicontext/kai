@@ -7,7 +7,7 @@ const path = require("path");
 const https = require("https");
 const zlib = require("zlib");
 
-const REPO = "kailayerhq/kai";
+const REPO = "kaicontext/kai";
 const VERSION = require("./package.json").version;
 
 function getPlatform() {
@@ -64,6 +64,6 @@ async function main() {
 
 main().catch((err) => {
   console.error(`Failed to install kai binary: ${err.message}`);
-  console.error("You can install manually: curl -sSL https://get.kailayer.com | sh");
+  console.error("You can install manually: curl -sSL https://get.kaicontext.com | sh");
   process.exit(1);
 });

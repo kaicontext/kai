@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: kailayerhq/kailab-runner
+  IMAGE_NAME: kaicontext/kailab-runner
 
 jobs:
   build-and-push:
@@ -90,7 +90,7 @@ jobs:
       - name: Update image tag
         run: |
           cd kailab-control/deploy/kubernetes
-          kustomize edit set image ghcr.io/kailayerhq/kailab-runner=ghcr.io/kailayerhq/kailab-runner:${GITHUB_SHA::7}
+          kustomize edit set image ghcr.io/kaicontext/kailab-runner=ghcr.io/kaicontext/kailab-runner:${GITHUB_SHA::7}
 
       - name: Deploy to Kubernetes
         run: |

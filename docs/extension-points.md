@@ -1,6 +1,6 @@
 # Extension Points
 
-This document identifies stable internal APIs and extension points where server features (in [kai-server](https://github.com/kailayerhq/kai-server)) can be attached without refactoring the core engine.
+This document identifies stable internal APIs and extension points where server features (in [kai-server](https://github.com/kaicontext/kai-server)) can be attached without refactoring the core engine.
 
 ## 1. Storage Backends
 

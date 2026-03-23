@@ -6,10 +6,10 @@ All Kai components are open source under Apache 2.0, split across two repositori
 
 | Component | Repository | What it does | License |
 |-----------|-----------|-------------|---------|
-| `kai-core` | [kai](https://github.com/kailayerhq/kai) | Tree-sitter parsing, semantic graph, diffing, merging, change detection, intent generation | Apache 2.0 |
-| `kai-cli` | [kai](https://github.com/kailayerhq/kai) | All CLI commands (`capture`, `diff`, `review`, `ci plan`, `workspace`), local SQLite graph store, Git integration | Apache 2.0 |
-| `kailab` | [kai-server](https://github.com/kailayerhq/kai-server) | Data plane server (Git protocol, object storage, SSH server) | Apache 2.0 |
-| `kailab-control` | [kai-server](https://github.com/kailayerhq/kai-server) | Control plane (auth, orgs, repos, CI runner, web UI) | Apache 2.0 |
+| `kai-core` | [kai](https://github.com/kaicontext/kai) | Tree-sitter parsing, semantic graph, diffing, merging, change detection, intent generation | Apache 2.0 |
+| `kai-cli` | [kai](https://github.com/kaicontext/kai) | All CLI commands (`capture`, `diff`, `review`, `ci plan`, `workspace`), local SQLite graph store, Git integration | Apache 2.0 |
+| `kailab` | [kai-server](https://github.com/kaicontext/kai-server) | Data plane server (Git protocol, object storage, SSH server) | Apache 2.0 |
+| `kailab-control` | [kai-server](https://github.com/kaicontext/kai-server) | Control plane (auth, orgs, repos, CI runner, web UI) | Apache 2.0 |
 
 ### What you can do with Kai
 
@@ -26,7 +26,7 @@ Everything needed for a single developer or team to get value from Kai runs loca
 
 ## Kai Cloud
 
-Kai Cloud is the hosted service at kailayer.com. It runs the same open-source server code — you're paying for managed infrastructure, not proprietary features:
+Kai Cloud is the hosted service at kaicontext.com. It runs the same open-source server code — you're paying for managed infrastructure, not proprietary features:
 
 | Feature | Description |
 |---------|------------|

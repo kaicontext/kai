@@ -285,7 +285,7 @@ kai test affected @snap:prev @snap:last
 Configure remote Kailab servers.
 
 ```bash
-kai remote set origin https://kailayer.com --tenant myorg --repo myrepo
+kai remote set origin https://kaicontext.com --tenant myorg --repo myrepo
 kai remote get origin
 kai remote list
 kai remote del origin
@@ -320,9 +320,9 @@ kai fetch --review abc123            # Fetch and recreate review locally
 Clone a Kai repository from a remote server.
 
 ```bash
-kai clone myorg/myrepo               # From kailayer.com (default)
+kai clone myorg/myrepo               # From kaicontext.com (default)
 kai clone myorg/myrepo myproject     # Into specific directory
-kai clone https://kailayer.com/myorg/myrepo
+kai clone https://kaicontext.com/myorg/myrepo
 kai clone http://localhost:8080/myorg/myrepo   # Local dev
 ```
 
@@ -493,7 +493,7 @@ Many commands accept selectors to reference snapshots, changesets, and workspace
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `KAI_VERBOSE` | Enable debug output (`1` or `true`) | off |
-| `KAI_SERVER` | Remote server URL | `https://kailayer.com` |
+| `KAI_SERVER` | Remote server URL | `https://kaicontext.com` |
 | `KAI_SSH_SIGN_KEY` | SSH key for signing | -- |
 | `KAI_FORCE_FULL` | Force full test suite | off |
 | `KAI_PANIC` | Panic switch (same as `KAI_FORCE_FULL`) | off |

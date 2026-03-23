@@ -1,12 +1,12 @@
 #!/bin/sh
 set -e
 
-# Kai installer — https://kailayer.com
+# Kai installer — https://kaicontext.com
 # Usage:
-#   curl -sSL https://get.kailayer.com | sh
-#   curl -sSL https://get.kailayer.com | VERSION=0.3.1 sh
+#   curl -sSL https://get.kaicontext.com | sh
+#   curl -sSL https://get.kaicontext.com | VERSION=0.3.1 sh
 
-REPO="kailayerhq/kai"
+REPO="kaicontext/kai"
 INSTALL_DIR="/usr/local/bin"
 BINARY="kai"
 VERSION="${VERSION:-latest}"

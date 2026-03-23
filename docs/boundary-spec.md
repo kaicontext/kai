@@ -44,7 +44,7 @@
 
 ### kai-server (Separate Repository) — Apache 2.0
 
-Server infrastructure lives in a separate repository ([kai-server](https://github.com/kailayerhq/kai-server)):
+Server infrastructure lives in a separate repository ([kai-server](https://github.com/kaicontext/kai-server)):
 
 - **kailab/** — Data plane (Git protocol, object storage, SSH server)
 - **kailab-control/** — Control plane (auth, orgs, repos, CI runner, web UI)
@@ -63,7 +63,7 @@ Server infrastructure lives in a separate repository ([kai-server](https://githu
 
 ### Structural enforcement
 
-1. **Server code is not in this repository** — kailab, kailab-control, deploy are in the [kai-server](https://github.com/kailayerhq/kai-server) repo
+1. **Server code is not in this repository** — kailab, kailab-control, deploy are in the [kai-server](https://github.com/kaicontext/kai-server) repo
 2. **kai-core has zero network dependencies** — go.mod contains only tree-sitter, BLAKE3, doublestar, yaml
 3. **Cloud URLs are configurable** — `KAI_SERVER` env var or `kai remote set`
 4. **Telemetry is opt-in** — disabled by default in CI, controlled via `KAI_TELEMETRY`
