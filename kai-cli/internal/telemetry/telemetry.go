@@ -22,7 +22,7 @@ import (
 
 const (
 	// UploadEndpoint is the telemetry batch upload URL.
-	UploadEndpoint = "https://kailayer.com/v1/telemetry/batch"
+	UploadEndpoint = "https://kaicontext.com/v1/telemetry/batch"
 
 	// SpoolMaxBytes is the hard cap on spool file size (1 MB).
 	SpoolMaxBytes = 1 << 20
