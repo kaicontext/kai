@@ -87,7 +87,12 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 	// Future-proof: enforce foreign key constraints if we add them
 	conn.Exec("PRAGMA foreign_keys=ON")
 
-	return &DB{conn: conn, objectsDir: objectsDir}, nil
+	db := &DB{conn: conn, objectsDir: objectsDir}
+
+	// Auto-migrate: ensure authorship table exists on every open
+	db.migrateAuthorship()
+
+	return db, nil
 }
 
 // Close closes the database connection.

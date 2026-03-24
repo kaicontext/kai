@@ -615,6 +615,11 @@ var (
 	ciCommentRepo   string
 	ciCommentPR     int
 	ciCommentDryRun bool
+	// ci authorship flags
+	ciAuthorshipToken  string
+	ciAuthorshipRepo   string
+	ciAuthorshipPR     int
+	ciAuthorshipDryRun bool
 
 	// Remote CI flags
 	ciRunsLimit int
@@ -2290,6 +2295,12 @@ func init() {
 	ciCmd.AddCommand(ciCommentCmd)
 	ciCommentCmd.Flags().StringVar(&ciCommentReport, "report", "", "Path to shadow report JSON")
 	ciCommentCmd.Flags().StringVar(&ciCommentToken, "token", "", "GitHub API token (default: $GITHUB_TOKEN)")
+
+	ciCmd.AddCommand(ciAuthorshipCmd)
+	ciAuthorshipCmd.Flags().StringVar(&ciAuthorshipToken, "token", "", "GitHub API token (default: $GITHUB_TOKEN)")
+	ciAuthorshipCmd.Flags().StringVar(&ciAuthorshipRepo, "repo", "", "GitHub repo owner/name (default: $GITHUB_REPOSITORY)")
+	ciAuthorshipCmd.Flags().IntVar(&ciAuthorshipPR, "pr", 0, "PR number (default: auto-detect)")
+	ciAuthorshipCmd.Flags().BoolVar(&ciAuthorshipDryRun, "dry-run", false, "Print comment to stdout instead of posting")
 
 	// Remote CI commands (per protocol spec docs/protocol.md section 3)
 	ciCmd.AddCommand(ciRunsCmd)
@@ -16112,6 +16123,193 @@ func runCIComment(cmd *cobra.Command, args []string) error {
 }
 
 const kaiCommentMarker = "<!-- kai-ci-summary -->"
+const kaiAuthorshipMarker = "<!-- kai-authorship-summary -->"
+
+var ciAuthorshipCmd = &cobra.Command{
+	Use:   "authorship",
+	Short: "Post AI authorship summary as a GitHub PR comment",
+	Long: `Queries authorship data from the latest capture and posts a summary
+showing AI vs human code attribution as a PR comment.
+
+Auto-detects GitHub context from environment variables:
+  GITHUB_TOKEN       - API token for authentication
+  GITHUB_REPOSITORY  - owner/repo
+  GITHUB_EVENT_PATH  - event payload (to extract PR number)
+
+Examples:
+  kai ci authorship
+  kai ci authorship --dry-run
+  kai ci authorship --token $TOKEN --repo owner/name --pr 42`,
+	Args: cobra.NoArgs,
+	RunE: runCIAuthorship,
+}
+
+func runCIAuthorship(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Resolve latest snapshot
+	resolver := ref.NewResolver(db)
+	kind := ref.KindSnapshot
+	result, err := resolver.Resolve("@snap:last", &kind)
+	if err != nil {
+		return fmt.Errorf("no snapshots found — run 'kai capture' first")
+	}
+	snapID := result.ID
+
+	// Get project stats
+	stats, err := authorship.ProjectStats(db, snapID)
+	if err != nil {
+		return fmt.Errorf("computing authorship stats: %w", err)
+	}
+
+	// Get per-file summaries for changed files
+	// Use all authorship ranges to find which files have data
+	allRanges, err := db.GetAllAuthorshipRanges(snapID)
+	if err != nil {
+		return fmt.Errorf("querying authorship ranges: %w", err)
+	}
+
+	// Group by file for per-file stats
+	fileLines := make(map[string]struct{ ai, total int })
+	fileAgents := make(map[string]map[string]bool)
+	for _, r := range allRanges {
+		lines := r.EndLine - r.StartLine + 1
+		fl := fileLines[r.FilePath]
+		fl.total += lines
+		if r.AuthorType == "ai" {
+			fl.ai += lines
+			if fileAgents[r.FilePath] == nil {
+				fileAgents[r.FilePath] = make(map[string]bool)
+			}
+			if r.Agent != "" {
+				fileAgents[r.FilePath][r.Agent] = true
+			}
+		}
+		fileLines[r.FilePath] = fl
+	}
+
+	// Format comment
+	comment := formatAuthorshipComment(stats, fileLines, fileAgents)
+
+	if ciAuthorshipDryRun {
+		fmt.Println(comment)
+		return nil
+	}
+
+	// Resolve GitHub context
+	token := ciAuthorshipToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	repo := ciAuthorshipRepo
+	if repo == "" {
+		repo = os.Getenv("GITHUB_REPOSITORY")
+	}
+	prNum := ciAuthorshipPR
+	if prNum == 0 {
+		prNum = detectPRNumber()
+	}
+
+	if token == "" || repo == "" || prNum == 0 {
+		if token == "" {
+			fmt.Fprintf(os.Stderr, "No GitHub token available, printing to stdout.\n")
+		} else if prNum == 0 {
+			fmt.Fprintf(os.Stderr, "No PR number detected, printing to stdout.\n")
+		}
+		fmt.Println(comment)
+		return nil
+	}
+
+	if err := postOrUpdateGitHubComment(token, repo, prNum, comment); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not post GitHub comment: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Printing to stdout instead.\n")
+		fmt.Println(comment)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Posted AI authorship summary to PR #%d\n", prNum)
+	return nil
+}
+
+func formatAuthorshipComment(stats *authorship.ProjectSummary, fileLines map[string]struct{ ai, total int }, fileAgents map[string]map[string]bool) string {
+	var b strings.Builder
+
+	b.WriteString(kaiAuthorshipMarker + "\n")
+	b.WriteString("## AI Authorship\n\n")
+
+	if stats.TotalLines == 0 {
+		b.WriteString("No authorship data found.\n")
+		return b.String()
+	}
+
+	// Summary line
+	humanPct := 100 - stats.AIPct
+	b.WriteString(fmt.Sprintf("**%.0f%% AI-authored**, %.0f%% human (%d lines tracked)\n\n", stats.AIPct, humanPct, stats.TotalLines))
+
+	// Agent breakdown
+	if len(stats.ByAgent) > 0 {
+		for agent, lines := range stats.ByAgent {
+			pct := float64(lines) / float64(stats.TotalLines) * 100
+			b.WriteString(fmt.Sprintf("- **%s**: %d lines (%.0f%%)\n", agent, lines, pct))
+		}
+		b.WriteString("\n")
+	}
+
+	// Per-file table (only files with AI contribution, max 20)
+	type fileStat struct {
+		path   string
+		aiPct  float64
+		ai     int
+		total  int
+		agents []string
+	}
+	var aiFiles []fileStat
+	for path, fl := range fileLines {
+		if fl.ai > 0 {
+			pct := float64(fl.ai) / float64(fl.total) * 100
+			var agents []string
+			for a := range fileAgents[path] {
+				agents = append(agents, a)
+			}
+			aiFiles = append(aiFiles, fileStat{path, pct, fl.ai, fl.total, agents})
+		}
+	}
+
+	if len(aiFiles) > 0 {
+		// Sort by AI percentage descending
+		sort.Slice(aiFiles, func(i, j int) bool {
+			return aiFiles[i].aiPct > aiFiles[j].aiPct
+		})
+
+		b.WriteString("<details>\n<summary>Files with AI-authored code</summary>\n\n")
+		b.WriteString("| File | AI | Lines | Agent |\n")
+		b.WriteString("|------|-----|-------|-------|\n")
+
+		limit := len(aiFiles)
+		if limit > 20 {
+			limit = 20
+		}
+		for _, f := range aiFiles[:limit] {
+			agent := "-"
+			if len(f.agents) > 0 {
+				agent = strings.Join(f.agents, ", ")
+			}
+			b.WriteString(fmt.Sprintf("| `%s` | %.0f%% | %d/%d | %s |\n", f.path, f.aiPct, f.ai, f.total, agent))
+		}
+		if len(aiFiles) > 20 {
+			b.WriteString(fmt.Sprintf("\n*...and %d more files*\n", len(aiFiles)-20))
+		}
+		b.WriteString("\n</details>\n")
+	}
+
+	b.WriteString("\n---\n*Generated by [Kai](https://kailayer.com)*\n")
+
+	return b.String()
+}
 
 func formatPRComment(report ShadowReport) string {
 	var b strings.Builder
