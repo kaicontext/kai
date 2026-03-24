@@ -1942,7 +1942,32 @@ kai capture
 	}
 
 	fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
-	fmt.Println("Kai will automatically capture before each commit.")
+
+	// Also install pre-push hook for kai push
+	pushHookPath := filepath.Join(".git", "hooks", "pre-push")
+	if data, err := os.ReadFile(pushHookPath); err == nil {
+		if strings.Contains(string(data), kaiHookMarker) {
+			fmt.Println("Kai pre-push hook already installed.")
+		} else {
+			fmt.Println("Note: pre-push hook already exists. Add 'kai push' manually if desired.")
+		}
+	} else {
+		pushHookContent := `#!/bin/sh
+` + kaiHookMarker + `
+# Automatically push Kai semantic graph when you git push.
+# Installed by: kai hook install
+# Remove with:  kai hook uninstall
+
+kai push
+`
+		if err := os.WriteFile(pushHookPath, []byte(pushHookContent), 0755); err != nil {
+			fmt.Printf("Warning: could not install pre-push hook: %v\n", err)
+		} else {
+			fmt.Println("Installed pre-push hook: .git/hooks/pre-push")
+		}
+	}
+
+	fmt.Println("Kai will automatically capture on commit and push on git push.")
 	return nil
 }
 
@@ -3058,6 +3083,19 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				if err := generateCIConfig(ciPlatform); err != nil {
 					fmt.Printf("  Warning: CI config generation failed: %v\n", err)
 				}
+			}
+		}
+	}
+
+	// Offer to install git hooks (capture on commit, push on git push)
+	if _, err := os.Stat(".git"); err == nil {
+		fmt.Print("\nInstall git hooks? (auto-capture on commit, auto-push on git push) [Y/n] ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" || input == "y" || input == "yes" {
+			if err := runHookInstall(cmd, nil); err != nil {
+				debugf("hook install: %v", err)
 			}
 		}
 	}
