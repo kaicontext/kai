@@ -51,6 +51,27 @@ function hello(name) {
 	}
 }
 
+func TestParser_ParseUnsupportedLanguage(t *testing.T) {
+	parser := NewParser()
+
+	code := []byte(`
+public class Main {
+	public static void main(String[] args) {
+		System.out.println("Hello, World!");
+	}
+}
+`)
+
+	_, err := parser.Parse(code, "java")
+	if err == nil {
+		t.Fatal("Expected error for unsupported language 'java', got nil")
+	}
+
+	if err.Error() != "unsupported language: java" {
+		t.Errorf("Expected error message to contain 'unsupported', got: %v", err)
+	}
+}
+
 func TestParser_ParseClass(t *testing.T) {
 	parser := NewParser()
 
