@@ -3,6 +3,7 @@ package snapshot
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -268,6 +269,13 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 	files := make([]*fileInfo, 0, len(edges))
 	filesByPath := make(map[string]*fileInfo)
 
+	// Collect package.json files separately for workspace resolution
+	type pkgJSONInfo struct {
+		path    string
+		content []byte
+	}
+	var pkgJSONFiles []pkgJSONInfo
+
 	for _, edge := range edges {
 		fileNode, err := c.db.GetNode(edge.Dst)
 		if err != nil {
@@ -280,7 +288,18 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		path, _ := fileNode.Payload["path"].(string)
 		lang, _ := fileNode.Payload["lang"].(string)
 
-		// Only process supported languages
+		// Read content for package.json files (needed for workspace resolution)
+		if filepath.Base(path) == "package.json" {
+			digest, ok := fileNode.Payload["digest"].(string)
+			if ok {
+				content, err := c.db.ReadObject(digest)
+				if err == nil {
+					pkgJSONFiles = append(pkgJSONFiles, pkgJSONInfo{path: path, content: content})
+				}
+			}
+		}
+
+		// Only process supported languages for graph analysis
 		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" &&
 			lang != "go" && lang != "py" && lang != "rb" && lang != "rs" {
 			continue
@@ -348,6 +367,62 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		pyFileIndex[modPath] = path
 	}
 
+	// Build JS/TS workspace package index: package name -> entry file path
+	// Scans package.json files in the snapshot to map "@scope/pkg" or "pkg"
+	// to the package's main/types entry point (e.g., "packages/foo/src/index.ts").
+	// This enables resolving non-relative imports like "@kai-demo/normalize"
+	// to actual files in the repo, creating proper IMPORTS edges across packages.
+	jsWorkspaceIndex := make(map[string]string) // package name -> resolved entry path
+	for _, pjf := range pkgJSONFiles {
+		var pkg struct {
+			Name    string `json:"name"`
+			Main    string `json:"main"`
+			Types   string `json:"types"`
+			Exports json.RawMessage `json:"exports"`
+		}
+		if err := json.Unmarshal(pjf.content, &pkg); err != nil || pkg.Name == "" {
+			continue
+		}
+		pkgDir := filepath.Dir(pjf.path)
+
+		// Determine entry point: try main, types, then common defaults
+		entry := pkg.Main
+		if entry == "" {
+			entry = pkg.Types
+		}
+		if entry == "" {
+			// Try common conventions
+			for _, candidate := range []string{
+				"src/index.ts", "src/index.tsx", "src/index.js",
+				"index.ts", "index.tsx", "index.js",
+				"lib/index.ts", "lib/index.js",
+			} {
+				full := filepath.Join(pkgDir, candidate)
+				if _, ok := filesByPath[full]; ok {
+					entry = candidate
+					break
+				}
+			}
+		}
+		if entry == "" {
+			continue
+		}
+
+		entryPath := filepath.Clean(filepath.Join(pkgDir, entry))
+		// Resolve entry point: it might omit the extension
+		if _, ok := filesByPath[entryPath]; ok {
+			jsWorkspaceIndex[pkg.Name] = entryPath
+		} else {
+			// Try adding extensions (main: "src/index" without .ts)
+			for _, candidate := range parse.PossibleFilePaths(entryPath) {
+				if _, ok := filesByPath[candidate]; ok {
+					jsWorkspaceIndex[pkg.Name] = candidate
+					break
+				}
+			}
+		}
+	}
+
 	// Second pass: extract imports and build import graph
 	// importGraph maps file path -> list of imported file paths
 	importGraph := make(map[string][]string)
@@ -382,16 +457,64 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 				imports = append(imports, resolved...)
 
 			default:
-				// JS/TS/Ruby/Rust: relative import resolution
-				if !imp.IsRelative {
-					continue
-				}
-				dir := filepath.Dir(fi.path)
-				basePath := parse.ResolveImportPath(dir, imp.Source)
-				for _, candidate := range parse.PossibleFilePaths(basePath) {
-					if _, ok := filesByPath[candidate]; ok {
-						imports = append(imports, candidate)
-						break
+				// JS/TS/Ruby/Rust: import resolution
+				if imp.IsRelative {
+					// Relative import: resolve against file directory
+					dir := filepath.Dir(fi.path)
+					basePath := parse.ResolveImportPath(dir, imp.Source)
+					for _, candidate := range parse.PossibleFilePaths(basePath) {
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				} else if fi.lang == "js" || fi.lang == "ts" || fi.lang == "jsx" || fi.lang == "tsx" {
+					// Non-relative import: try workspace package resolution
+					if entryPath, ok := jsWorkspaceIndex[imp.Source]; ok {
+						imports = append(imports, entryPath)
+					} else {
+						// Subpath import (e.g., "@kai-demo/container/tokens")
+						source := imp.Source
+						for {
+							lastSlash := strings.LastIndex(source, "/")
+							if lastSlash <= 0 {
+								break
+							}
+							if source[0] == '@' && strings.Count(source[:lastSlash], "/") == 0 {
+								break
+							}
+							parent := source[:lastSlash]
+							subpath := imp.Source[len(parent)+1:]
+							if entryPath, ok := jsWorkspaceIndex[parent]; ok {
+								pkgDir := filepath.Dir(entryPath)
+								subBase := filepath.Join(pkgDir, subpath)
+								resolved := false
+								if _, ok := filesByPath[subBase]; ok {
+									imports = append(imports, subBase)
+									resolved = true
+								}
+								if !resolved {
+									for _, candidate := range parse.PossibleFilePaths(subBase) {
+										if _, ok := filesByPath[candidate]; ok {
+											imports = append(imports, candidate)
+											resolved = true
+											break
+										}
+									}
+								}
+								if !resolved {
+									subBaseSrc := filepath.Join(pkgDir, "src", subpath)
+									for _, candidate := range parse.PossibleFilePaths(subBaseSrc) {
+										if _, ok := filesByPath[candidate]; ok {
+											imports = append(imports, candidate)
+											break
+										}
+									}
+								}
+								break
+							}
+							source = parent
+						}
 					}
 				}
 			}
@@ -545,27 +668,62 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 					}
 				}
 			} else {
-				// JS/TS/Python: original logic — match non-method calls via imports
+				// JS/TS/Python: match non-method calls via imports
 				if call.IsMethodCall {
 					continue
 				}
 				for _, imp := range parsed.Imports {
-					if !imp.IsRelative {
-						continue
-					}
 					var importedAs string
 					if imp.Default == call.CalleeName {
 						importedAs = imp.Default
 					} else if originalName, ok := imp.Named[call.CalleeName]; ok {
 						importedAs = originalName
 					}
-					if importedAs != "" {
+					if importedAs == "" {
+						continue
+					}
+					if imp.IsRelative {
 						dir := filepath.Dir(fi.path)
 						basePath := parse.ResolveImportPath(dir, imp.Source)
 						for _, candidate := range parse.PossibleFilePaths(basePath) {
 							if _, ok := filesByPath[candidate]; ok {
 								targetFiles = append(targetFiles, candidate)
 								break
+							}
+						}
+					} else if fi.lang == "js" || fi.lang == "ts" || fi.lang == "jsx" || fi.lang == "tsx" {
+						// Workspace package: resolve via index
+						if entryPath, ok := jsWorkspaceIndex[imp.Source]; ok {
+							targetFiles = append(targetFiles, entryPath)
+						} else {
+							// Subpath import resolution for calls
+							source := imp.Source
+							for {
+								lastSlash := strings.LastIndex(source, "/")
+								if lastSlash <= 0 {
+									break
+								}
+								if source[0] == '@' && strings.Count(source[:lastSlash], "/") == 0 {
+									break
+								}
+								parent := source[:lastSlash]
+								subpath := imp.Source[len(parent)+1:]
+								if entryPath, ok := jsWorkspaceIndex[parent]; ok {
+									pkgDir := filepath.Dir(entryPath)
+									subBase := filepath.Join(pkgDir, subpath)
+									if _, ok := filesByPath[subBase]; ok {
+										targetFiles = append(targetFiles, subBase)
+									} else {
+										for _, candidate := range parse.PossibleFilePaths(subBase) {
+											if _, ok := filesByPath[candidate]; ok {
+												targetFiles = append(targetFiles, candidate)
+												break
+											}
+										}
+									}
+									break
+								}
+								source = parent
 							}
 						}
 					}
