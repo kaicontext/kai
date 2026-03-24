@@ -21,6 +21,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"kai-core/parse"
+	"kai/internal/authorship"
 	"kai/internal/dirio"
 	"kai/internal/graph"
 	"kai/internal/module"
@@ -64,6 +65,9 @@ type Server struct {
 	kaiDir   string             // path to .kai directory
 	version  string             // CLI version for MCP handshake
 	initJob  *initState         // non-nil while background init is running
+	// Authorship tracking
+	sessionID    string                       // unique per MCP process lifetime
+	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
 }
 
 // NewServer creates a new MCP server for the given project directory.
@@ -71,10 +75,13 @@ type Server struct {
 // Otherwise, initialization is deferred until the first data request.
 func NewServer(workDir, version string) *Server {
 	kaiDir := filepath.Join(workDir, ".kai")
+	sessionID := fmt.Sprintf("mcp_%d_%d", os.Getpid(), time.Now().UnixMilli())
 	s := &Server{
-		workDir: workDir,
-		kaiDir:  kaiDir,
-		version: version,
+		workDir:   workDir,
+		kaiDir:    kaiDir,
+		version:   version,
+		sessionID: sessionID,
+		cpWriter:  authorship.NewCheckpointWriter(kaiDir, sessionID),
 	}
 
 	// Fast path: if .kai exists, try to open the store immediately
@@ -557,6 +564,48 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("scope", mcp.Description("What to capture: 'all' (full directory, default), 'staged' (git staged files only)")),
 		),
 		log("kai_refresh", s.handleRefresh),
+	)
+
+	// --- Authorship / AI Attribution Tools ---
+
+	// kai_checkpoint — record an AI edit event
+	srv.AddTool(
+		mcp.NewTool("kai_checkpoint",
+			mcp.WithToolAnnotation(mcp.ToolAnnotation{
+				ReadOnlyHint:    mcp.ToBoolPtr(false),
+				DestructiveHint: mcp.ToBoolPtr(false),
+				IdempotentHint:  mcp.ToBoolPtr(true),
+				OpenWorldHint:   mcp.ToBoolPtr(false),
+			}),
+			mcp.WithDescription("Record an AI code authorship checkpoint. Call this after editing files to track which code was AI-generated. Lightweight — writes a small JSON file, no DB needed."),
+			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
+			mcp.WithNumber("start_line", mcp.Required(), mcp.Description("First line of the edit (1-based)")),
+			mcp.WithNumber("end_line", mcp.Required(), mcp.Description("Last line of the edit (1-based)")),
+			mcp.WithString("action", mcp.Description("Type of edit: insert, modify, delete (default: modify)")),
+			mcp.WithString("agent", mcp.Description("Agent name (default: auto-detected from MCP session)")),
+			mcp.WithString("model", mcp.Description("Model name (e.g. claude-opus-4-6)")),
+		),
+		log("kai_checkpoint", s.handleCheckpoint),
+	)
+
+	// kai_blame — show AI vs human authorship for a file
+	srv.AddTool(
+		mcp.NewTool("kai_blame",
+			readOnly(),
+			mcp.WithDescription("Show AI vs human authorship for a file. Returns per-line attribution or a summary showing which agent/model authored each section."),
+			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
+			mcp.WithString("format", mcp.Description("Output format: 'lines' (per-line ranges) or 'summary' (percentages). Default: summary")),
+		),
+		log("kai_blame", s.handleBlame),
+	)
+
+	// kai_stats — project-wide AI authorship statistics
+	srv.AddTool(
+		mcp.NewTool("kai_stats",
+			readOnly(),
+			mcp.WithDescription("Show AI vs human code authorship statistics for the project. Returns overall percentages and per-agent breakdowns."),
+		),
+		log("kai_stats", s.handleStats),
 	)
 }
 
@@ -1806,4 +1855,153 @@ func optBool(req mcp.CallToolRequest, key string) bool {
 // optFloat returns an optional float argument, or the default if not present.
 func optFloat(req mcp.CallToolRequest, key string, def float64) float64 {
 	return req.GetFloat(key, def)
+}
+
+// --- Authorship Handlers ---
+
+func (s *Server) handleCheckpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// kai_checkpoint does NOT require ensureReady — it's filesystem-only
+	file := optString(req, "file")
+	if file == "" {
+		return mcp.NewToolResultError("missing required parameter 'file'"), nil
+	}
+
+	startLine := int(optFloat(req, "start_line", 0))
+	endLine := int(optFloat(req, "end_line", 0))
+	if startLine <= 0 || endLine <= 0 {
+		return mcp.NewToolResultError("start_line and end_line must be positive integers"), nil
+	}
+	if endLine < startLine {
+		endLine = startLine
+	}
+
+	action := optString(req, "action")
+	if action == "" {
+		action = "modify"
+	}
+	agent := optString(req, "agent")
+	if agent == "" {
+		agent = "mcp-agent" // generic default
+	}
+	model := optString(req, "model")
+
+	cp := authorship.CheckpointRecord{
+		File:       file,
+		StartLine:  startLine,
+		EndLine:    endLine,
+		Action:     action,
+		AuthorType: "ai",
+		Agent:      agent,
+		Model:      model,
+		Timestamp:  time.Now().UnixMilli(),
+	}
+
+	seq, err := s.cpWriter.Write(cp)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("writing checkpoint: %v", err)), nil
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":     "recorded",
+		"session_id": s.sessionID,
+		"seq":        seq,
+		"file":       file,
+		"lines":      fmt.Sprintf("%d-%d", startLine, endLine),
+	})
+}
+
+func (s *Server) handleBlame(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
+	file := optString(req, "file")
+	if file == "" {
+		return mcp.NewToolResultError("missing required parameter 'file'"), nil
+	}
+
+	snapID, err := s.latestSnapshotID()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	format := optString(req, "format")
+	if format == "" {
+		format = "summary"
+	}
+
+	if format == "summary" {
+		summary, err := authorship.BlameFileSummary(s.db, snapID, file)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("error computing blame: %v", err)), nil
+		}
+		if summary.TotalLines == 0 {
+			return jsonResult(map[string]interface{}{
+				"file":    file,
+				"status":  "no_attribution",
+				"message": "No authorship data found. Run kai capture after making edits with kai_checkpoint enabled.",
+			})
+		}
+		return jsonResult(summary)
+	}
+
+	// "lines" format — return raw ranges
+	ranges, err := authorship.Blame(s.db, snapID, file)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error computing blame: %v", err)), nil
+	}
+	if len(ranges) == 0 {
+		return jsonResult(map[string]interface{}{
+			"file":    file,
+			"status":  "no_attribution",
+			"message": "No authorship data found.",
+		})
+	}
+
+	type rangeOut struct {
+		StartLine  int    `json:"start_line"`
+		EndLine    int    `json:"end_line"`
+		AuthorType string `json:"author_type"`
+		Agent      string `json:"agent,omitempty"`
+		Model      string `json:"model,omitempty"`
+	}
+	out := make([]rangeOut, len(ranges))
+	for i, r := range ranges {
+		out[i] = rangeOut{
+			StartLine:  r.StartLine,
+			EndLine:    r.EndLine,
+			AuthorType: r.AuthorType,
+			Agent:      r.Agent,
+			Model:      r.Model,
+		}
+	}
+	return jsonResult(map[string]interface{}{
+		"file":   file,
+		"ranges": out,
+	})
+}
+
+func (s *Server) handleStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if result, ok := s.ensureReady(); !ok {
+		return result, nil
+	}
+
+	snapID, err := s.latestSnapshotID()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	stats, err := authorship.ProjectStats(s.db, snapID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("error computing stats: %v", err)), nil
+	}
+
+	if stats.TotalLines == 0 {
+		return jsonResult(map[string]interface{}{
+			"status":  "no_attribution",
+			"message": "No authorship data found. Use kai_checkpoint to record AI edits, then run kai capture.",
+		})
+	}
+
+	return jsonResult(stats)
 }

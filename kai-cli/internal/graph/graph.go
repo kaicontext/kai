@@ -34,6 +34,7 @@ const (
 	KindReview        = coregraph.KindReview
 	KindReviewComment = coregraph.KindReviewComment
 	KindIntent        = coregraph.KindIntent
+	KindAuthorshipLog = coregraph.KindAuthorshipLog
 
 	EdgeContains     = coregraph.EdgeContains
 	EdgeDefinesIn    = coregraph.EdgeDefinesIn
@@ -52,6 +53,7 @@ const (
 	EdgeCalls        = coregraph.EdgeCalls
 	EdgeImports      = coregraph.EdgeImports
 	EdgeTests        = coregraph.EdgeTests
+	EdgeAttributedIn = coregraph.EdgeAttributedIn
 )
 
 // DB wraps the SQLite database connection.
@@ -107,6 +109,7 @@ func (db *DB) ApplySchema(schemaPath string) error {
 
 	// Run migrations
 	db.migrateEdgesPK()
+	db.migrateAuthorship()
 
 	return nil
 }
@@ -784,4 +787,95 @@ func (db *DB) GetEdgesTo(dst []byte, edgeType EdgeType) ([]*Edge, error) {
 	}
 
 	return edges, rows.Err()
+}
+
+// --- Authorship ---
+
+// migrateAuthorship creates the authorship_ranges table if it doesn't exist.
+func (db *DB) migrateAuthorship() {
+	db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS authorship_ranges (
+			snapshot_id BLOB NOT NULL,
+			file_path TEXT NOT NULL,
+			start_line INTEGER NOT NULL,
+			end_line INTEGER NOT NULL,
+			author_type TEXT NOT NULL,
+			agent TEXT DEFAULT '',
+			model TEXT DEFAULT '',
+			session_id TEXT DEFAULT '',
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (snapshot_id, file_path, start_line)
+		)
+	`)
+	db.conn.Exec(`CREATE INDEX IF NOT EXISTS authorship_snap ON authorship_ranges(snapshot_id)`)
+	db.conn.Exec(`CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, file_path)`)
+}
+
+// AuthorshipRange represents a line range with AI/human attribution.
+type AuthorshipRange struct {
+	FilePath   string
+	StartLine  int
+	EndLine    int
+	AuthorType string // "ai" or "human"
+	Agent      string
+	Model      string
+	SessionID  string
+	CreatedAt  int64
+}
+
+// InsertAuthorshipRange inserts an authorship range record.
+func (db *DB) InsertAuthorshipRange(tx *sql.Tx, snapshotID []byte, r AuthorshipRange) error {
+	_, err := tx.Exec(`
+		INSERT OR REPLACE INTO authorship_ranges (snapshot_id, file_path, start_line, end_line, author_type, agent, model, session_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshotID, r.FilePath, r.StartLine, r.EndLine, r.AuthorType, r.Agent, r.Model, r.SessionID, r.CreatedAt)
+	return err
+}
+
+// GetAuthorshipRanges returns all authorship ranges for a file in a snapshot.
+func (db *DB) GetAuthorshipRanges(snapshotID []byte, filePath string) ([]AuthorshipRange, error) {
+	rows, err := db.conn.Query(`
+		SELECT file_path, start_line, end_line, author_type, agent, model, session_id, created_at
+		FROM authorship_ranges
+		WHERE snapshot_id = ? AND file_path = ?
+		ORDER BY start_line
+	`, snapshotID, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ranges []AuthorshipRange
+	for rows.Next() {
+		var r AuthorshipRange
+		if err := rows.Scan(&r.FilePath, &r.StartLine, &r.EndLine, &r.AuthorType, &r.Agent, &r.Model, &r.SessionID, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		ranges = append(ranges, r)
+	}
+	return ranges, rows.Err()
+}
+
+// GetAllAuthorshipRanges returns all authorship ranges for a snapshot.
+func (db *DB) GetAllAuthorshipRanges(snapshotID []byte) ([]AuthorshipRange, error) {
+	rows, err := db.conn.Query(`
+		SELECT file_path, start_line, end_line, author_type, agent, model, session_id, created_at
+		FROM authorship_ranges
+		WHERE snapshot_id = ?
+		ORDER BY file_path, start_line
+	`, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ranges []AuthorshipRange
+	for rows.Next() {
+		var r AuthorshipRange
+		if err := rows.Scan(&r.FilePath, &r.StartLine, &r.EndLine, &r.AuthorType, &r.Agent, &r.Model, &r.SessionID, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		ranges = append(ranges, r)
+	}
+	return ranges, rows.Err()
 }

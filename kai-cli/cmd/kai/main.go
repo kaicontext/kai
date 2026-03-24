@@ -35,6 +35,7 @@ import (
 
 	kaimcp "kai/internal/mcp"
 	"kai/internal/ai"
+	"kai/internal/authorship"
 	"kai/internal/classify"
 	semanticdiff "kai/internal/diff"
 	"kai/internal/dirio"
@@ -714,6 +715,40 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show Kai status and pending changes",
 	RunE:  runStatus,
+}
+
+var (
+	blameSummary bool
+	blameJSON    bool
+)
+
+var blameCmd = &cobra.Command{
+	Use:   "blame <file>",
+	Short: "Show AI vs human authorship per line",
+	Long: `Shows line-by-line attribution for a file, indicating whether each
+section was written by an AI agent or a human, and which agent/model if AI.
+
+Examples:
+  kai blame src/auth.go              # Line ranges with attribution
+  kai blame src/auth.go --summary    # Just percentages
+  kai blame src/auth.go --json       # Machine-readable output`,
+	Args: cobra.ExactArgs(1),
+	RunE: runBlame,
+}
+
+var (
+	statsJSON bool
+)
+
+var statsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Show AI vs human authorship statistics",
+	Long: `Shows project-wide statistics on AI vs human code authorship.
+
+Examples:
+  kai stats                # Overall percentages
+  kai stats --json         # Machine-readable output`,
+	RunE: runStats,
 }
 
 var diffCmd = &cobra.Command{
@@ -2334,6 +2369,15 @@ func init() {
 	queryCmd.GroupID = groupQuery
 	rootCmd.AddCommand(queryCmd)
 
+	// Authorship
+	blameCmd.GroupID = groupQuery
+	statsCmd.GroupID = groupQuery
+	blameCmd.Flags().BoolVar(&blameSummary, "summary", false, "Show summary percentages only")
+	blameCmd.Flags().BoolVar(&blameJSON, "json", false, "Output as JSON")
+	statsCmd.Flags().BoolVar(&statsJSON, "json", false, "Output as JSON")
+	rootCmd.AddCommand(blameCmd)
+	rootCmd.AddCommand(statsCmd)
+
 	// CI & Testing
 	ciCmd.GroupID = groupCI
 	testCmd.GroupID = groupCI
@@ -2925,6 +2969,22 @@ CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
 
 -- Index for prune --since filtering
 CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
+
+-- AI authorship attribution ranges
+CREATE TABLE IF NOT EXISTS authorship_ranges (
+  snapshot_id BLOB NOT NULL,
+  file_path TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  author_type TEXT NOT NULL,
+  agent TEXT DEFAULT '',
+  model TEXT DEFAULT '',
+  session_id TEXT DEFAULT '',
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id, file_path, start_line)
+);
+CREATE INDEX IF NOT EXISTS authorship_snap ON authorship_ranges(snapshot_id);
+CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, file_path);
 `
 	// Apply schema in a transaction
 	tx, err := db.BeginTx()
@@ -3434,6 +3494,20 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		}
 		if te != nil {
 			te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
+		}
+	}
+
+	// Step 4: Consolidate authorship checkpoints (if any exist)
+	if authorship.CountPendingCheckpoints(kaiDir) > 0 {
+		debugf("Step 4: Consolidating authorship checkpoints...")
+		phaseStart = time.Now()
+		if err := authorship.Consolidate(db, snapshotID, kaiDir); err != nil {
+			debugf("warning: authorship consolidation: %v", err)
+		} else {
+			debugf("Authorship checkpoints consolidated")
+		}
+		if te != nil {
+			te.SetPhase("authorship", time.Since(phaseStart).Milliseconds())
 		}
 	}
 
@@ -8323,6 +8397,138 @@ func runDump(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// --- Authorship Commands ---
+
+func runBlame(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	filePath := args[0]
+
+	// Resolve latest snapshot
+	resolver := ref.NewResolver(db)
+	kind := ref.KindSnapshot
+	result, err := resolver.Resolve("@snap:last", &kind)
+	if err != nil {
+		return fmt.Errorf("no snapshots found — run 'kai capture' first")
+	}
+	snapID := result.ID
+
+	if blameJSON {
+		if blameSummary {
+			summary, err := authorship.BlameFileSummary(db, snapID, filePath)
+			if err != nil {
+				return err
+			}
+			data, _ := json.MarshalIndent(summary, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		}
+		ranges, err := authorship.Blame(db, snapID, filePath)
+		if err != nil {
+			return err
+		}
+		data, _ := json.MarshalIndent(map[string]interface{}{
+			"file":   filePath,
+			"ranges": ranges,
+		}, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	if blameSummary {
+		summary, err := authorship.BlameFileSummary(db, snapID, filePath)
+		if err != nil {
+			return err
+		}
+		if summary.TotalLines == 0 {
+			fmt.Printf("%s: no authorship data\n", filePath)
+			fmt.Println("  Record edits with kai_checkpoint, then run 'kai capture'")
+			return nil
+		}
+		fmt.Printf("%s: %.0f%% AI, %.0f%% human (%d lines)\n",
+			filePath, summary.AIPct, 100-summary.AIPct, summary.TotalLines)
+		if len(summary.Agents) > 0 {
+			for _, agent := range summary.Agents {
+				fmt.Printf("  %s\n", agent)
+			}
+		}
+		return nil
+	}
+
+	// Default: show line ranges
+	ranges, err := authorship.Blame(db, snapID, filePath)
+	if err != nil {
+		return err
+	}
+	if len(ranges) == 0 {
+		fmt.Printf("%s: no authorship data\n", filePath)
+		fmt.Println("  Record edits with kai_checkpoint, then run 'kai capture'")
+		return nil
+	}
+
+	fmt.Printf("%s\n", filePath)
+	for _, r := range ranges {
+		agent := r.Agent
+		if agent == "" {
+			agent = "-"
+		}
+		fmt.Printf("  %4d-%-4d  %-6s  %s\n", r.StartLine, r.EndLine, r.AuthorType, agent)
+	}
+	return nil
+}
+
+func runStats(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	resolver := ref.NewResolver(db)
+	kind := ref.KindSnapshot
+	result, err := resolver.Resolve("@snap:last", &kind)
+	if err != nil {
+		return fmt.Errorf("no snapshots found — run 'kai capture' first")
+	}
+
+	stats, err := authorship.ProjectStats(db, result.ID)
+	if err != nil {
+		return err
+	}
+
+	if statsJSON {
+		data, _ := json.MarshalIndent(stats, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+
+	if stats.TotalLines == 0 {
+		fmt.Println("No authorship data found.")
+		fmt.Println("  Record edits with kai_checkpoint, then run 'kai capture'")
+		return nil
+	}
+
+	fmt.Println("Project authorship:")
+	fmt.Printf("  Total lines:    %d\n", stats.TotalLines)
+	fmt.Printf("  AI-authored:    %d (%.1f%%)\n", stats.AILines, stats.AIPct)
+	fmt.Printf("  Human-authored: %d (%.1f%%)\n", stats.HumanLines, 100-stats.AIPct)
+
+	if len(stats.ByAgent) > 0 {
+		fmt.Println()
+		fmt.Println("By agent:")
+		for agent, lines := range stats.ByAgent {
+			pct := float64(lines) / float64(stats.TotalLines) * 100
+			fmt.Printf("  %-30s %d lines (%.1f%%)\n", agent, lines, pct)
+		}
+	}
+
+	return nil
+}
+
 func openDB() (*graph.DB, error) {
 	// Check if .kai directory exists
 	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
@@ -11755,6 +11961,41 @@ func runPush(cmd *cobra.Command, args []string) error {
 			debugf("edge push warning: %v", err)
 		} else {
 			debugf("%d edges inserted", result.Inserted)
+		}
+	}
+
+	// Push authorship data for all snapshots being pushed
+	var authorshipData []remote.AuthorshipData
+	for _, r := range refsToSync {
+		if r.TargetKind != ref.KindSnapshot {
+			continue
+		}
+		ranges, err := db.GetAllAuthorshipRanges(r.TargetID)
+		if err != nil || len(ranges) == 0 {
+			continue
+		}
+		snapHex := hex.EncodeToString(r.TargetID)
+		for _, ar := range ranges {
+			authorshipData = append(authorshipData, remote.AuthorshipData{
+				SnapshotID: snapHex,
+				FilePath:   ar.FilePath,
+				StartLine:  ar.StartLine,
+				EndLine:    ar.EndLine,
+				AuthorType: ar.AuthorType,
+				Agent:      ar.Agent,
+				Model:      ar.Model,
+				SessionID:  ar.SessionID,
+			})
+		}
+	}
+	if len(authorshipData) > 0 {
+		debugf("Pushing %d authorship ranges...", len(authorshipData))
+		result, err := client.PushAuthorship(authorshipData)
+		if err != nil {
+			// Don't fail the push if authorship push fails - it's supplementary
+			debugf("authorship push warning: %v", err)
+		} else {
+			debugf("%d authorship ranges inserted", result.Inserted)
 		}
 	}
 

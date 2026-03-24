@@ -931,6 +931,68 @@ func (c *Client) PushEdges(edges []EdgeData) (*PushEdgesResponse, error) {
 	return &result, nil
 }
 
+// --- Authorship ---
+
+// AuthorshipData represents an authorship range for push/fetch.
+type AuthorshipData struct {
+	SnapshotID string `json:"snapshot_id"` // hex
+	FilePath   string `json:"file_path"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line"`
+	AuthorType string `json:"author_type"`
+	Agent      string `json:"agent"`
+	Model      string `json:"model"`
+	SessionID  string `json:"session_id"`
+}
+
+// PushAuthorshipResponse is the server response after ingesting authorship data.
+type PushAuthorshipResponse struct {
+	Inserted int `json:"inserted"`
+}
+
+// PushAuthorship sends authorship ranges to the server.
+func (c *Client) PushAuthorship(data []AuthorshipData) (*PushAuthorshipResponse, error) {
+	if len(data) == 0 {
+		return &PushAuthorshipResponse{Inserted: 0}, nil
+	}
+
+	req := struct {
+		Ranges []AuthorshipData `json:"ranges"`
+	}{Ranges: data}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/authorship", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result PushAuthorshipResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return &result, nil
+}
+
 // --- Project Name Detection ---
 
 // DetectProjectName attempts to detect the project name from various sources.

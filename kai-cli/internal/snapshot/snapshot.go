@@ -41,15 +41,17 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 	}
 	defer tx.Rollback()
 
-	// Create/ensure module nodes first
+	// Create/ensure module nodes first (matcher may be nil during git import)
 	moduleIDs := make(map[string][]byte)
-	for _, mod := range c.matcher.GetAllModules() {
-		payload := c.matcher.GetModulePayload(mod.Name)
-		moduleID, err := c.db.InsertNode(tx, graph.KindModule, payload)
-		if err != nil {
-			return nil, fmt.Errorf("inserting module: %w", err)
+	if c.matcher != nil {
+		for _, mod := range c.matcher.GetAllModules() {
+			payload := c.matcher.GetModulePayload(mod.Name)
+			moduleID, err := c.db.InsertNode(tx, graph.KindModule, payload)
+			if err != nil {
+				return nil, fmt.Errorf("inserting module: %w", err)
+			}
+			moduleIDs[mod.Name] = moduleID
 		}
-		moduleIDs[mod.Name] = moduleID
 	}
 
 	// First pass: create all file nodes and collect their IDs
@@ -80,12 +82,16 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 			return nil, fmt.Errorf("inserting file: %w", err)
 		}
 
+		var fileModules []string
+		if c.matcher != nil {
+			fileModules = c.matcher.MatchPath(file.Path)
+		}
 		fileInfos = append(fileInfos, fileInfo{
 			id:            fileID,
 			path:          file.Path,
 			lang:          file.Lang,
 			contentDigest: digest,
-			modules:       c.matcher.MatchPath(file.Path),
+			modules:       fileModules,
 		})
 	}
 
