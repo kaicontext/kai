@@ -4,10 +4,13 @@ on:
   push:
     branches: [main]
     tags: ['*']
+  pull_request:
+    branches: [main]
 
 jobs:
   test-kai-cli:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     container:
       image: golang:1.24-alpine
     steps:
