@@ -1945,7 +1945,11 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	// triggers background initialization.
 	srv := kaimcp.NewServer(cwd, Version)
 	defer srv.Close()
-	return srv.Serve(cmd.Context())
+	err = srv.Serve(cmd.Context())
+	if err != nil && cmd.Context().Err() != nil {
+		return nil // normal shutdown (context canceled)
+	}
+	return err
 }
 
 var hookCmd = &cobra.Command{
