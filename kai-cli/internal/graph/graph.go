@@ -89,6 +89,9 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 
 	db := &DB{conn: conn, objectsDir: objectsDir}
 
+	// Auto-create schema if this is a fresh database (no nodes table)
+	db.ensureSchema()
+
 	// Auto-migrate: ensure authorship table exists on every open
 	db.migrateAuthorship()
 
@@ -792,6 +795,76 @@ func (db *DB) GetEdgesTo(dst []byte, edgeType EdgeType) ([]*Edge, error) {
 	}
 
 	return edges, rows.Err()
+}
+
+// ensureSchema creates the core tables if the database is fresh.
+// This allows graph.Open to work without a prior kai init.
+func (db *DB) ensureSchema() {
+	// Quick check: if nodes table exists, schema is already applied
+	var exists int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='nodes'`).Scan(&exists)
+	if err != nil || exists > 0 {
+		return
+	}
+
+	// Fresh database — apply core schema
+	db.conn.Exec(`
+CREATE TABLE IF NOT EXISTS nodes (
+  id BLOB PRIMARY KEY,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS nodes_created_at ON nodes(created_at);
+
+CREATE TABLE IF NOT EXISTS edges (
+  src BLOB NOT NULL,
+  type TEXT NOT NULL,
+  dst BLOB NOT NULL,
+  at  BLOB,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (src, type, dst)
+);
+CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
+CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+CREATE INDEX IF NOT EXISTS edges_type ON edges(type);
+CREATE INDEX IF NOT EXISTS edges_at ON edges(at);
+
+CREATE TABLE IF NOT EXISTS refs (
+  name TEXT PRIMARY KEY,
+  target_id BLOB NOT NULL,
+  target_kind TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refs_kind ON refs(target_kind);
+
+CREATE TABLE IF NOT EXISTS slugs (
+  target_id BLOB PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS logs (
+  kind TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  id BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, seq)
+);
+CREATE INDEX IF NOT EXISTS logs_id ON logs(id);
+
+CREATE TABLE IF NOT EXISTS ref_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  old_target BLOB,
+  new_target BLOB NOT NULL,
+  actor TEXT,
+  moved_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name);
+CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
+	`)
 }
 
 // --- Authorship ---
