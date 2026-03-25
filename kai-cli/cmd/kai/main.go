@@ -73,6 +73,71 @@ var Version = "0.9.19"
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
 
+// updateCheckFile is the path to the cached update check result.
+var updateCheckFile = filepath.Join(os.Getenv("HOME"), ".kai", "update-check.json")
+
+type updateCheck struct {
+	LatestVersion string `json:"latest_version"`
+	CheckedAt     string `json:"checked_at"`
+}
+
+// printUpdateNotice reads the cached update check and prints a notice if a newer version exists.
+func printUpdateNotice() {
+	data, err := os.ReadFile(updateCheckFile)
+	if err != nil {
+		return
+	}
+	var uc updateCheck
+	if json.Unmarshal(data, &uc) != nil || uc.LatestVersion == "" {
+		return
+	}
+	if uc.LatestVersion != Version {
+		fmt.Fprintf(os.Stderr, "Update available: %s → %s (run `kai update`)\n", Version, uc.LatestVersion)
+	}
+}
+
+// backgroundUpdateCheck checks GitHub for the latest release tag and caches the result.
+// Runs at most once per 24 hours.
+func backgroundUpdateCheck() {
+	// Rate limit: check at most once per 24h
+	if data, err := os.ReadFile(updateCheckFile); err == nil {
+		var uc updateCheck
+		if json.Unmarshal(data, &uc) == nil && uc.CheckedAt != "" {
+			if t, err := time.Parse(time.RFC3339, uc.CheckedAt); err == nil {
+				if time.Since(t) < 24*time.Hour {
+					return
+				}
+			}
+		}
+	}
+
+	go func() {
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get("https://api.github.com/repos/kaicontext/kai/releases/latest")
+		if err != nil || resp.StatusCode != 200 {
+			return
+		}
+		defer resp.Body.Close()
+
+		var release struct {
+			TagName string `json:"tag_name"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&release) != nil || release.TagName == "" {
+			return
+		}
+
+		latest := strings.TrimPrefix(release.TagName, "v")
+		uc := updateCheck{
+			LatestVersion: latest,
+			CheckedAt:     time.Now().UTC().Format(time.RFC3339),
+		}
+		if out, err := json.Marshal(uc); err == nil {
+			os.MkdirAll(filepath.Dir(updateCheckFile), 0755)
+			os.WriteFile(updateCheckFile, out, 0644)
+		}
+	}()
+}
+
 var rootCmd = &cobra.Command{
 	Use:     "kai",
 	Short:   "Kai - semantic, intent-based version control",
@@ -2008,6 +2073,8 @@ func init() {
 		if !verbose {
 			verbose = os.Getenv("KAI_VERBOSE") == "1" || os.Getenv("KAI_VERBOSE") == "true"
 		}
+		printUpdateNotice()
+		backgroundUpdateCheck()
 	}
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
 		_ = telemetry.FlushIfNeeded()
