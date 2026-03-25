@@ -61,6 +61,8 @@ func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error)
 		result.Imports = extractRustImports(root, content)
 		result.Calls = extractRustCallSites(root, content)
 		result.Exports = extractRustExports(root, content)
+	case "sql":
+		// SQL has no imports/exports/calls in the traditional sense
 	default:
 		// JavaScript/TypeScript/Python
 		result.Imports = extractImports(root, content)

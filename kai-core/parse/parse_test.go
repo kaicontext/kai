@@ -952,3 +952,279 @@ func TestParser_ParseGoEmptyFile(t *testing.T) {
 		t.Errorf("expected 0 symbols for package-only file, got %d", len(parsed.Symbols))
 	}
 }
+
+// --- SQL tests ---
+
+func TestSQL_CreateTable(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE
+);
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) != 1 {
+		t.Fatalf("expected 1 symbol, got %d", len(parsed.Symbols))
+	}
+
+	sym := parsed.Symbols[0]
+	if sym.Name != "users" {
+		t.Errorf("expected name 'users', got %q", sym.Name)
+	}
+	if sym.Kind != "class" {
+		t.Errorf("expected kind 'class', got %q", sym.Kind)
+	}
+	if sym.Signature != "CREATE TABLE users (id, name, email)" {
+		t.Errorf("unexpected signature: %q", sym.Signature)
+	}
+}
+
+func TestSQL_CreateTableNoColumns(t *testing.T) {
+	parser := NewParser()
+	// Some SQL dialects allow CREATE TABLE ... AS SELECT
+	code := []byte(`CREATE TABLE backup AS SELECT * FROM users;`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "backup" && sym.Kind == "class" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected to find table 'backup'")
+	}
+}
+
+func TestSQL_CreateIndex(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`CREATE INDEX idx_users_email ON users(email);`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) != 1 {
+		t.Fatalf("expected 1 symbol, got %d", len(parsed.Symbols))
+	}
+
+	sym := parsed.Symbols[0]
+	if sym.Name != "idx_users_email" {
+		t.Errorf("expected name 'idx_users_email', got %q", sym.Name)
+	}
+	if sym.Kind != "variable" {
+		t.Errorf("expected kind 'variable', got %q", sym.Kind)
+	}
+	if sym.Signature != "CREATE INDEX idx_users_email" {
+		t.Errorf("unexpected signature: %q", sym.Signature)
+	}
+}
+
+func TestSQL_CreateUniqueIndex(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`CREATE UNIQUE INDEX idx_email_unique ON users(email);`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "idx_email_unique" && sym.Kind == "variable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected to find index 'idx_email_unique', got symbols: %v", parsed.Symbols)
+	}
+}
+
+func TestSQL_CreateView(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE VIEW active_users AS
+  SELECT * FROM users WHERE active = true;
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) != 1 {
+		t.Fatalf("expected 1 symbol, got %d", len(parsed.Symbols))
+	}
+
+	sym := parsed.Symbols[0]
+	if sym.Name != "active_users" {
+		t.Errorf("expected name 'active_users', got %q", sym.Name)
+	}
+	if sym.Kind != "class" {
+		t.Errorf("expected kind 'class', got %q", sym.Kind)
+	}
+	if sym.Signature != "CREATE VIEW active_users" {
+		t.Errorf("unexpected signature: %q", sym.Signature)
+	}
+}
+
+func TestSQL_CreateFunction(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE FUNCTION get_user(user_id INT) RETURNS TABLE(id INT, name TEXT) AS $$
+BEGIN
+  RETURN QUERY SELECT id, name FROM users WHERE id = user_id;
+END;
+$$ LANGUAGE plpgsql;
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) != 1 {
+		t.Fatalf("expected 1 symbol, got %d", len(parsed.Symbols))
+	}
+
+	sym := parsed.Symbols[0]
+	if sym.Name != "get_user" {
+		t.Errorf("expected name 'get_user', got %q", sym.Name)
+	}
+	if sym.Kind != "function" {
+		t.Errorf("expected kind 'function', got %q", sym.Kind)
+	}
+	if sym.Signature != "CREATE FUNCTION get_user(user_id INT)" {
+		t.Errorf("unexpected signature: %q", sym.Signature)
+	}
+}
+
+func TestSQL_MultipleStatements(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE TABLE orders (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL,
+  total DECIMAL(10, 2)
+);
+
+CREATE INDEX idx_orders_user ON orders(user_id);
+
+CREATE VIEW order_summary AS
+  SELECT user_id, COUNT(*) as order_count FROM orders GROUP BY user_id;
+
+CREATE FUNCTION total_orders(uid INT) RETURNS INT AS $$
+  SELECT COUNT(*) FROM orders WHERE user_id = uid;
+$$ LANGUAGE sql;
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	expected := map[string]string{
+		"orders":        "class",
+		"idx_orders_user": "variable",
+		"order_summary": "class",
+		"total_orders":  "function",
+	}
+
+	found := make(map[string]bool)
+	for _, sym := range parsed.Symbols {
+		if expectedKind, ok := expected[sym.Name]; ok {
+			if sym.Kind != expectedKind {
+				t.Errorf("symbol %q: expected kind %q, got %q", sym.Name, expectedKind, sym.Kind)
+			}
+			found[sym.Name] = true
+		}
+	}
+
+	for name := range expected {
+		if !found[name] {
+			t.Errorf("expected to find symbol %q", name)
+		}
+	}
+}
+
+func TestSQL_EmptyFile(t *testing.T) {
+	parser := NewParser()
+	parsed, err := parser.Parse([]byte(""), "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for empty SQL, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestSQL_SelectOnly(t *testing.T) {
+	parser := NewParser()
+	// Plain SELECT statements shouldn't produce symbols
+	code := []byte(`SELECT * FROM users WHERE id = 1;`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for SELECT-only SQL, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestSQL_TableWithManyColumns(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE TABLE events (
+  id BIGSERIAL PRIMARY KEY,
+  event_name TEXT NOT NULL,
+  timestamp TIMESTAMPTZ NOT NULL,
+  install_id TEXT NOT NULL,
+  version TEXT,
+  os TEXT,
+  arch TEXT,
+  command TEXT,
+  dur_ms BIGINT,
+  result TEXT,
+  error_class TEXT,
+  stats JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(parsed.Symbols) != 1 {
+		t.Fatalf("expected 1 symbol, got %d", len(parsed.Symbols))
+	}
+
+	sym := parsed.Symbols[0]
+	if sym.Name != "events" {
+		t.Errorf("expected name 'events', got %q", sym.Name)
+	}
+	// Verify all columns are in the signature
+	for _, col := range []string{"id", "event_name", "timestamp", "install_id", "version", "os", "arch", "command", "dur_ms", "result", "error_class", "stats", "created_at"} {
+		if !contains(sym.Signature, col) {
+			t.Errorf("expected column %q in signature: %q", col, sym.Signature)
+		}
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

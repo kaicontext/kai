@@ -1,6 +1,6 @@
 {
   "name": "kai-mcp",
-  "version": "0.9.19",
+  "version": "0.9.20",
   "mcpName": "io.github.kaicontext/kai",
   "description": "MCP server for Kai — semantic code intelligence for AI coding assistants",
   "bin": {

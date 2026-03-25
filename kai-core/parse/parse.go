@@ -1,4 +1,4 @@
-// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, Ruby, and Rust.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, Ruby, Rust, and SQL.
 package parse
 
 import (
@@ -12,6 +12,7 @@ import (
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/ruby"
 	"github.com/smacker/go-tree-sitter/rust"
+	"github.com/smacker/go-tree-sitter/sql"
 )
 
 // Range represents a source code range (0-based line and column).
@@ -37,14 +38,15 @@ type ParsedFile struct {
 
 // Parser wraps the Tree-sitter parser with multi-language support.
 type Parser struct {
-	jsParser *sitter.Parser
-	pyParser *sitter.Parser
-	goParser *sitter.Parser
-	rbParser *sitter.Parser
-	rsParser *sitter.Parser
+	jsParser  *sitter.Parser
+	pyParser  *sitter.Parser
+	goParser  *sitter.Parser
+	rbParser  *sitter.Parser
+	rsParser  *sitter.Parser
+	sqlParser *sitter.Parser
 }
 
-// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, Ruby, and Rust.
+// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, Ruby, Rust, and SQL.
 func NewParser() *Parser {
 	jsParser := sitter.NewParser()
 	jsParser.SetLanguage(javascript.GetLanguage())
@@ -61,12 +63,16 @@ func NewParser() *Parser {
 	rsParser := sitter.NewParser()
 	rsParser.SetLanguage(rust.GetLanguage())
 
+	sqlParser := sitter.NewParser()
+	sqlParser.SetLanguage(sql.GetLanguage())
+
 	return &Parser{
-		jsParser: jsParser,
-		pyParser: pyParser,
-		goParser: goParser,
-		rbParser: rbParser,
-		rsParser: rsParser,
+		jsParser:  jsParser,
+		pyParser:  pyParser,
+		goParser:  goParser,
+		rbParser:  rbParser,
+		rsParser:  rsParser,
+		sqlParser: sqlParser,
 	}
 }
 
@@ -91,6 +97,9 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 	case "rs", "rust":
 		parser = p.rsParser
 		extractFn = extractRustSymbols
+	case "sql":
+		parser = p.sqlParser
+		extractFn = extractSQLSymbols
 	default:
 		// Default to JavaScript parser for unknown languages
 		parser = p.jsParser
@@ -1570,4 +1579,158 @@ func extractRustMacro(node *sitter.Node, content []byte) *Symbol {
 		Range:     nodeRange(node),
 		Signature: "macro_rules! " + name,
 	}
+}
+
+// --- SQL symbol extraction ---
+
+func extractSQLSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "create_table":
+			sym := extractSQLCreateTable(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "create_view":
+			sym := extractSQLNamedObject(n, content, "class", "CREATE VIEW")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "create_index":
+			sym := extractSQLIndex(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "create_function":
+			sym := extractSQLFunction(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		}
+	}
+
+	return symbols
+}
+
+// extractSQLCreateTable extracts a table name and its columns.
+func extractSQLCreateTable(node *sitter.Node, content []byte) *Symbol {
+	name := sqlObjectName(node, content)
+	if name == "" {
+		return nil
+	}
+
+	// Collect column names
+	var cols []string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "column_definitions" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				col := child.Child(j)
+				if col.Type() == "column_definition" {
+					for k := 0; k < int(col.ChildCount()); k++ {
+						if col.Child(k).Type() == "identifier" {
+							cols = append(cols, col.Child(k).Content(content))
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	sig := "CREATE TABLE " + name
+	if len(cols) > 0 {
+		sig += " (" + strings.Join(cols, ", ") + ")"
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: sig,
+	}
+}
+
+// extractSQLIndex extracts an index name.
+func extractSQLIndex(node *sitter.Node, content []byte) *Symbol {
+	// Index name is a direct identifier child (not inside object_reference)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			name := child.Content(content)
+			return &Symbol{
+				Name:      name,
+				Kind:      "variable",
+				Range:     nodeRange(node),
+				Signature: "CREATE INDEX " + name,
+			}
+		}
+	}
+	return nil
+}
+
+// extractSQLFunction extracts a function/procedure name with its arguments.
+func extractSQLFunction(node *sitter.Node, content []byte) *Symbol {
+	name := sqlObjectName(node, content)
+	if name == "" {
+		return nil
+	}
+
+	var params string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "function_arguments" {
+			params = child.Content(content)
+			break
+		}
+	}
+
+	sig := "CREATE FUNCTION " + name
+	if params != "" {
+		sig += params
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: sig,
+	}
+}
+
+// extractSQLNamedObject extracts a named SQL object (view, trigger, etc.).
+func extractSQLNamedObject(node *sitter.Node, content []byte, kind, prefix string) *Symbol {
+	name := sqlObjectName(node, content)
+	if name == "" {
+		return nil
+	}
+	return &Symbol{
+		Name:      name,
+		Kind:      kind,
+		Range:     nodeRange(node),
+		Signature: prefix + " " + name,
+	}
+}
+
+// sqlObjectName finds the name from an object_reference child.
+func sqlObjectName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "object_reference" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				if child.Child(j).Type() == "identifier" {
+					return child.Child(j).Content(content)
+				}
+			}
+		}
+	}
+	return ""
 }

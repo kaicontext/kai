@@ -383,7 +383,7 @@ func extToLang(ext string) string {
 
 func isCodeLang(lang string) bool {
 	switch lang {
-	case "js", "ts", "py", "go", "rb", "rs", "rust", "java":
+	case "js", "ts", "py", "go", "rb", "rs", "rust", "java", "sql":
 		return true
 	default:
 		return false
