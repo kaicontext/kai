@@ -375,7 +375,7 @@ func TestEqualStringSlices(t *testing.T) {
 	}
 }
 
-func TestGetAllFunctions(t *testing.T) {
+func TestGetAllFunctions_JavaScript(t *testing.T) {
 	parser := parse.NewParser()
 	content := []byte(`
 function regular() {}
@@ -395,6 +395,133 @@ class MyClass {
 	funcs := GetAllFunctions(parsed, content)
 
 	expectedFuncs := []string{"regular", "arrow", "funcExpr", "method"}
+	for _, expected := range expectedFuncs {
+		if _, ok := funcs[expected]; !ok {
+			t.Errorf("expected function %q not found", expected)
+		}
+	}
+}
+
+func TestGetAllFunctions_TypeScript(t *testing.T) {
+	parser := parse.NewParser()
+	content := []byte(`function greet(): void {}
+
+class User {
+  login(): void {}
+}
+`)
+
+	parsed, err := parser.Parse(content, "ts")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	funcs := GetAllFunctions(parsed, content, "ts")
+
+	expectedFuncs := []string{"greet", "login"}
+	for _, expected := range expectedFuncs {
+		if _, ok := funcs[expected]; !ok {
+			t.Errorf("expected function %q not found", expected)
+		}
+	}
+}
+
+func TestGetAllFunctions_Go(t *testing.T) {
+	parser := parse.NewParser()
+	content := []byte(`package main
+
+func greet() {}
+
+type User struct{}
+
+func (u *User) login() {}
+`)
+
+	parsed, err := parser.Parse(content, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	funcs := GetAllFunctions(parsed, content, "go")
+
+	expectedFuncs := []string{"greet", "User.login"}
+	for _, expected := range expectedFuncs {
+		if _, ok := funcs[expected]; !ok {
+			t.Errorf("expected function %q not found", expected)
+		}
+	}
+}
+
+func TestGetAllFunctions_Python(t *testing.T) {
+	parser := parse.NewParser()
+	content := []byte(`def greet():
+    pass
+
+class User:
+    def login(self):
+        pass
+`)
+
+	parsed, err := parser.Parse(content, "py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	funcs := GetAllFunctions(parsed, content, "py")
+
+	expectedFuncs := []string{"greet", "User.login"}
+	for _, expected := range expectedFuncs {
+		if _, ok := funcs[expected]; !ok {
+			t.Errorf("expected function %q not found", expected)
+		}
+	}
+}
+
+func TestGetAllFunctions_Ruby(t *testing.T) {
+	parser := parse.NewParser()
+	content := []byte(`def greet
+end
+
+class User
+  def login
+  end
+end
+`)
+
+	parsed, err := parser.Parse(content, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	funcs := GetAllFunctions(parsed, content, "rb")
+
+	expectedFuncs := []string{"greet", "User#login"}
+	for _, expected := range expectedFuncs {
+		if _, ok := funcs[expected]; !ok {
+			t.Errorf("expected function %q not found", expected)
+		}
+	}
+}
+
+func TestGetAllFunctions_Rust(t *testing.T) {
+	parser := parse.NewParser()
+	content := []byte(`fn greet() {}
+
+struct User {}
+
+impl User {
+    fn login(&self) {}
+}
+`)
+
+	parsed, err := parser.Parse(content, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	funcs := GetAllFunctions(parsed, content, "rs")
+
+	expectedFuncs := []string{"greet", "User::login"}
 	for _, expected := range expectedFuncs {
 		if _, ok := funcs[expected]; !ok {
 			t.Errorf("expected function %q not found", expected)
