@@ -1437,8 +1437,12 @@ func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mc
 	sort.Strings(staleFiles)
 
 	result["stale"] = len(staleFiles) > 0
-	if len(staleFiles) > 0 {
+	result["stale_file_count"] = len(staleFiles)
+	if len(staleFiles) > 0 && len(staleFiles) <= 50 {
 		result["stale_files"] = staleFiles
+	} else if len(staleFiles) > 50 {
+		result["stale_files"] = staleFiles[:50]
+		result["stale_files_truncated"] = true
 	}
 
 	return jsonResult(result)
