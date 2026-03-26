@@ -11759,6 +11759,16 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Skip push if snap.latest hasn't changed since last push
+	if !pushForce {
+		localLatest, _ := refMgr.Get("snap.latest")
+		lastPushed, _ := refMgr.Get("remote/origin/snap.latest")
+		if localLatest != nil && lastPushed != nil && bytes.Equal(localLatest.TargetID, lastPushed.TargetID) {
+			fmt.Println("Already up to date.")
+			return nil
+		}
+	}
+
 	// Collect all objects to push (including related objects via edges)
 	var allDigests [][]byte
 	digestSet := make(map[string]bool)
@@ -12125,6 +12135,12 @@ func runPush(cmd *cobra.Command, args []string) error {
 		} else {
 			debugf("%d authorship ranges inserted", result.Inserted)
 		}
+	}
+
+	// Track what we pushed so duplicate pushes are skipped
+	for _, r := range validRefs {
+		remoteRefName := fmt.Sprintf("remote/%s/%s", remoteName, r.Name)
+		refMgr.Set(remoteRefName, r.TargetID, r.TargetKind)
 	}
 
 	fmt.Fprintf(os.Stderr, "\r\033[K")
