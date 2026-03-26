@@ -53,7 +53,7 @@ function newFunc() {
 }
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -102,7 +102,7 @@ function existing() {
 }
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -138,7 +138,7 @@ const existing = () => 1;
 const newArrow = (a, b) => a + b;
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -173,7 +173,7 @@ function check(x) {
 }
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestDetectChanges_ConstantUpdated(t *testing.T) {
 	before := []byte(`const MAX = 100;`)
 	after := []byte(`const MAX = 200;`)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestDetectChanges_APISurfaceChanged(t *testing.T) {
 	before := []byte(`function api(a) { return a; }`)
 	after := []byte(`function api(a, b) { return a + b; }`)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestDetectChanges_NoChanges(t *testing.T) {
 
 	code := []byte(`function same() { return 1; }`)
 
-	changes, err := d.DetectChanges("test.js", code, code, "file1")
+	changes, err := d.DetectChanges("test.js", code, code, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -662,7 +662,7 @@ function bar() { return 2; }
 export { foo, bar };
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -694,7 +694,7 @@ class Foo {
 }
 `)
 
-	changes, err := d.DetectChanges("test.js", before, after, "file1")
+	changes, err := d.DetectChanges("test.js", before, after, "file1", "js")
 	if err != nil {
 		t.Fatalf("DetectChanges failed: %v", err)
 	}
@@ -708,5 +708,279 @@ class Foo {
 
 	if !foundFuncAdded {
 		t.Error("expected FUNCTION_ADDED for new method")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Go(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`package main
+
+func Login() {}      // Public (exported)
+func logout() {}     // Private (not exported)
+type User struct{}   // Public (exported)
+`)
+
+	after := []byte(`package main
+
+func Login() {}      // Public (exported)
+func Register() {}   // New public function
+func logout() {}     // Private (not exported)
+type User struct{}   // Public (exported)
+`)
+
+	changes, err := d.DetectChanges("test.go", before, after, "file1", "go")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when public Go function added")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Go_PrivateChange(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`package main
+
+func Login() {}
+func logout() {}
+`)
+
+	after := []byte(`package main
+
+func Login() {}
+func logout() {}
+func internal() {}  // Added private function
+`)
+
+	changes, err := d.DetectChanges("test.go", before, after, "file1", "go")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if foundAPIChanged {
+		t.Error("should NOT trigger API_SURFACE_CHANGED for private function")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Rust(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`pub fn login() {}
+fn logout() {}
+pub struct User {}
+`)
+
+	after := []byte(`pub fn login() {}
+pub fn register() {}  // New public function
+fn logout() {}
+pub struct User {}
+`)
+
+	changes, err := d.DetectChanges("test.rs", before, after, "file1", "rs")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when pub Rust function added")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Rust_PrivateChange(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`pub fn login() {}
+fn logout() {}
+`)
+
+	after := []byte(`pub fn login() {}
+fn logout() {}
+fn internal() {}  // Added private function
+`)
+
+	changes, err := d.DetectChanges("test.rs", before, after, "file1", "rs")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if foundAPIChanged {
+		t.Error("should NOT trigger API_SURFACE_CHANGED for private Rust function")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Python_All(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`def login():
+    pass
+
+def _internal():
+    pass
+
+__all__ = ["login"]
+`)
+
+	after := []byte(`def login():
+    pass
+
+def register():
+    pass
+
+def _internal():
+    pass
+
+__all__ = ["login", "register"]
+`)
+
+	changes, err := d.DetectChanges("test.py", before, after, "file1", "py")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when __all__ exports change")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Python_NoAll(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`def login():
+    pass
+
+def _internal():
+    pass
+`)
+
+	after := []byte(`def login():
+    pass
+
+def register():
+    pass
+
+def _internal():
+    pass
+`)
+
+	changes, err := d.DetectChanges("test.py", before, after, "file1", "py")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when public Python function added (no __all__)")
+	}
+}
+
+func TestDetectChanges_ExportChanged_Ruby(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`class User
+  def login
+  end
+end
+`)
+
+	after := []byte(`class User
+  def login
+  end
+end
+
+class Admin
+  def manage
+  end
+end
+`)
+
+	changes, err := d.DetectChanges("test.rb", before, after, "file1", "rb")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when Ruby class added")
+	}
+}
+
+func TestDetectChanges_ExportChanged_TypeScript(t *testing.T) {
+	d := NewDetector()
+
+	before := []byte(`function login(): void {}
+
+export { login };
+`)
+
+	after := []byte(`function login(): void {}
+function register(): void {}
+
+export { login, register };
+`)
+
+	changes, err := d.DetectChanges("test.ts", before, after, "file1", "ts")
+	if err != nil {
+		t.Fatalf("DetectChanges failed: %v", err)
+	}
+
+	foundAPIChanged := false
+	for _, c := range changes {
+		if c.Category == APISurfaceChanged {
+			foundAPIChanged = true
+		}
+	}
+
+	if !foundAPIChanged {
+		t.Error("expected API_SURFACE_CHANGED when TypeScript export added")
 	}
 }

@@ -141,19 +141,13 @@ func (d *Detector) SetSymbols(fileID string, symbols []*graph.Node) {
 
 // DetectChanges detects all change types between two versions of a file.
 // The lang parameter specifies the language for proper parsing (e.g., "py", "js", "ts").
-func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang ...string) ([]*ChangeType, error) {
-	// Default to JavaScript for backward compatibility
-	parseLang := "js"
-	if len(lang) > 0 && lang[0] != "" {
-		parseLang = lang[0]
-	}
-
-	beforeParsed, err := d.parser.Parse(beforeContent, parseLang)
+func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang string) ([]*ChangeType, error) {
+	beforeParsed, err := d.parser.Parse(beforeContent, lang)
 	if err != nil {
 		return nil, fmt.Errorf("parsing before: %w", err)
 	}
 
-	afterParsed, err := d.parser.Parse(afterContent, parseLang)
+	afterParsed, err := d.parser.Parse(afterContent, lang)
 	if err != nil {
 		return nil, fmt.Errorf("parsing after: %w", err)
 	}
@@ -161,7 +155,7 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	var changes []*ChangeType
 
 	// Detect function additions/removals (most important for intent)
-	funcChanges := d.detectFunctionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, parseLang)
+	funcChanges := d.detectFunctionChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, lang)
 	changes = append(changes, funcChanges...)
 
 	// Detect condition changes
@@ -173,7 +167,7 @@ func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte
 	changes = append(changes, constChanges...)
 
 	// Detect API surface changes
-	apiChanges := d.detectAPISurfaceChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, parseLang)
+	apiChanges := d.detectAPISurfaceChanges(path, beforeParsed, afterParsed, beforeContent, afterContent, fileID, lang)
 	changes = append(changes, apiChanges...)
 
 	return changes, nil
@@ -513,11 +507,9 @@ func (d *Detector) detectAPISurfaceChanges(path string, before, after *parse.Par
 	funcChanges := d.compareFunctions(path, before, after, beforeContent, afterContent, fileID, lang)
 	changes = append(changes, funcChanges...)
 
-	// Check export statements (skip for languages without export keyword)
-	if lang != "rb" && lang != "py" {
-		exportChanges := d.compareExports(path, before, after, beforeContent, afterContent, fileID)
-		changes = append(changes, exportChanges...)
-	}
+	// Check export statements
+	exportChanges := d.compareExports(path, before, after, beforeContent, afterContent, fileID, lang)
+	changes = append(changes, exportChanges...)
 
 	return changes
 }
@@ -589,29 +581,15 @@ func (d *Detector) compareFunctions(path string, before, after *parse.ParsedFile
 	return changes
 }
 
-func (d *Detector) compareExports(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string) []*ChangeType {
+func (d *Detector) compareExports(path string, before, after *parse.ParsedFile, beforeContent, afterContent []byte, fileID string, lang string) []*ChangeType {
 	var changes []*ChangeType
 
-	beforeExports := before.FindNodesOfType("export_statement")
-	afterExports := after.FindNodesOfType("export_statement")
+	// Get exported identifiers based on language
+	beforeSet := d.getExportedIdentifiers(before, beforeContent, lang)
+	afterSet := d.getExportedIdentifiers(after, afterContent, lang)
 
-	// Get exported identifiers
-	beforeSet := make(map[string]bool)
-	afterSet := make(map[string]bool)
-
-	for _, node := range beforeExports {
-		ids := getExportedIdentifiers(node, beforeContent)
-		for _, id := range ids {
-			beforeSet[id] = true
-		}
-	}
-
-	for _, node := range afterExports {
-		ids := getExportedIdentifiers(node, afterContent)
-		for _, id := range ids {
-			afterSet[id] = true
-		}
-	}
+	// DEBUG: Print what we found
+	// fmt.Printf("DEBUG compareExports lang=%s before=%v after=%v\n", lang, beforeSet, afterSet)
 
 	// Check for differences
 	hasDiff := false
@@ -630,20 +608,74 @@ func (d *Detector) compareExports(path string, before, after *parse.ParsedFile, 
 		}
 	}
 
-	if hasDiff && len(afterExports) > 0 {
-		afterRange := parse.GetNodeRange(afterExports[0])
-		change := &ChangeType{
-			Category: APISurfaceChanged,
-			Evidence: Evidence{
-				FileRanges: []FileRange{{
-					Path:  path,
-					Start: afterRange.Start,
-					End:   afterRange.End,
-				}},
-				Symbols: d.findOverlappingSymbols(fileID, afterRange),
-			},
+	// If there are differences, create a change event
+	if hasDiff {
+		// Try to get a meaningful range from the after file
+		var changeRange parse.Range
+		hasRange := false
+
+		switch lang {
+		case "js", "ts":
+			afterExports := after.FindNodesOfType("export_statement")
+			if len(afterExports) > 0 {
+				changeRange = parse.GetNodeRange(afterExports[0])
+				hasRange = true
+			}
+		case "go":
+			// Use first exported function/type as range
+			funcs := after.FindNodesOfType("function_declaration")
+			types := after.FindNodesOfType("type_declaration")
+			if len(funcs) > 0 {
+				changeRange = parse.GetNodeRange(funcs[0])
+				hasRange = true
+			} else if len(types) > 0 {
+				changeRange = parse.GetNodeRange(types[0])
+				hasRange = true
+			}
+		case "rs":
+			// Use first pub item as range
+			funcs := after.FindNodesOfType("function_item")
+			for _, fn := range funcs {
+				if hasVisibilityModifier(fn) {
+					changeRange = parse.GetNodeRange(fn)
+					hasRange = true
+					break
+				}
+			}
+		case "py":
+			// Use first function or __all__ as range
+			all := after.FindNodesOfType("assignment")
+			funcs := after.FindNodesOfType("function_definition")
+			if len(all) > 0 {
+				changeRange = parse.GetNodeRange(all[0])
+				hasRange = true
+			} else if len(funcs) > 0 {
+				changeRange = parse.GetNodeRange(funcs[0])
+				hasRange = true
+			}
+		case "rb":
+			// Use first class as range
+			classes := after.FindNodesOfType("class")
+			if len(classes) > 0 {
+				changeRange = parse.GetNodeRange(classes[0])
+				hasRange = true
+			}
 		}
-		changes = append(changes, change)
+
+		if hasRange {
+			change := &ChangeType{
+				Category: APISurfaceChanged,
+				Evidence: Evidence{
+					FileRanges: []FileRange{{
+						Path:  path,
+						Start: changeRange.Start,
+						End:   changeRange.End,
+					}},
+					Symbols: d.findOverlappingSymbols(fileID, changeRange),
+				},
+			}
+			changes = append(changes, change)
+		}
 	}
 
 	return changes
@@ -961,4 +993,281 @@ func IsParseable(lang string) bool {
 // DetectFileChange creates a FILE_CONTENT_CHANGED for non-parseable files.
 func (d *Detector) DetectFileChange(path string, lang string) *ChangeType {
 	return NewFileChange(FileContentChanged, path)
+}
+
+// ============================================================================
+// Export Detection Helpers (Multi-Language)
+// ============================================================================
+
+// getExportedIdentifiers extracts all exported identifiers based on language-specific rules
+func (d *Detector) getExportedIdentifiers(parsed *parse.ParsedFile, content []byte, lang string) map[string]bool {
+	exports := make(map[string]bool)
+
+	switch lang {
+	case "js", "ts":
+		// JavaScript/TypeScript: look for export statements
+		exportNodes := parsed.FindNodesOfType("export_statement")
+		for _, node := range exportNodes {
+			ids := getJSExportedIdentifiers(node, content)
+			for _, id := range ids {
+				exports[id] = true
+			}
+		}
+
+	case "go":
+		// Go: capitalized identifiers are exported
+		// Check functions
+		funcs := parsed.FindNodesOfType("function_declaration")
+		for _, fn := range funcs {
+			name := getFunctionName(fn, content)
+			if isGoExported(name) {
+				exports[name] = true
+			}
+		}
+		// Check methods
+		methods := parsed.FindNodesOfType("method_declaration")
+		for _, method := range methods {
+			name := getGoMethodName(method, content)
+			if isGoExported(name) {
+				exports[name] = true
+			}
+		}
+		// Check types
+		types := parsed.FindNodesOfType("type_declaration")
+		for _, typ := range types {
+			name := getGoTypeName(typ, content)
+			if isGoExported(name) {
+				exports[name] = true
+			}
+		}
+
+	case "rs":
+		// Rust: pub keyword indicates exported
+		// Check functions
+		funcs := parsed.FindNodesOfType("function_item")
+		for _, fn := range funcs {
+			if hasVisibilityModifier(fn) {
+				name := getFunctionName(fn, content)
+				if name != "" {
+					exports[name] = true
+				}
+			}
+		}
+		// Check structs
+		structs := parsed.FindNodesOfType("struct_item")
+		for _, st := range structs {
+			if hasVisibilityModifier(st) {
+				name := getRustTypeName(st, content)
+				if name != "" {
+					exports[name] = true
+				}
+			}
+		}
+
+	case "py":
+		// Python: check for __all__ first, otherwise all non-_ prefixed top-level items
+		allList := getPythonAllList(parsed, content)
+		if len(allList) > 0 {
+			// Use __all__ if present
+			for _, name := range allList {
+				exports[name] = true
+			}
+		} else {
+			// No __all__, so export all non-_ prefixed top-level functions/classes
+			funcs := parsed.FindNodesOfType("function_definition")
+			for _, fn := range funcs {
+				name := getFunctionName(fn, content)
+				if name != "" && !isPythonPrivate(name) && isTopLevel(fn) {
+					exports[name] = true
+				}
+			}
+			classes := parsed.FindNodesOfType("class_definition")
+			for _, cls := range classes {
+				name := getPythonClassName(cls, content)
+				if name != "" && !isPythonPrivate(name) && isTopLevel(cls) {
+					exports[name] = true
+				}
+			}
+		}
+
+	case "rb":
+		// Ruby: all top-level classes and modules are public
+		classes := parsed.FindNodesOfType("class")
+		for _, cls := range classes {
+			name := getRubyClassName(cls, content)
+			if name != "" {
+				exports[name] = true
+			}
+		}
+		modules := parsed.FindNodesOfType("module")
+		for _, mod := range modules {
+			name := getRubyModuleName(mod, content)
+			if name != "" {
+				exports[name] = true
+			}
+		}
+	}
+
+	return exports
+}
+
+// Helper functions for export detection
+
+// getJSExportedIdentifiers extracts identifiers from JS/TS export_statement nodes
+func getJSExportedIdentifiers(node *sitter.Node, content []byte) []string {
+	var ids []string
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+		if n.Type() == "identifier" {
+			ids = append(ids, parse.GetNodeContent(n, content))
+		}
+	}
+	return ids
+}
+
+// isGoExported checks if a Go identifier is exported (starts with uppercase)
+func isGoExported(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+	first := rune(name[0])
+	return first >= 'A' && first <= 'Z'
+}
+
+// getGoTypeName extracts the type name from a Go type_declaration
+func getGoTypeName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_spec" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "type_identifier" {
+					return parse.GetNodeContent(spec, content)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// hasVisibilityModifier checks if a Rust node has a pub modifier
+func hasVisibilityModifier(node *sitter.Node) bool {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "visibility_modifier" {
+			return true
+		}
+	}
+	return false
+}
+
+// getRustTypeName extracts the type name from a Rust struct_item
+func getRustTypeName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			return parse.GetNodeContent(child, content)
+		}
+	}
+	return ""
+}
+
+// getPythonAllList extracts the __all__ list if present
+func getPythonAllList(parsed *parse.ParsedFile, content []byte) []string {
+	var allList []string
+	assignments := parsed.FindNodesOfType("assignment")
+	for _, assign := range assignments {
+		// Check if this is __all__ = [...]
+		for i := 0; i < int(assign.ChildCount()); i++ {
+			child := assign.Child(i)
+			if child.Type() == "identifier" && parse.GetNodeContent(child, content) == "__all__" {
+				// Found __all__, now extract the list
+				for j := 0; j < int(assign.ChildCount()); j++ {
+					listNode := assign.Child(j)
+					if listNode.Type() == "list" {
+						allList = extractPythonListStrings(listNode, content)
+						return allList
+					}
+				}
+			}
+		}
+	}
+	return allList
+}
+
+// extractPythonListStrings extracts string literals from a Python list node
+func extractPythonListStrings(listNode *sitter.Node, content []byte) []string {
+	var strings []string
+	iter := sitter.NewIterator(listNode, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+		if n.Type() == "string" {
+			// Remove quotes from string
+			str := parse.GetNodeContent(n, content)
+			if len(str) >= 2 {
+				str = str[1 : len(str)-1] // Remove first and last char (quotes)
+			}
+			strings = append(strings, str)
+		}
+	}
+	return strings
+}
+
+// isPythonPrivate checks if a Python identifier is private (starts with _)
+func isPythonPrivate(name string) bool {
+	return len(name) > 0 && name[0] == '_'
+}
+
+// isTopLevel checks if a node is at the top level (not inside a class/function)
+func isTopLevel(node *sitter.Node) bool {
+	parent := node.Parent()
+	for parent != nil {
+		parentType := parent.Type()
+		// If we find a class or function parent, it's not top-level
+		if parentType == "class_definition" || parentType == "function_definition" {
+			return false
+		}
+		parent = parent.Parent()
+	}
+	return true
+}
+
+// getPythonClassName extracts the class name from a Python class_definition
+func getPythonClassName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			return parse.GetNodeContent(child, content)
+		}
+	}
+	return ""
+}
+
+// getRubyClassName extracts the class name from a Ruby class node
+func getRubyClassName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "constant" {
+			return parse.GetNodeContent(child, content)
+		}
+	}
+	return ""
+}
+
+// getRubyModuleName extracts the module name from a Ruby module node
+func getRubyModuleName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "constant" {
+			return parse.GetNodeContent(child, content)
+		}
+	}
+	return ""
 }
