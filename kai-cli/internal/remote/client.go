@@ -1409,6 +1409,21 @@ func (c *ControlClient) GetCILogs(org, repo, runID, jobID string) ([]CILogEntry,
 	return result.Logs, nil
 }
 
+// GetCILogsSince gets logs for a job after a given sequence number (for incremental polling).
+func (c *ControlClient) GetCILogsSince(org, repo, runID, jobID string, afterSeq int) ([]CILogEntry, error) {
+	data, err := c.ciGet(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/jobs/%s/logs?after=%d", org, repo, runID, jobID, afterSeq))
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Logs []CILogEntry `json:"logs"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result.Logs, nil
+}
+
 // CancelCIRun cancels a workflow run.
 func (c *ControlClient) CancelCIRun(org, repo, runID string) error {
 	_, err := c.ciPost(fmt.Sprintf("/api/v1/orgs/%s/repos/%s/runs/%s/cancel", org, repo, runID))

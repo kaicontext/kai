@@ -687,8 +687,9 @@ var (
 	ciAuthorshipDryRun bool
 
 	// Remote CI flags
-	ciRunsLimit int
-	ciLogsJob   string
+	ciRunsLimit  int
+	ciLogsJob    string
+	ciTraceJob   string
 )
 
 var changesetCmd = &cobra.Command{
@@ -2377,12 +2378,14 @@ func init() {
 	ciCmd.AddCommand(ciRunsCmd)
 	ciCmd.AddCommand(ciRunCmd)
 	ciCmd.AddCommand(ciLogsCmd)
+	ciCmd.AddCommand(ciTraceCmd)
 	ciCmd.AddCommand(ciCancelCmd)
 	ciCmd.AddCommand(ciRerunCmd)
 	ciCmd.AddCommand(ciSecretsCmd)
 	ciCmd.AddCommand(ciSecretSetCmd)
 	ciRunsCmd.Flags().IntVar(&ciRunsLimit, "limit", 10, "Number of runs to show")
 	ciLogsCmd.Flags().StringVar(&ciLogsJob, "job", "", "Job name (default: first failed or first job)")
+	ciTraceCmd.Flags().StringVar(&ciTraceJob, "job", "", "Only trace a specific job")
 	ciCommentCmd.Flags().StringVar(&ciCommentRepo, "repo", "", "GitHub repo owner/name (default: $GITHUB_REPOSITORY)")
 	ciCommentCmd.Flags().IntVar(&ciCommentPR, "pr", 0, "PR number (default: auto-detect from $GITHUB_EVENT_PATH)")
 	ciCommentCmd.Flags().BoolVar(&ciCommentDryRun, "dry-run", false, "Print comment to stdout instead of posting")
@@ -17411,6 +17414,19 @@ var ciLogsCmd = &cobra.Command{
 	RunE:  runCILogs,
 }
 
+var ciTraceCmd = &cobra.Command{
+	Use:   "trace <run-id-or-number>",
+	Short: "Stream live CI output (like gh run watch)",
+	Long: `Streams live log output for a CI run, updating in real-time as
+jobs start, run, and complete. Exits when the run finishes.
+
+Examples:
+  kai ci trace 110
+  kai ci trace 110 --job build-kailab`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCITrace,
+}
+
 var ciCancelCmd = &cobra.Command{
 	Use:   "cancel <run-id-or-number>",
 	Short: "Cancel a CI run",
@@ -17608,6 +17624,119 @@ func runCILogs(cmd *cobra.Command, args []string) error {
 		fmt.Print(entry.Content)
 	}
 	return nil
+}
+
+func runCITrace(cmd *cobra.Command, args []string) error {
+	baseURL, org, repo, err := getRemoteOrgRepo()
+	if err != nil {
+		return err
+	}
+	client := remote.NewControlClient(baseURL)
+	runID := resolveRunID(client, org, repo, args[0])
+
+	// Track per-job log cursors (last chunk_seq seen)
+	cursors := make(map[string]int)      // jobID -> last chunk_seq
+	jobPrinted := make(map[string]bool)  // jobID -> printed header
+	lastStatus := ""
+
+	for {
+		// Fetch run status
+		run, err := client.GetCIRun(org, repo, runID)
+		if err != nil {
+			return fmt.Errorf("getting run: %w", err)
+		}
+
+		// Print status changes
+		status := run.Status
+		if run.Conclusion != "" {
+			status = run.Conclusion
+		}
+		if status != lastStatus {
+			if lastStatus != "" {
+				fmt.Fprintf(os.Stderr, "\r\033[K")
+			}
+			switch status {
+			case "queued":
+				fmt.Fprintf(os.Stderr, "◦ Run #%d queued...\n", run.RunNumber)
+			case "in_progress":
+				fmt.Fprintf(os.Stderr, "● Run #%d in progress\n", run.RunNumber)
+			case "success":
+				fmt.Fprintf(os.Stderr, "✓ Run #%d succeeded\n", run.RunNumber)
+			case "failure":
+				fmt.Fprintf(os.Stderr, "✕ Run #%d failed\n", run.RunNumber)
+			case "cancelled":
+				fmt.Fprintf(os.Stderr, "○ Run #%d cancelled\n", run.RunNumber)
+			default:
+				fmt.Fprintf(os.Stderr, "  Run #%d %s\n", run.RunNumber, status)
+			}
+			lastStatus = status
+		}
+
+		// Fetch jobs and stream logs
+		jobs, err := client.ListCIJobs(org, repo, runID)
+		if err == nil {
+			for _, job := range jobs {
+				// Filter by --job if specified
+				if ciTraceJob != "" && job.Name != ciTraceJob {
+					continue
+				}
+
+				// Only stream jobs that are running or completed
+				if job.Status != "in_progress" && job.Status != "completed" {
+					continue
+				}
+
+				// Print job header once
+				if !jobPrinted[job.ID] {
+					icon := "●"
+					if job.Status == "completed" {
+						if job.Conclusion == "success" {
+							icon = "✓"
+						} else {
+							icon = "✕"
+						}
+					}
+					fmt.Printf("\n%s %s\n", icon, job.Name)
+					jobPrinted[job.ID] = true
+				}
+
+				// Fetch new log chunks
+				afterSeq := cursors[job.ID]
+				logs, err := client.GetCILogsSince(org, repo, runID, job.ID, afterSeq)
+				if err != nil {
+					continue
+				}
+				for _, entry := range logs {
+					fmt.Print(entry.Content)
+					if entry.ChunkSeq > cursors[job.ID] {
+						cursors[job.ID] = entry.ChunkSeq
+					}
+				}
+
+				// Print completion
+				if job.Status == "completed" && job.Conclusion != "" {
+					if !strings.HasSuffix(fmt.Sprintf("%v", cursors[job.ID]), "_done") {
+						if job.Conclusion == "success" {
+							fmt.Printf("  ✓ %s completed\n", job.Name)
+						} else {
+							fmt.Printf("  ✕ %s %s\n", job.Name, job.Conclusion)
+						}
+						cursors[job.ID+"_done"] = 1
+					}
+				}
+			}
+		}
+
+		// Exit when run is done
+		if run.Status == "completed" {
+			if run.Conclusion == "success" {
+				return nil
+			}
+			return fmt.Errorf("run %s", run.Conclusion)
+		}
+
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func runCICancel(cmd *cobra.Command, args []string) error {
