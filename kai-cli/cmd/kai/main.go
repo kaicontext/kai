@@ -11773,7 +11773,15 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect all objects reachable from each ref target
+	var validRefs []*ref.Ref
 	for _, r := range refsToSync {
+		// Verify the target node exists locally before pushing
+		_, _, err := db.GetNodeRawPayload(r.TargetID)
+		if err != nil {
+			debugf("push: skipping ref %s — target node not found locally", r.Name)
+			continue
+		}
+		validRefs = append(validRefs, r)
 		addDigest(r.TargetID)
 
 		// Get all edges from this node to find related objects
@@ -11996,7 +12004,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Batch update refs (single round-trip instead of N)
 	// Falls back to individual updates if server doesn't support batch endpoint
 	var batchUpdates []remote.BatchRefUpdate
-	for _, r := range refsToSync {
+	for _, r := range validRefs {
 		// Get old value from remote
 		remoteRef, _ := client.GetRef(r.Name)
 		var oldTarget []byte
@@ -12045,7 +12053,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// Push edges for pushed snapshots
 	// Collect edges for all snapshot refs we just pushed
 	var edgesToPush []remote.EdgeData
-	for _, r := range refsToSync {
+	for _, r := range validRefs {
 		// Only push edges for snapshots (where import/test analysis is scoped)
 		if r.TargetKind != ref.KindSnapshot {
 			continue
@@ -12086,7 +12094,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	// Push authorship data for all snapshots being pushed
 	var authorshipData []remote.AuthorshipData
-	for _, r := range refsToSync {
+	for _, r := range validRefs {
 		if r.TargetKind != ref.KindSnapshot {
 			continue
 		}

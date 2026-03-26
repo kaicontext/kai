@@ -296,19 +296,28 @@ func GetValidAccessToken() (string, error) {
 
 	// Check if token is expired or about to expire (within 60 seconds)
 	if creds.ExpiresAt > 0 && time.Now().Unix() > creds.ExpiresAt-60 {
-		// Try to refresh
-		if creds.RefreshToken != "" && creds.ServerURL != "" {
-			client := NewAuthClient(creds.ServerURL)
-			tokens, err := client.RefreshAccessToken(creds.RefreshToken)
-			if err == nil {
-				creds.AccessToken = tokens.AccessToken
-				if tokens.RefreshToken != "" {
-					creds.RefreshToken = tokens.RefreshToken
-				}
-				creds.ExpiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix()
-				SaveCredentials(creds)
-			}
+		if creds.RefreshToken == "" || creds.ServerURL == "" {
+			return "", fmt.Errorf("token expired and no refresh token available (run 'kai auth login')")
 		}
+
+		// Try to refresh, retry once on transient failure (e.g. deploy in progress)
+		client := NewAuthClient(creds.ServerURL)
+		tokens, err := client.RefreshAccessToken(creds.RefreshToken)
+		if err != nil {
+			// Retry once after a short delay (server may be restarting)
+			time.Sleep(2 * time.Second)
+			tokens, err = client.RefreshAccessToken(creds.RefreshToken)
+		}
+		if err != nil {
+			return "", fmt.Errorf("token expired and refresh failed: %w\nRun 'kai auth login' to re-authenticate", err)
+		}
+
+		creds.AccessToken = tokens.AccessToken
+		if tokens.RefreshToken != "" {
+			creds.RefreshToken = tokens.RefreshToken
+		}
+		creds.ExpiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix()
+		SaveCredentials(creds)
 	}
 
 	return creds.AccessToken, nil
