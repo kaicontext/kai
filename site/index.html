@@ -154,6 +154,125 @@
     .install-option code {
       color: var(--fg);
     }
+    /* Demo section */
+    .demo-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    @media (max-width: 600px) {
+      .demo-container { grid-template-columns: 1fr; }
+    }
+    .demo-terminal, .demo-graph {
+      background: var(--code-bg);
+      border-radius: 8px;
+      border: 1px solid #262626;
+      min-height: 320px;
+      position: relative;
+      overflow: hidden;
+    }
+    .demo-terminal {
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 0.8rem;
+      padding: 0;
+    }
+    .term-bar {
+      background: #262626;
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .term-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .term-dot-r { background: #ff5f57; }
+    .term-dot-y { background: #ffbd2e; }
+    .term-dot-g { background: #28c840; }
+    .term-title { color: var(--muted); font-size: 0.75rem; margin-left: 8px; }
+    .term-body {
+      padding: 12px;
+      white-space: pre;
+      line-height: 1.5;
+      overflow-y: auto;
+      max-height: 280px;
+    }
+    .term-prompt { color: #28c840; }
+    .term-cmd { color: var(--fg); }
+    .term-output { color: var(--muted); }
+    .term-highlight { color: var(--accent); }
+    .term-added { color: #4ade80; }
+    .term-modified { color: #fbbf24; }
+    .term-cursor {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      background: var(--fg);
+      animation: blink 1s step-end infinite;
+      vertical-align: text-bottom;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .demo-graph {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .demo-graph svg { width: 100%; height: 100%; }
+    .graph-node {
+      transition: opacity 0.4s, transform 0.4s;
+    }
+    .graph-edge {
+      transition: opacity 0.5s, stroke-dashoffset 0.8s;
+    }
+    .graph-node.hidden, .graph-edge.hidden {
+      opacity: 0;
+    }
+    .graph-node.pulse circle {
+      animation: nodePulse 0.6s ease-out;
+    }
+    @keyframes nodePulse {
+      0% { r: 6; }
+      50% { r: 10; }
+      100% { r: 6; }
+    }
+    .graph-edge.drawing {
+      stroke-dasharray: 200;
+      stroke-dashoffset: 200;
+      animation: drawEdge 0.6s forwards;
+    }
+    @keyframes drawEdge {
+      to { stroke-dashoffset: 0; }
+    }
+    .impact-glow {
+      animation: impactGlow 0.8s ease-out;
+    }
+    @keyframes impactGlow {
+      0% { filter: drop-shadow(0 0 0px #f59e0b); }
+      50% { filter: drop-shadow(0 0 8px #f59e0b); }
+      100% { filter: drop-shadow(0 0 2px #f59e0b); }
+    }
+    .play-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10,10,10,0.7);
+      cursor: pointer;
+      z-index: 10;
+      transition: opacity 0.3s;
+    }
+    .play-overlay:hover .play-btn { transform: scale(1.1); }
+    .play-btn {
+      width: 56px;
+      height: 56px;
+      background: var(--accent);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s;
+    }
+    .play-btn svg { margin-left: 3px; }
     footer {
       text-align: center;
       color: var(--muted);
@@ -265,20 +384,216 @@
     </section>
 
     <section id="quickstart">
-      <h2>Quick Start</h2>
-      <pre><code><span class="dim"># Initialize and capture your project</span>
-kai init
-kai capture
-
-<span class="dim"># See what changed semantically</span>
-kai diff
-
-<span class="dim"># Find affected tests</span>
-kai ci plan
-
-<span class="dim"># Check version</span>
-kai version</code></pre>
+      <h2>See It In Action</h2>
+      <div class="demo-container" id="demo">
+        <div class="demo-terminal">
+          <div class="term-bar">
+            <span class="term-dot term-dot-r"></span>
+            <span class="term-dot term-dot-y"></span>
+            <span class="term-dot term-dot-g"></span>
+            <span class="term-title">Terminal</span>
+          </div>
+          <div class="term-body" id="term-body"></div>
+        </div>
+        <div class="demo-graph">
+          <svg id="graph-svg" viewBox="0 0 360 300" xmlns="http://www.w3.org/2000/svg">
+            <!-- Edges (drawn behind nodes) -->
+            <g id="graph-edges">
+              <line class="graph-edge hidden" data-id="e1" x1="180" y1="40" x2="90" y2="110" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e2" x1="180" y1="40" x2="270" y2="110" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e3" x1="90" y1="110" x2="60" y2="190" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e4" x1="90" y1="110" x2="150" y2="190" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e5" x1="270" y1="110" x2="230" y2="190" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e6" x1="270" y1="110" x2="310" y2="190" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e7" x1="60" y1="190" x2="90" y2="260" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+              <line class="graph-edge hidden" data-id="e8" x1="150" y1="190" x2="90" y2="260" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/>
+            </g>
+            <!-- Nodes -->
+            <g id="graph-nodes">
+              <g class="graph-node hidden" data-id="n1" transform="translate(180,40)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">app.ts</text>
+              </g>
+              <g class="graph-node hidden" data-id="n2" transform="translate(90,110)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">auth.ts</text>
+              </g>
+              <g class="graph-node hidden" data-id="n3" transform="translate(270,110)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">api.ts</text>
+              </g>
+              <g class="graph-node hidden" data-id="n4" transform="translate(60,190)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">validateToken</text>
+              </g>
+              <g class="graph-node hidden" data-id="n5" transform="translate(150,190)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">createSession</text>
+              </g>
+              <g class="graph-node hidden" data-id="n6" transform="translate(230,190)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">fetchUser</text>
+              </g>
+              <g class="graph-node hidden" data-id="n7" transform="translate(310,190)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">handleError</text>
+              </g>
+              <g class="graph-node hidden" data-id="n8" transform="translate(90,260)">
+                <circle r="6" fill="#3b82f6"/><text x="12" y="4" fill="#e5e5e5" font-size="11" font-family="SF Mono,Consolas,monospace">auth.test.ts</text>
+              </g>
+            </g>
+          </svg>
+        </div>
+        <!-- Play overlay spans both panels -->
+        <div class="play-overlay" id="play-overlay" onclick="startDemo()" style="position:absolute; inset:0;">
+          <div class="play-btn">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><polygon points="6,3 20,12 6,21"/></svg>
+          </div>
+        </div>
+      </div>
     </section>
+
+    <script>
+    (function() {
+      // Make demo-container position:relative for overlay
+      document.getElementById('demo').style.position = 'relative';
+
+      const termBody = document.getElementById('term-body');
+      let running = false;
+
+      function show(id, cls) {
+        const el = document.querySelector(`[data-id="${id}"]`);
+        if (!el) return;
+        el.classList.remove('hidden');
+        if (cls) el.classList.add(cls);
+      }
+
+      function recolor(id, color) {
+        const el = document.querySelector(`[data-id="${id}"] circle`);
+        if (el) el.setAttribute('fill', color);
+      }
+
+      function addGlow(id) {
+        const el = document.querySelector(`[data-id="${id}"]`);
+        if (el) el.classList.add('impact-glow');
+      }
+
+      function typeLine(text, cls, delay) {
+        return new Promise(resolve => {
+          setTimeout(() => {
+            const span = document.createElement('span');
+            span.className = cls || '';
+            span.textContent = text + '\n';
+            termBody.appendChild(span);
+            termBody.scrollTop = termBody.scrollHeight;
+            resolve();
+          }, delay || 0);
+        });
+      }
+
+      async function typeCmd(text, delay) {
+        await new Promise(r => setTimeout(r, delay || 200));
+        const line = document.createElement('span');
+        const prompt = document.createElement('span');
+        prompt.className = 'term-prompt';
+        prompt.textContent = '$ ';
+        line.appendChild(prompt);
+
+        const cmd = document.createElement('span');
+        cmd.className = 'term-cmd';
+        line.appendChild(cmd);
+        termBody.appendChild(line);
+
+        for (let i = 0; i < text.length; i++) {
+          await new Promise(r => setTimeout(r, 40));
+          cmd.textContent = text.slice(0, i + 1);
+          termBody.scrollTop = termBody.scrollHeight;
+        }
+        termBody.appendChild(document.createTextNode('\n'));
+        termBody.scrollTop = termBody.scrollHeight;
+      }
+
+      window.startDemo = async function() {
+        if (running) return;
+        running = true;
+        document.getElementById('play-overlay').style.display = 'none';
+        termBody.innerHTML = '';
+
+        // Reset graph
+        document.querySelectorAll('.graph-node, .graph-edge').forEach(el => {
+          el.classList.add('hidden');
+          el.classList.remove('pulse', 'drawing', 'impact-glow');
+        });
+        document.querySelectorAll('.graph-node circle').forEach(c => c.setAttribute('fill', '#3b82f6'));
+
+        // Phase 1: kai capture
+        await typeCmd('kai capture', 300);
+        await typeLine('Scanning files...', 'term-output', 400);
+        await typeLine('Found 6 source files', 'term-output', 300);
+
+        // Show file nodes
+        show('n1', 'pulse'); await new Promise(r => setTimeout(r, 200));
+        show('n2', 'pulse'); await new Promise(r => setTimeout(r, 200));
+        show('n3', 'pulse'); await new Promise(r => setTimeout(r, 200));
+
+        await typeLine('Analyzing symbols...', 'term-output', 400);
+
+        // Show symbol nodes
+        show('n4', 'pulse'); await new Promise(r => setTimeout(r, 150));
+        show('n5', 'pulse'); await new Promise(r => setTimeout(r, 150));
+        show('n6', 'pulse'); await new Promise(r => setTimeout(r, 150));
+        show('n7', 'pulse'); await new Promise(r => setTimeout(r, 150));
+        show('n8', 'pulse'); await new Promise(r => setTimeout(r, 150));
+
+        await typeLine('Building call graph...', 'term-output', 400);
+
+        // Show edges
+        show('e1', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e2', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e3', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e4', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e5', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e6', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e7', 'drawing'); await new Promise(r => setTimeout(r, 150));
+        show('e8', 'drawing'); await new Promise(r => setTimeout(r, 150));
+
+        await typeLine('Captured 8 nodes, 8 edges', 'term-highlight', 300);
+        await new Promise(r => setTimeout(r, 600));
+
+        // Phase 2: kai diff
+        await typeCmd('kai diff', 600);
+        await typeLine('', '', 200);
+
+        // Highlight modified node
+        recolor('n4', '#fbbf24');
+        addGlow('n4');
+        await typeLine('~ auth.ts', 'term-modified', 400);
+        await typeLine('  ~ validateToken  (modified: added expiry check)', 'term-modified', 300);
+
+        await new Promise(r => setTimeout(r, 400));
+
+        // Phase 3: kai impact
+        await typeCmd('kai impact validateToken', 600);
+        await typeLine('', '', 200);
+
+        // Highlight impact path: validateToken -> auth.ts -> app.ts, and test
+        recolor('n2', '#fbbf24'); addGlow('n2');
+        await typeLine('  auth.ts        calls validateToken', 'term-modified', 300);
+
+        recolor('n1', '#fbbf24'); addGlow('n1');
+        await typeLine('  app.ts         imports auth', 'term-modified', 300);
+
+        recolor('n5', '#fbbf24'); addGlow('n5');
+        await typeLine('  createSession   calls validateToken', 'term-modified', 300);
+
+        recolor('n8', '#4ade80'); addGlow('n8');
+        await typeLine('  auth.test.ts   covers validateToken', 'term-added', 300);
+
+        await new Promise(r => setTimeout(r, 400));
+        await typeLine('', '', 0);
+        await typeLine('4 symbols affected, 1 test covers', 'term-highlight', 300);
+
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Show replay
+        document.getElementById('play-overlay').style.display = 'flex';
+        running = false;
+      };
+    })();
+    </script>
 
     <footer>
       <p>Apache 2.0 License &middot; <a href="https://github.com/kaicontext/kai">GitHub</a> &middot; <a href="https://github.com/kaicontext/kai/blob/main/docs/mcp.md">MCP Docs</a> &middot; <a href="https://join.slack.com/t/kailayer/shared_invite/zt-3q8ulczwl-vkZ05GQH~kwudonmH53hGg">Slack</a></p>
