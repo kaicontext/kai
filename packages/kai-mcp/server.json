@@ -6,12 +6,12 @@
     "url": "https://github.com/kaicontext/kai",
     "source": "github"
   },
-  "version": "0.9.21",
+  "version": "0.9.22",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "kai-mcp",
-      "version": "0.9.21",
+      "version": "0.9.22",
       "transport": {
         "type": "stdio"
       }
