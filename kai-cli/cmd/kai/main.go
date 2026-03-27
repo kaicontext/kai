@@ -68,10 +68,11 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.26"
+var Version = "0.9.27"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
+var authLoginToken string
 
 // updateCheckFile is the path to the cached update check result.
 var updateCheckFile = filepath.Join(os.Getenv("HOME"), ".kai", "update-check.json")
@@ -1536,8 +1537,9 @@ var authLoginCmd = &cobra.Command{
 If no server URL is provided, uses the origin remote's URL.
 
 Examples:
-  kai auth login                              # Login using origin remote
-  kai auth login http://localhost:8080        # Login to specific server`,
+  kai auth login                              # Interactive login using origin remote
+  kai auth login http://localhost:8080        # Interactive login to specific server
+  kai auth login --token "$KAI_TOKEN"         # Non-interactive login for CI`,
 	RunE: runAuthLogin,
 }
 
@@ -2585,6 +2587,7 @@ func init() {
 	rootCmd.AddCommand(hookCmd)
 
 	// Add auth subcommands
+	authLoginCmd.Flags().StringVar(&authLoginToken, "token", "", "Access token for non-interactive login (CI)")
 	authCmd.AddCommand(authLoginCmd)
 	authCmd.AddCommand(authLogoutCmd)
 	authCmd.AddCommand(authStatusCmd)
@@ -12885,9 +12888,26 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 		// Try to get URL from origin remote
 		entry, err := remote.GetRemote("origin")
 		if err != nil {
-			return fmt.Errorf("no server URL provided and no 'origin' remote configured\n\nUsage: kai auth login <server-url>\nExample: kai auth login http://localhost:8080")
+			if authLoginToken == "" {
+				return fmt.Errorf("no server URL provided and no 'origin' remote configured\n\nUsage: kai auth login <server-url>\nExample: kai auth login http://localhost:8080")
+			}
+			serverURL = remote.DefaultServer
+		} else {
+			serverURL = entry.URL
 		}
-		serverURL = entry.URL
+	}
+
+	// Non-interactive token login (for CI)
+	if authLoginToken != "" {
+		creds := &remote.Credentials{
+			AccessToken: authLoginToken,
+			ServerURL:   serverURL,
+		}
+		if err := remote.SaveCredentials(creds); err != nil {
+			return fmt.Errorf("saving credentials: %w", err)
+		}
+		fmt.Printf("Authenticated with token to %s\n", serverURL)
+		return nil
 	}
 
 	return remote.Login(serverURL)
