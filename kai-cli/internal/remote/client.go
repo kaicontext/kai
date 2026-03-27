@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -999,6 +1000,31 @@ func (c *Client) PushAuthorship(data []AuthorshipData) (*PushAuthorshipResponse,
 // It checks (in order): package.json, go.mod, Gemfile, Cargo.toml, pyproject.toml,
 // setup.py, then falls back to the directory name.
 func DetectProjectName() string {
+	// Try git remote URL first — most universal and reliable
+	if out, err := exec.Command("git", "remote", "get-url", "origin").Output(); err == nil {
+		url := strings.TrimSpace(string(out))
+		// Extract repo name from URL patterns:
+		//   git@github.com:org/repo.git  →  repo
+		//   https://github.com/org/repo.git  →  repo
+		//   https://github.com/org/repo  →  repo
+		name := url
+		// Strip .git suffix
+		name = strings.TrimSuffix(name, ".git")
+		// Get last path segment
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		} else if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			// SSH format: git@host:org/repo
+			name = name[idx+1:]
+			if idx2 := strings.LastIndex(name, "/"); idx2 >= 0 {
+				name = name[idx2+1:]
+			}
+		}
+		if name != "" {
+			return sanitizeRepoName(name)
+		}
+	}
+
 	// Try package.json (Node.js)
 	if data, err := os.ReadFile("package.json"); err == nil {
 		var pkg struct {
