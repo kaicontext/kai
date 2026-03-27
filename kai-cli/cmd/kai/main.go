@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.23"
+var Version = "0.9.24"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -91,9 +91,26 @@ func printUpdateNotice() {
 	if json.Unmarshal(data, &uc) != nil || uc.LatestVersion == "" {
 		return
 	}
-	if uc.LatestVersion != Version {
+	if isNewerVersion(uc.LatestVersion, Version) {
 		fmt.Fprintf(os.Stderr, "Update available: %s → %s (run `kai update`)\n", Version, uc.LatestVersion)
 	}
+}
+
+// isNewerVersion returns true if a is newer than b using semver comparison.
+func isNewerVersion(a, b string) bool {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	for i := 0; i < len(aParts) && i < len(bParts); i++ {
+		ai, _ := strconv.Atoi(aParts[i])
+		bi, _ := strconv.Atoi(bParts[i])
+		if ai > bi {
+			return true
+		}
+		if ai < bi {
+			return false
+		}
+	}
+	return len(aParts) > len(bParts)
 }
 
 // backgroundUpdateCheck checks GitHub for the latest release tag and caches the result.
