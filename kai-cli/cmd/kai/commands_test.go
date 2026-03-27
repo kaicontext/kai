@@ -539,13 +539,20 @@ func TestRunCompletion(t *testing.T) {
 			r, w, _ := os.Pipe()
 			os.Stdout = w
 
+			// Read from pipe concurrently to avoid deadlock when
+			// completion output exceeds the OS pipe buffer (~64KB).
+			var buf bytes.Buffer
+			done := make(chan struct{})
+			go func() {
+				buf.ReadFrom(r)
+				close(done)
+			}()
+
 			err := runCompletion(completionCmd, []string{shell})
 
 			w.Close()
 			os.Stdout = oldStdout
-
-			var buf bytes.Buffer
-			buf.ReadFrom(r)
+			<-done
 
 			if err != nil {
 				t.Errorf("runCompletion(%s) failed: %v", shell, err)

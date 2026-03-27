@@ -159,6 +159,7 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 type ProgressFunc func(current, total int, filename string)
 
 // AnalyzeSymbols extracts symbols from all files in a snapshot.
+// Files whose content was already analyzed (DEFINES_IN edges exist) are skipped.
 func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error {
 	// Get all files in the snapshot
 	edges, err := c.db.GetEdges(snapshotID, graph.EdgeHasFile)
@@ -175,6 +176,7 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error
 	defer tx.Rollback()
 
 	total := len(edges)
+	skipped := 0
 	for i, edge := range edges {
 		fileNode, err := c.db.GetNode(edge.Dst)
 		if err != nil {
@@ -184,18 +186,22 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error
 			continue
 		}
 
-		// Get filename for progress reporting
 		filename, _ := fileNode.Payload["path"].(string)
 		if progress != nil {
 			progress(i+1, total, filename)
 		}
 
-		// Skip binary and image files - they can't be parsed for symbols
 		if isBinaryOrImageFile(filename) {
 			continue
 		}
 
-		// Read the file content
+		// Skip files already analyzed: if DEFINES_IN edges point to this file ID,
+		// the symbols were extracted in a prior capture with identical content.
+		if already, _ := c.db.HasEdgeByDst(graph.EdgeDefinesIn, edge.Dst); already {
+			skipped++
+			continue
+		}
+
 		digest, ok := fileNode.Payload["digest"].(string)
 		if !ok {
 			continue
@@ -206,21 +212,16 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error
 			return fmt.Errorf("reading object: %w", err)
 		}
 
-		// Skip very large files (likely minified or generated)
-		// 500KB is a reasonable limit for symbol extraction
 		if len(content) > 500*1024 {
 			continue
 		}
 
-		// Parse the file
 		lang, _ := fileNode.Payload["lang"].(string)
 		parsed, err := parser.Parse(content, lang)
 		if err != nil {
-			// Skip files that can't be parsed
 			continue
 		}
 
-		// Create symbol nodes
 		fileIDHex := util.BytesToHex(edge.Dst)
 		for _, sym := range parsed.Symbols {
 			symbolPayload := map[string]interface{}{
@@ -236,7 +237,6 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error
 				return fmt.Errorf("inserting symbol: %w", err)
 			}
 
-			// Create edge: Symbol DEFINES_IN File
 			if err := c.db.InsertEdge(tx, symbolID, graph.EdgeDefinesIn, edge.Dst, snapshotID); err != nil {
 				return fmt.Errorf("inserting DEFINES_IN edge: %w", err)
 			}
@@ -257,14 +257,15 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 
 	parser := parse.NewParser()
 
-	// First pass: collect all files and their paths, build a map of file paths to IDs
+	// Single pass: collect all files, parse once, and extract imports+exports+calls together.
 	type fileInfo struct {
 		id       []byte
 		path     string
 		lang     string
 		content  []byte
 		isTest   bool
-		exported []string // exported symbols
+		exported []string              // exported symbols
+		parsed   *parse.ParsedCalls    // cached parse result — avoids double tree-sitter pass
 	}
 	files := make([]*fileInfo, 0, len(edges))
 	filesByPath := make(map[string]*fileInfo)
@@ -433,17 +434,18 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 			progress(i+1, total, fi.path)
 		}
 
-		// Parse for calls
-		parsed, err := parser.ExtractCalls(fi.content, fi.lang)
+		// Parse for calls (cached on fileInfo to avoid double tree-sitter pass)
+		callsParsed, err := parser.ExtractCalls(fi.content, fi.lang)
 		if err != nil {
 			continue
 		}
 
-		fi.exported = parsed.Exports
+		fi.parsed = callsParsed
+		fi.exported = callsParsed.Exports
 
 		// Build import graph — language-specific resolution
 		var imports []string
-		for _, imp := range parsed.Imports {
+		for _, imp := range callsParsed.Imports {
 			switch fi.lang {
 			case "go":
 				// Go: match import path against directory suffixes
@@ -611,14 +613,15 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		}
 	}
 
-	// Now process calls to create edges
+	// Now process calls to create edges (reusing cached parse results — no second tree-sitter pass)
 	for i, fi := range files {
 		if progress != nil {
 			progress(i+1, total, fi.path)
 		}
 
-		parsed, err := parser.ExtractCalls(fi.content, fi.lang)
-		if err != nil {
+		// Reuse cached parse result from first pass
+		parsed := fi.parsed
+		if parsed == nil {
 			continue
 		}
 

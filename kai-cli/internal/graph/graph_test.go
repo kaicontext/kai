@@ -655,17 +655,19 @@ func TestDeleteEdgeAt(t *testing.T) {
 	defer cleanup()
 
 	srcID, _ := db.InsertNodeDirect(KindChangeSet, map[string]interface{}{"name": "cs"})
-	dstID, _ := db.InsertNodeDirect(KindSymbol, map[string]interface{}{"name": "sym"})
+	dst1, _ := db.InsertNodeDirect(KindSymbol, map[string]interface{}{"name": "sym1"})
+	dst2, _ := db.InsertNodeDirect(KindSymbol, map[string]interface{}{"name": "sym2"})
 	ctx1, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"name": "ctx1"})
 	ctx2, _ := db.InsertNodeDirect(KindSnapshot, map[string]interface{}{"name": "ctx2"})
 
-	// Insert edges with different contexts
-	db.InsertEdgeDirect(srcID, EdgeAffects, dstID, ctx1)
-	db.InsertEdgeDirect(srcID, EdgeAffects, dstID, ctx2)
+	// Insert edges with different (src,type,dst) tuples and different contexts.
+	// PK is (src, type, dst), so each needs a unique dst.
+	db.InsertEdgeDirect(srcID, EdgeAffects, dst1, ctx1)
+	db.InsertEdgeDirect(srcID, EdgeAffects, dst2, ctx2)
 
-	// Delete only one context
+	// Delete only the edge with ctx1
 	tx, _ := db.BeginTx()
-	if err := db.DeleteEdgeAt(tx, srcID, EdgeAffects, dstID, ctx1); err != nil {
+	if err := db.DeleteEdgeAt(tx, srcID, EdgeAffects, dst1, ctx1); err != nil {
 		tx.Rollback()
 		t.Fatalf("deleting edge at context: %v", err)
 	}

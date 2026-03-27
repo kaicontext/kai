@@ -84,6 +84,18 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 	// Wait up to 5s on lock instead of failing immediately
 	conn.Exec("PRAGMA busy_timeout=5000")
 
+	// NORMAL sync is safe with WAL — only risks loss on OS crash (not app crash).
+	// Cuts fsync calls roughly in half vs FULL.
+	conn.Exec("PRAGMA synchronous=NORMAL")
+
+	// 64MB page cache (default is ~2MB). Keeps hot pages in memory during
+	// snapshot creation and symbol analysis.
+	conn.Exec("PRAGMA cache_size=-65536")
+
+	// Memory-map up to 256MB of the DB file. Avoids read() syscalls for
+	// frequently accessed pages.
+	conn.Exec("PRAGMA mmap_size=268435456")
+
 	// Future-proof: enforce foreign key constraints if we add them
 	conn.Exec("PRAGMA foreign_keys=ON")
 
@@ -388,6 +400,65 @@ func (db *DB) GetEdges(src []byte, edgeType EdgeType) ([]*Edge, error) {
 	return edges, rows.Err()
 }
 
+// GetAllEdgesFrom retrieves all edges from a source node across all edge types in a single query.
+// Much faster than calling GetEdges once per edge type.
+func (db *DB) GetAllEdgesFrom(src []byte) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT DISTINCT type, dst, at, created_at FROM edges WHERE src = ?
+	`, src)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var edgeTypeStr string
+		var dst, at []byte
+		var createdAt int64
+		if err := rows.Scan(&edgeTypeStr, &dst, &at, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+		edges = append(edges, &Edge{
+			Src:       src,
+			Type:      EdgeType(edgeTypeStr),
+			Dst:       dst,
+			At:        at,
+			CreatedAt: createdAt,
+		})
+	}
+	return edges, rows.Err()
+}
+
+// GetAllEdgesByContext retrieves all edges with a specific context (at) value in a single query.
+func (db *DB) GetAllEdgesByContext(at []byte) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT DISTINCT src, type, dst, created_at FROM edges WHERE at = ?
+	`, at)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var edgeTypeStr string
+		var src, dst []byte
+		var createdAt int64
+		if err := rows.Scan(&src, &edgeTypeStr, &dst, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+		edges = append(edges, &Edge{
+			Src:       src,
+			Type:      EdgeType(edgeTypeStr),
+			Dst:       dst,
+			At:        at,
+			CreatedAt: createdAt,
+		})
+	}
+	return edges, rows.Err()
+}
+
 // GetEdgesOfType retrieves all edges of a specific type.
 func (db *DB) GetEdgesOfType(edgeType EdgeType) ([]*Edge, error) {
 	rows, err := db.conn.Query(`
@@ -477,6 +548,22 @@ func (db *DB) GetEdgesByContextAndDst(at []byte, edgeType EdgeType, dst []byte) 
 	}
 
 	return edges, rows.Err()
+}
+
+// HasEdgeByDst checks if at least one edge of the given type points to dst.
+// Used to skip re-analysis of files that were already parsed in a prior snapshot.
+func (db *DB) HasEdgeByDst(edgeType EdgeType, dst []byte) (bool, error) {
+	var exists int
+	err := db.conn.QueryRow(`
+		SELECT 1 FROM edges WHERE type = ? AND dst = ? LIMIT 1
+	`, string(edgeType), dst).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetEdgesToByPath finds edges of a given type where the destination node is a File

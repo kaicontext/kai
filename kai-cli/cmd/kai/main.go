@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.22"
+var Version = "0.9.23"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3519,7 +3519,12 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	// Step 1: Create snapshot
 	debugf("Step 1/3: Creating snapshot from %s", capturePath)
 	phaseStart := time.Now()
-	source, err := dirio.OpenDirectory(capturePath)
+
+	// Load stat cache for incremental file reading
+	cacheDir := filepath.Join(capturePath, ".kai")
+	statCache := dirio.LoadStatCache(cacheDir)
+
+	source, err := dirio.OpenDirectory(capturePath, dirio.WithStatCache(statCache))
 	if err != nil {
 		if te != nil {
 			te.Result = "error"
@@ -3553,6 +3558,12 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
 	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
+
+	// Persist stat cache so next capture can skip unchanged files
+	if err := statCache.Save(cacheDir); err != nil {
+		debugf("warning: failed to save stat cache: %v", err)
+	}
+
 	if te != nil {
 		te.SetPhase("snapshot", time.Since(phaseStart).Milliseconds())
 		te.Stats["files"] = int64(len(files))
@@ -11785,7 +11796,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Collect all objects reachable from each ref target
+	// Collect all objects reachable from each ref target.
+	// Uses batched edge queries (1 query per ref instead of 10+).
 	var validRefs []*ref.Ref
 	for _, r := range refsToSync {
 		// Verify the target node exists locally before pushing
@@ -11797,38 +11809,18 @@ func runPush(cmd *cobra.Command, args []string) error {
 		validRefs = append(validRefs, r)
 		addDigest(r.TargetID)
 
-		// Get all edges from this node to find related objects
-		for _, edgeType := range []graph.EdgeType{
-			graph.EdgeHasFile,
-			graph.EdgeDefinesIn,
-			graph.EdgeModifies,
-			graph.EdgeHas,
-			graph.EdgeAffects,
-			graph.EdgeContains,
-			graph.EdgeBasedOn,
-			graph.EdgeHeadAt,
-			graph.EdgeHasChangeSet,
-			graph.EdgeHasIntent,
-		} {
-			edges, err := db.GetEdges(r.TargetID, edgeType)
-			if err != nil {
-				continue
-			}
+		// Single query: get all edges from this node (replaces 10 separate GetEdges calls)
+		edges, err := db.GetAllEdgesFrom(r.TargetID)
+		if err == nil {
 			for _, edge := range edges {
 				addDigest(edge.Dst)
 			}
 		}
 
-		// Also get edges by context (for edges created with 'at' = this node)
-		for _, edgeType := range []graph.EdgeType{
-			graph.EdgeHasFile,
-			graph.EdgeDefinesIn,
-		} {
-			edges, err := db.GetEdgesByContext(r.TargetID, edgeType)
-			if err != nil {
-				continue
-			}
-			for _, edge := range edges {
+		// Single query: get all edges where this node is the context
+		ctxEdges, err := db.GetAllEdgesByContext(r.TargetID)
+		if err == nil {
+			for _, edge := range ctxEdges {
 				addDigest(edge.Src)
 				addDigest(edge.Dst)
 			}
@@ -12138,6 +12130,15 @@ func runPush(cmd *cobra.Command, args []string) error {
 		} else {
 			debugf("%d authorship ranges inserted", result.Inserted)
 		}
+	}
+
+	// Keep snap.main in sync with snap.latest (CI checkouts use snap.main)
+	latestRef, _ := refMgr.Get("snap.latest")
+	mainRef, _ := refMgr.Get("snap.main")
+	if latestRef != nil && (mainRef == nil || !bytes.Equal(latestRef.TargetID, mainRef.TargetID)) {
+		refMgr.Set("snap.main", latestRef.TargetID, ref.KindSnapshot)
+		// Push the updated snap.main ref to remote
+		client.UpdateRef("snap.main", nil, latestRef.TargetID, true)
 	}
 
 	// Track what we pushed so duplicate pushes are skipped
