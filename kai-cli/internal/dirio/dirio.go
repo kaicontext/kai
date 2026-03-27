@@ -156,6 +156,17 @@ func (ds *DirectorySource) collectFiles() error {
 			return nil
 		}
 
+		// Resolve symlinks: skip symlinks-to-directories, allow symlinks-to-files.
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Stat(path) // Stat follows symlinks
+			if err != nil {
+				return nil // broken symlink — skip silently
+			}
+			if target.IsDir() {
+				return nil // symlink to directory — skip, don't try to read
+			}
+		}
+
 		lang := detectLang(path)
 		if lang == "" {
 			return nil
