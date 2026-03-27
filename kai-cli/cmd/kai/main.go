@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.24"
+var Version = "0.9.25"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2653,6 +2653,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating .kai directory: %w", err)
 	}
 
+	// Ensure .kai is in .gitignore
+	ensureGitignore(".kai")
+
 	// Create objects directory
 	objPath := filepath.Join(kaiDir, objectsDir)
 	if err := os.MkdirAll(objPath, 0755); err != nil {
@@ -3203,6 +3206,27 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	}
 
 	return nil
+}
+
+// ensureGitignore appends entry to .gitignore if not already present.
+func ensureGitignore(entry string) {
+	const gitignorePath = ".gitignore"
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return
+	}
+	// Check if already ignored
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return
+		}
+	}
+	// Append with a leading newline if file doesn't end with one
+	addition := entry + "\n"
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		addition = "\n" + addition
+	}
+	os.WriteFile(gitignorePath, append(content, []byte(addition)...), 0644)
 }
 
 const kaiMCPSection = `## Code Analysis
