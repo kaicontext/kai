@@ -71,13 +71,17 @@ main() {
     echo ""
     echo "kai ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
     echo ""
-    echo "Get started:"
-    echo "  kai init"
-    echo "  kai capture"
-    echo "  kai status"
-    echo ""
-    echo "Use as MCP server (Claude Code, Cursor, etc.):"
-    echo "  claude mcp add kai -- kai mcp serve"
+
+    # Run kai init if we're in a git repo or any project directory
+    if [ -d ".git" ] || [ -f "package.json" ] || [ -f "go.mod" ] || [ -f "Cargo.toml" ] || [ -f "requirements.txt" ] || [ -f "Makefile" ] || [ -f "pom.xml" ]; then
+        echo "Project detected — running kai init..."
+        echo ""
+        kai init
+    else
+        echo "Get started:"
+        echo "  cd your-project && kai init"
+        echo ""
+    fi
 }
 
 main
