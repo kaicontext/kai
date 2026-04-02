@@ -3416,6 +3416,13 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		}
 	}
 
+	// ── Step 4: Run first capture to build the semantic graph ──
+	fmt.Println()
+	fmt.Println("  Building semantic graph...")
+	if captureErr := runCapture(cmd, []string{"."}); captureErr != nil {
+		fmt.Printf("  Warning: capture failed: %v\n", captureErr)
+	}
+
 	// ── Step 5: Detect AI tools, install MCP, offer bench ──
 	hasClaude := detectClaudeCode()
 	hasCodex := func() bool { _, err := exec.LookPath("codex"); return err == nil }()
