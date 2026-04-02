@@ -1634,21 +1634,22 @@ func rubyPathToConstant(path string) string {
 	}
 	path = strings.TrimSuffix(path, ".rb")
 
-	// Strip known Rails root prefixes
-	for _, prefix := range []string{
-		"app/models/", "app/controllers/", "app/helpers/",
-		"app/services/", "app/jobs/", "app/mailers/",
-		"app/channels/", "app/serializers/", "app/policies/",
-		"app/decorators/", "app/forms/", "app/validators/",
-		"app/uploaders/", "app/presenters/", "app/workers/",
-		"app/components/", "app/interactors/",
-		"lib/",
-	} {
-		if strings.HasPrefix(path, prefix) {
-			path = strings.TrimPrefix(path, prefix)
-			break
+	// Strip app/*/ prefix (any subdirectory under app/ is an autoload root)
+	if strings.HasPrefix(path, "app/") {
+		// Find the second slash: app/models/user.rb -> user
+		rest := path[4:] // strip "app/"
+		if idx := strings.Index(rest, "/"); idx >= 0 {
+			path = rest[idx+1:]
+		} else {
+			path = rest
 		}
+	} else if strings.HasPrefix(path, "lib/") {
+		path = strings.TrimPrefix(path, "lib/")
 	}
+
+	// Strip "concerns/" prefix — Zeitwerk treats concerns as a collapse directory,
+	// not a namespace. app/models/concerns/issuable.rb -> Issuable, not Concerns::Issuable
+	path = strings.TrimPrefix(path, "concerns/")
 
 	// Skip files that don't map to constants (config, db, spec, etc.)
 	if strings.HasPrefix(path, "config/") || strings.HasPrefix(path, "db/") ||

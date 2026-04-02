@@ -1114,10 +1114,13 @@ func extractRubyImports(node *sitter.Node, content []byte) []*Import {
 
 		switch n.Type() {
 		case "constant":
-			// Skip if this constant is part of a class/module definition
+			// Skip constants that are part of a scope_resolution (handled as full path)
 			parent := n.Parent()
+			if parent != nil && parent.Type() == "scope_resolution" {
+				continue
+			}
+			// Skip if this constant is part of a class/module definition
 			if parent != nil && (parent.Type() == "class" || parent.Type() == "module") {
-				// Check if this is the name of the class/module (first constant child)
 				isDefinition := false
 				for i := 0; i < int(parent.ChildCount()); i++ {
 					child := parent.Child(i)
@@ -1132,13 +1135,21 @@ func extractRubyImports(node *sitter.Node, content []byte) []*Import {
 					continue
 				}
 			}
+			// Skip superclass references (e.g. < ApplicationRecord)
+			if parent != nil && parent.Type() == "superclass" {
+				continue
+			}
 			constName = n.Content(content)
 
 		case "scope_resolution":
 			// e.g. ActiveRecord::Base, Admin::UsersController
+			// Skip nested scope_resolutions (only emit the outermost)
+			parent := n.Parent()
+			if parent != nil && parent.Type() == "scope_resolution" {
+				continue
+			}
 			constName = n.Content(content)
 			// Skip if this is a class/module definition name
-			parent := n.Parent()
 			if parent != nil && (parent.Type() == "class" || parent.Type() == "module") {
 				isDefinition := false
 				for i := 0; i < int(parent.ChildCount()); i++ {
