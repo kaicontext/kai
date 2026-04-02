@@ -3416,34 +3416,52 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	fmt.Println()
 	detectAndOfferMCP(reader)
 
-	// ── Step 6: Detect Claude Code and suggest kai bench ──
+	// ── Step 2: Offer to run kai bench (if Claude/Codex detected) ──
 	hasClaude := detectClaudeCode()
 	if hasClaude {
 		fmt.Println()
-		fmt.Println("  Claude Code detected! Run 'kai bench' to see how much Kai")
-		fmt.Println("  saves on tokens and cost when AI explores your codebase.")
+		fmt.Println("  Claude Code detected!")
+		fmt.Println("  Kai can benchmark how much it saves on tokens and cost")
+		fmt.Println("  when AI explores your codebase.")
+		fmt.Println()
+		fmt.Print("  Run kai bench now? [Y/n]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" || input == "y" || input == "yes" {
+			fmt.Println()
+			benchTask = "find the main entry point and explain the architecture"
+			if benchErr := runBench(cmd, nil); benchErr != nil {
+				fmt.Printf("  Bench failed: %v\n", benchErr)
+			}
+			benchTask = "" // reset
+		}
+		fmt.Println()
+		fmt.Println("  You can run benchmarks anytime with: kai bench")
 	}
 
-	// ── Step 7: Connect to kaicontext.com ──
+	// ── Step 3: Offer to set up kaicontext.com ──
 	fmt.Println()
-	fmt.Println("╭─────────────────────────────────────────────────────────────")
-	fmt.Println("│")
-	fmt.Println("│  Push your semantic graph to kaicontext.com (free) to get:")
-	fmt.Println("│    • Shareable code reviews with semantic diffs")
-	fmt.Println("│    • Team-wide code intelligence")
-	fmt.Println("│    • History across machines")
-	fmt.Println("│")
-	fmt.Println("╰─────────────────────────────────────────────────────────────")
-	fmt.Println()
+	fmt.Print("  Set up a free account on kaicontext.com? [Y/n]: ")
+	{
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "n" || input == "no" {
+			fmt.Println()
+			fmt.Println("  No problem! You can set up later with: kai auth login")
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
+		}
+	}
 
 	serverURL := os.Getenv("KAI_SERVER")
 	if serverURL == "" {
 		serverURL = remote.DefaultServer
 	}
 
-	// ── Step 7b/c: Auth flow ──
+	// Auth flow
 	token, authErr := remote.GetValidAccessToken()
 	if authErr != nil || token == "" {
+		fmt.Println()
 		fmt.Print("  Do you have an account on kaicontext.com? [y/N]: ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
@@ -3454,7 +3472,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			if err := remote.Login(serverURL); err != nil {
 				fmt.Printf("  Login failed: %v\n", err)
 				fmt.Println("  You can log in later with: kai auth login")
-				printInitFinish(isGitRepo)
+				printInitFinish(isGitRepo, hasClaude)
 				return nil
 			}
 		} else {
@@ -3466,7 +3484,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			email = strings.TrimSpace(email)
 			if email == "" {
 				fmt.Println("  Skipped. You can sign up later with: kai auth login")
-				printInitFinish(isGitRepo)
+				printInitFinish(isGitRepo, hasClaude)
 				return nil
 			}
 
@@ -3477,7 +3495,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			if err != nil {
 				fmt.Printf("  Failed: %v\n", err)
 				fmt.Println("  You can try again later with: kai auth login")
-				printInitFinish(isGitRepo)
+				printInitFinish(isGitRepo, hasClaude)
 				return nil
 			}
 
@@ -3501,14 +3519,14 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 
 			if magicToken == "" {
 				fmt.Println("  Skipped. You can sign up later with: kai auth login")
-				printInitFinish(isGitRepo)
+				printInitFinish(isGitRepo, hasClaude)
 				return nil
 			}
 
 			tokens, err := authClient.ExchangeToken(magicToken)
 			if err != nil {
 				fmt.Printf("  Login failed: %v\n", err)
-				printInitFinish(isGitRepo)
+				printInitFinish(isGitRepo, hasClaude)
 				return nil
 			}
 
@@ -3531,7 +3549,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		fmt.Printf("  Already logged in as %s\n\n", email)
 	}
 
-	// ── Step 8: Ensure personal org exists, Step 9: Create repo ──
+	// Ensure personal org exists, create repo, offer to push
 	token, authErr = remote.GetValidAccessToken()
 	if authErr == nil && token != "" {
 		ctrl := remote.NewControlClient(serverURL)
@@ -3584,7 +3602,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			}
 		}
 
-		// ── Step 9: Create repo for current directory ──
+		// Create repo for current directory
 		if selectedOrg != nil {
 			projectName := remote.DetectProjectName()
 			fmt.Println()
@@ -3616,7 +3634,7 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				debugf("setting remote: %v", err)
 			}
 
-			// ── Step 10: Offer to push ──
+			// Offer to push
 			fmt.Println()
 			fmt.Print("  Push your semantic graph now? [Y/n]: ")
 			input, _ := reader.ReadString('\n')
@@ -3633,12 +3651,12 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		}
 	}
 
-	printInitFinish(isGitRepo)
+	printInitFinish(isGitRepo, hasClaude)
 	return nil
 }
 
 // printInitFinish prints the final success message.
-func printInitFinish(isGitRepo bool) {
+func printInitFinish(isGitRepo, hasClaude bool) {
 	fmt.Println()
 	fmt.Println("╭─────────────────────────────────────────────────────────────")
 	fmt.Println("│")
@@ -3654,6 +3672,10 @@ func printInitFinish(isGitRepo bool) {
 		fmt.Println("│    kai capture        # Snapshot your code")
 		fmt.Println("│    kai diff           # See what changed")
 		fmt.Println("│    kai push           # Push to remote")
+	}
+	if hasClaude {
+		fmt.Println("│")
+		fmt.Println("│  Run 'kai bench' anytime to measure AI token savings.")
 	}
 	fmt.Println("│")
 	fmt.Println("╰─────────────────────────────────────────────────────────────")
