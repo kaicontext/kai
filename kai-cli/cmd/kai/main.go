@@ -4058,15 +4058,17 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 1: Create snapshot
-	debugf("Step 1/3: Creating snapshot from %s", capturePath)
+	debugf("Step 1/2: Creating snapshot from %s", capturePath)
 	phaseStart := time.Now()
 
 	// Load stat cache for incremental file reading
 	cacheDir := filepath.Join(capturePath, ".kai")
 	statCache := dirio.LoadStatCache(cacheDir)
 
+	fmt.Fprintf(os.Stderr, "Scanning files...")
 	source, err := dirio.OpenDirectory(capturePath, dirio.WithStatCache(statCache))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, " failed\n")
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "dir_open"
@@ -4074,30 +4076,29 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening directory: %w", err)
 	}
 
-	debugf("Reading files...")
 	files, err := source.GetFiles()
 	if err != nil {
-		fmt.Println("failed")
+		fmt.Fprintf(os.Stderr, " failed\n")
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "get_files"
 		}
 		return fmt.Errorf("getting files: %w", err)
 	}
-	debugf("found %d files", len(files))
-	debugf("capture: %d files found in %s", len(files), capturePath)
+	fmt.Fprintf(os.Stderr, " %d files\n", len(files))
 
-	debugf("Creating snapshot...")
+	fmt.Fprintf(os.Stderr, "Creating snapshot...")
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
-		fmt.Println("failed")
+		fmt.Fprintf(os.Stderr, " failed\n")
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "snapshot_create"
 		}
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, " done\n")
 	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
 
 	// Persist stat cache so next capture can skip unchanged files
