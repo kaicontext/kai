@@ -3,9 +3,10 @@ package filesource
 
 // FileInfo contains information about a source file.
 type FileInfo struct {
-	Path    string
-	Content []byte
-	Lang    string // "ts", "js", or empty
+	Path         string
+	Content      []byte // nil when CachedDigest is set (file unchanged, skip read)
+	Lang         string // "ts", "js", or empty
+	CachedDigest string // BLAKE3 hex digest from stat cache — set when file is unchanged
 }
 
 // FileSource abstracts the source of files (Git, filesystem, etc.).

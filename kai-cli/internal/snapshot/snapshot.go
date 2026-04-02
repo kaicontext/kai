@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"kai-core/cas"
 	"kai/internal/filesource"
 	"kai/internal/graph"
 	"kai/internal/module"
@@ -66,21 +67,45 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 	fileInfos := make([]fileInfo, 0, len(files))
 
 	for _, file := range files {
-		// Write content to objects
-		digest, err := c.db.WriteObject(file.Content)
-		if err != nil {
-			return nil, fmt.Errorf("writing object: %w", err)
-		}
+		var digest string
+		var fileID []byte
 
-		// Create file node
-		filePayload := map[string]interface{}{
-			"path":   file.Path,
-			"lang":   file.Lang,
-			"digest": digest,
-		}
-		fileID, err := c.db.InsertNode(tx, graph.KindFile, filePayload)
-		if err != nil {
-			return nil, fmt.Errorf("inserting file: %w", err)
+		if file.CachedDigest != "" && file.Content == nil {
+			// File unchanged — reuse cached digest, compute node ID without reading.
+			// The file node is content-addressed, so same payload = same ID.
+			digest = file.CachedDigest
+			filePayload := map[string]interface{}{
+				"path":   file.Path,
+				"lang":   file.Lang,
+				"digest": digest,
+			}
+			var err error
+			fileID, err = cas.NodeID(string(graph.KindFile), filePayload)
+			if err != nil {
+				return nil, fmt.Errorf("computing node ID: %w", err)
+			}
+			// InsertNode is INSERT OR IGNORE, so this is fast if node already exists.
+			// We still need to call it to ensure the node exists for new databases.
+			payloadJSON, _ := cas.CanonicalJSON(filePayload)
+			tx.Exec(`INSERT OR IGNORE INTO nodes (id, kind, payload, created_at) VALUES (?, ?, ?, ?)`,
+				fileID, string(graph.KindFile), string(payloadJSON), cas.NowMs())
+		} else {
+			// File changed or new — write content and create node normally.
+			var err error
+			digest, err = c.db.WriteObject(file.Content)
+			if err != nil {
+				return nil, fmt.Errorf("writing object: %w", err)
+			}
+
+			filePayload := map[string]interface{}{
+				"path":   file.Path,
+				"lang":   file.Lang,
+				"digest": digest,
+			}
+			fileID, err = c.db.InsertNode(tx, graph.KindFile, filePayload)
+			if err != nil {
+				return nil, fmt.Errorf("inserting file: %w", err)
+			}
 		}
 
 		var fileModules []string

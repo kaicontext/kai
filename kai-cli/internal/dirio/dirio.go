@@ -215,27 +215,20 @@ func (ds *DirectorySource) collectFiles() error {
 			for i := range work {
 				e := entries[i]
 
-				// Check stat cache — if mtime+size match, we can skip the read.
+				// Check stat cache — if mtime+size match, skip the file read entirely.
 				if ds.statCache != nil {
 					if cachedDigest, cachedLang, ok := ds.statCache.Lookup(e.relPath, e.info); ok {
-						// File unchanged — we still need content for snapshot creation,
-						// but we can note the cache hit. For now, we must read anyway
-						// because FileInfo.Content is required by downstream consumers.
-						// However, if the cached lang differs (shouldn't happen), use detected.
 						lang := e.lang
 						if cachedLang != "" {
 							lang = cachedLang
 						}
-						_ = cachedDigest // Will be used when snapshot can accept digests directly.
-						content, err := os.ReadFile(e.absPath)
-						if err != nil {
-							errs[i] = fmt.Errorf("reading file %s: %w", e.absPath, err)
-							continue
-						}
+						// Don't read the file — pass the cached digest so downstream
+						// can reuse existing nodes without re-reading or re-hashing.
 						files[i] = &filesource.FileInfo{
-							Path:    e.relPath,
-							Content: content,
-							Lang:    lang,
+							Path:         e.relPath,
+							Content:      nil, // skip read
+							Lang:         lang,
+							CachedDigest: cachedDigest,
 						}
 						continue
 					}
@@ -300,9 +293,14 @@ func (ds *DirectorySource) computeIdentifier() {
 
 	for _, f := range sortedFiles {
 		hasher.Write([]byte(f.Path))
-		hasher.Write([]byte("\n"))
-		hasher.Write(f.Content)
-		hasher.Write([]byte("\n"))
+		hasher.Write([]byte{0})
+		if f.CachedDigest != "" {
+			hasher.Write([]byte(f.CachedDigest))
+		} else {
+			d := fmt.Sprintf("%x", blake3.Sum256(f.Content))
+			hasher.Write([]byte(d))
+		}
+		hasher.Write([]byte{0})
 	}
 
 	ds.identifier = fmt.Sprintf("%x", hasher.Sum(nil))
