@@ -16,7 +16,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -481,17 +480,6 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		log("kai_tests", s.handleTests),
 	)
 
-	// kai_diff — semantic diff between two refs
-	srv.AddTool(
-		mcp.NewTool("kai_diff",
-			readOnly(),
-			mcp.WithDescription("Show semantic differences between two snapshots or git refs. Returns symbol-level changes (added/modified/removed functions, classes, etc.) not just file diffs."),
-			mcp.WithString("base", mcp.Description("Base ref (snapshot ID, @snap:prev, or ref name). Defaults to @snap:prev")),
-			mcp.WithString("head", mcp.Description("Head ref (snapshot ID, @snap:last, or ref name). Defaults to @snap:last")),
-		),
-		log("kai_diff", s.handleDiff),
-	)
-
 	// kai_context — bundled context for a location (the high-leverage tool)
 	srv.AddTool(
 		mcp.NewTool("kai_context",
@@ -513,57 +501,6 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithNumber("max_depth", mcp.Description("Maximum graph traversal depth (default: 3)")),
 		),
 		log("kai_impact", s.handleImpact),
-	)
-
-	// kai_files — list all files in the semantic graph
-	srv.AddTool(
-		mcp.NewTool("kai_files",
-			readOnly(),
-			mcp.WithDescription("List all files tracked in the semantic graph. Returns file paths, languages, and modules. Use 'lang' to filter by language (e.g. 'go', 'typescript'). Use 'module' to filter by module name. Use 'pattern' for glob-style path matching (e.g. 'src/**/*.go')."),
-			mcp.WithString("lang", mcp.Description("Filter by language (e.g. go, typescript, python)")),
-			mcp.WithString("module", mcp.Description("Filter by module name")),
-			mcp.WithString("pattern", mcp.Description("Glob pattern to match file paths (e.g. 'kai-core/**/*.go')")),
-		),
-		log("kai_files", s.handleFiles),
-	)
-
-	// kai_grep — regex search across file contents with optional AST filtering
-	srv.AddTool(
-		mcp.NewTool("kai_grep",
-			readOnly(),
-			mcp.WithDescription("Search file contents using regex. Without node_type, searches raw text of ALL files (go, yaml, md, env, Dockerfile, etc.) — one call replaces many greps. With node_type, restricts matches to specific AST nodes (e.g. only string literals or comments), falling back to raw grep for non-parseable files."),
-			mcp.WithString("pattern", mcp.Required(), mcp.Description("Regex pattern to search for (Go regexp syntax, e.g. 'password|token|secret')")),
-			mcp.WithString("node_type", mcp.Description("AST node filter: 'string' (string literals), 'comment', 'identifier', or a raw tree-sitter type. When set, only matches within those AST nodes for parseable languages; non-parseable files fall back to raw grep.")),
-			mcp.WithString("lang", mcp.Description("Filter files by language (e.g. 'go', 'python', 'typescript')")),
-			mcp.WithString("path", mcp.Description("Glob pattern to filter file paths (e.g. 'internal/**/*.go', '*.yaml')")),
-			mcp.WithBoolean("exclude_tests", mcp.Description("If true, skip test files")),
-			mcp.WithNumber("max_results", mcp.Description("Maximum matches to return (default: 200)")),
-		),
-		log("kai_grep", s.handleGrep),
-	)
-
-	// kai_status — check graph freshness (does NOT trigger init)
-	srv.AddTool(
-		mcp.NewTool("kai_status",
-			readOnly(),
-			mcp.WithDescription("Check if the Kai semantic graph is fresh. Returns last capture time, current branch, HEAD commit, and any files that have changed since the last capture. Call this before using other kai tools to verify freshness. If stale_files exist, ask the user before calling kai_refresh. If status is 'uninitialized', call kai_refresh to build the index."),
-		),
-		log("kai_status", s.handleStatus),
-	)
-
-	// kai_refresh — update the semantic graph (triggers init if needed)
-	srv.AddTool(
-		mcp.NewTool("kai_refresh",
-			mcp.WithToolAnnotation(mcp.ToolAnnotation{
-				ReadOnlyHint:    mcp.ToBoolPtr(false),
-				DestructiveHint: mcp.ToBoolPtr(false),
-				IdempotentHint:  mcp.ToBoolPtr(true),
-				OpenWorldHint:   mcp.ToBoolPtr(false),
-			}),
-			mcp.WithDescription("Re-capture the semantic graph. IMPORTANT: Ask the user for permission before calling this. Use kai_status first to check if refresh is needed. Scope controls what gets captured."),
-			mcp.WithString("scope", mcp.Description("What to capture: 'all' (full directory, default), 'staged' (git staged files only)")),
-		),
-		log("kai_refresh", s.handleRefresh),
 	)
 
 	// --- Authorship / AI Attribution Tools ---
@@ -749,11 +686,23 @@ func (s *Server) handleSymbols(ctx context.Context, req mcp.CallToolRequest) (*m
 		results = append(results, info)
 	}
 
-	return jsonResult(map[string]interface{}{
-		"file":    filePath,
-		"count":   len(results),
-		"symbols": results,
-	})
+	var b strings.Builder
+	b.Grow(len(results) * 50)
+	fmt.Fprintf(&b, "%d symbols in %s\n", len(results), filePath)
+	for _, sym := range results {
+		if sym.Line > 0 {
+			fmt.Fprintf(&b, "%d:", sym.Line)
+		}
+		b.WriteString(sym.Kind)
+		b.WriteByte(' ')
+		b.WriteString(sym.Name)
+		if sym.Signature != "" {
+			b.WriteByte(' ')
+			b.WriteString(sym.Signature)
+		}
+		b.WriteByte('\n')
+	}
+	return textResult(b.String())
 }
 
 func (s *Server) handleCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -777,11 +726,7 @@ func (s *Server) handleCallers(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	return jsonResult(map[string]interface{}{
-		"symbol":  symbolName,
-		"count":   len(callers),
-		"callers": callers,
-	})
+	return textResult(formatCallInfos("callers", symbolName, callers))
 }
 
 func (s *Server) handleCallees(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -805,11 +750,7 @@ func (s *Server) handleCallees(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	return jsonResult(map[string]interface{}{
-		"symbol":  symbolName,
-		"count":   len(callees),
-		"callees": callees,
-	})
+	return textResult(formatCallInfos("callees", symbolName, callees))
 }
 
 func (s *Server) handleDependents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -842,11 +783,7 @@ func (s *Server) handleDependents(ctx context.Context, req mcp.CallToolRequest) 
 	}
 	sort.Strings(dependents)
 
-	return jsonResult(map[string]interface{}{
-		"file":       filePath,
-		"count":      len(dependents),
-		"dependents": dependents,
-	})
+	return textResult(formatPathList("dependents of "+filePath, dependents))
 }
 
 func (s *Server) handleDependencies(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -889,11 +826,7 @@ func (s *Server) handleDependencies(ctx context.Context, req mcp.CallToolRequest
 	}
 	sort.Strings(deps)
 
-	return jsonResult(map[string]interface{}{
-		"file":         filePath,
-		"count":        len(deps),
-		"dependencies": deps,
-	})
+	return textResult(formatPathList("dependencies of "+filePath, deps))
 }
 
 func (s *Server) handleTests(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -947,79 +880,7 @@ func (s *Server) handleTests(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 	sort.Strings(tests)
 
-	return jsonResult(map[string]interface{}{
-		"file":  filePath,
-		"count": len(tests),
-		"tests": tests,
-	})
-}
-
-func (s *Server) handleDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if result, ok := s.ensureReady(); !ok {
-		return result, nil
-	}
-
-	baseRef := optString(req, "base")
-	headRef := optString(req, "head")
-
-	if baseRef == "" {
-		baseRef = "@snap:prev"
-	}
-	if headRef == "" {
-		headRef = "@snap:last"
-	}
-
-	baseID, err := s.resolveSnapshotRef(baseRef)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("cannot resolve base ref: %v", err)), nil
-	}
-	headID, err := s.resolveSnapshotRef(headRef)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("cannot resolve head ref: %v", err)), nil
-	}
-
-	// Get files from both snapshots
-	baseFiles, err := s.snapshotFiles(baseID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading base snapshot: %v", err)), nil
-	}
-	headFiles, err := s.snapshotFiles(headID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error reading head snapshot: %v", err)), nil
-	}
-
-	type fileDelta struct {
-		Path   string `json:"path"`
-		Status string `json:"status"` // added, removed, modified
-	}
-
-	var deltas []fileDelta
-
-	// Find added and modified files
-	for path, headDigest := range headFiles {
-		baseDigest, exists := baseFiles[path]
-		if !exists {
-			deltas = append(deltas, fileDelta{Path: path, Status: "added"})
-		} else if headDigest != baseDigest {
-			deltas = append(deltas, fileDelta{Path: path, Status: "modified"})
-		}
-	}
-
-	// Find removed files
-	for path := range baseFiles {
-		if _, exists := headFiles[path]; !exists {
-			deltas = append(deltas, fileDelta{Path: path, Status: "removed"})
-		}
-	}
-
-	sort.Slice(deltas, func(i, j int) bool { return deltas[i].Path < deltas[j].Path })
-
-	return jsonResult(map[string]interface{}{
-		"base":    hex.EncodeToString(baseID)[:12],
-		"head":    hex.EncodeToString(headID)[:12],
-		"count":   len(deltas),
-		"changes": deltas,
-	})
+	return textResult(formatPathList("tests for "+filePath, tests))
 }
 
 func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1253,289 +1114,21 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		}
 	}
 
-	return jsonResult(map[string]interface{}{
-		"file":           filePath,
-		"max_depth":      maxDepth,
-		"affected_files": sourceFiles,
-		"affected_tests": testFiles,
-		"total_affected": len(results),
-	})
-}
-
-func (s *Server) handleFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if result, ok := s.ensureReady(); !ok {
-		return result, nil
-	}
-
-	langFilter := optString(req, "lang")
-	moduleFilter := optString(req, "module")
-	pattern := optString(req, "pattern")
-
-	snapID, err := s.latestSnapshotID()
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-
-	snapNode, err := s.db.GetNode(snapID)
-	if err != nil || snapNode == nil {
-		return mcp.NewToolResultError("cannot read snapshot"), nil
-	}
-
-	// Use the inline files metadata from the snapshot for fast listing
-	filesRaw, ok := snapNode.Payload["files"].([]interface{})
-	if !ok {
-		return mcp.NewToolResultError("snapshot has no file metadata — try kai_refresh"), nil
-	}
-
-	type fileEntry struct {
-		Path string `json:"path"`
-		Lang string `json:"lang,omitempty"`
-	}
-
-	var results []fileEntry
-	for _, raw := range filesRaw {
-		fm, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		path, _ := fm["path"].(string)
-		lang, _ := fm["lang"].(string)
-
-		// Apply language filter
-		if langFilter != "" && !strings.EqualFold(lang, langFilter) {
-			continue
-		}
-
-		// Apply glob pattern filter
-		if pattern != "" {
-			matched, _ := doublestar.Match(pattern, path)
-			if !matched {
-				continue
-			}
-		}
-
-		results = append(results, fileEntry{Path: path, Lang: lang})
-	}
-
-	// Apply module filter by checking which files belong to the module
-	if moduleFilter != "" {
-		modulesPath := filepath.Join(s.kaiDir, "rules", "modules.yaml")
-		matcher, _ := module.LoadRulesOrEmpty(modulesPath)
-		if len(matcher.GetAllModules()) == 0 {
-			legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
-			matcher, _ = module.LoadRulesOrEmpty(legacyPath)
-		}
-
-		var filtered []fileEntry
-		for _, f := range results {
-			modules := matcher.MatchPath(f.Path)
-			for _, m := range modules {
-				if strings.EqualFold(m, moduleFilter) {
-					filtered = append(filtered, f)
-					break
-				}
-			}
-		}
-		results = filtered
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Path < results[j].Path
-	})
-
-	return jsonResult(map[string]interface{}{
-		"count": len(results),
-		"files": results,
-	})
-}
-
-// --- Status & Refresh Handlers ---
-// These do NOT use ensureReady() — they handle uninitialized state explicitly.
-
-func (s *Server) handleStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	result := map[string]interface{}{}
-
-	// Get git info (always available, doesn't need .kai)
-	if branch, err := gitOutput(s.workDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
-		result["branch"] = branch
-	}
-	if commit, err := gitOutput(s.workDir, "rev-parse", "--short", "HEAD"); err == nil {
-		result["head_commit"] = commit
-	}
-
-	// Check for uncommitted git changes
-	if status, err := gitOutput(s.workDir, "status", "--porcelain"); err == nil {
-		result["uncommitted_changes"] = status != ""
-	}
-
-	// Check if init is running
-	s.mu.Lock()
-	if s.initJob != nil && s.db == nil {
-		job := s.initJob
-		result["status"] = "initializing"
-		result["phase"] = string(job.phase)
-		result["message"] = job.message
-		result["file_count"] = job.fileCount
-		result["elapsed_seconds"] = int(time.Since(job.startedAt).Seconds())
-		if job.err != nil {
-			result["status"] = "init_failed"
-			result["error"] = job.err.Error()
-		}
-		s.mu.Unlock()
-		return jsonResult(result)
-	}
-	dbReady := s.db != nil
-	s.mu.Unlock()
-
-	// Not initialized at all
-	if !dbReady {
-		result["status"] = "uninitialized"
-		result["message"] = "Kai has not been initialized for this repository. Call kai_refresh to build the index, or any kai data tool to trigger automatic initialization."
-		return jsonResult(result)
-	}
-
-	// DB is ready — check freshness
-	result["status"] = "ready"
-
-	snapID, err := s.latestSnapshotID()
-	if err != nil {
-		result["status"] = "no_snapshots"
-		result["message"] = "Database exists but no snapshots found. Call kai_refresh to capture."
-		return jsonResult(result)
-	}
-
-	snapNode, err := s.db.GetNode(snapID)
-	if err == nil && snapNode != nil {
-		if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
-			captureTime := time.UnixMilli(int64(ts)).UTC()
-			result["last_capture"] = captureTime.Format(time.RFC3339)
+	var b strings.Builder
+	fmt.Fprintf(&b, "impact of %s (depth %d): %d affected\n", filePath, maxDepth, len(results))
+	if len(sourceFiles) > 0 {
+		fmt.Fprintf(&b, "\naffected files (%d):\n", len(sourceFiles))
+		for _, f := range sourceFiles {
+			fmt.Fprintf(&b, "  hop%d %s\n", f.Hop, f.Path)
 		}
 	}
-
-	// Detect stale files using git (fast) instead of hashing all file contents.
-	// git diff tracks working tree changes efficiently via its index.
-	var staleFiles []string
-	gitDiff, err := gitOutput(s.workDir, "diff", "--name-only", "HEAD")
-	if err == nil {
-		// Also include untracked files
-		gitUntracked, _ := gitOutput(s.workDir, "ls-files", "--others", "--exclude-standard")
-		if gitDiff != "" {
-			staleFiles = append(staleFiles, strings.Split(gitDiff, "\n")...)
-		}
-		if gitUntracked != "" {
-			staleFiles = append(staleFiles, strings.Split(gitUntracked, "\n")...)
-		}
-		// Also check if any files changed since the snapshot was captured
-		if snapNode != nil {
-			if ts, ok := snapNode.Payload["createdAt"].(float64); ok {
-				captureTime := time.UnixMilli(int64(ts))
-				age := time.Since(captureTime)
-				result["capture_age_seconds"] = int(age.Seconds())
-			}
+	if len(testFiles) > 0 {
+		fmt.Fprintf(&b, "\naffected tests (%d):\n", len(testFiles))
+		for _, f := range testFiles {
+			fmt.Fprintf(&b, "  hop%d %s\n", f.Hop, f.Path)
 		}
 	}
-	sort.Strings(staleFiles)
-
-	result["stale"] = len(staleFiles) > 0
-	result["stale_file_count"] = len(staleFiles)
-	if len(staleFiles) > 0 && len(staleFiles) <= 50 {
-		result["stale_files"] = staleFiles
-	} else if len(staleFiles) > 50 {
-		result["stale_files"] = staleFiles[:50]
-		result["stale_files_truncated"] = true
-	}
-
-	return jsonResult(result)
-}
-
-func (s *Server) handleRefresh(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	scope := optString(req, "scope")
-	if scope == "" {
-		scope = "all"
-	}
-
-	if scope != "all" && scope != "staged" {
-		return mcp.NewToolResultError("scope must be 'all' or 'staged'"), nil
-	}
-
-	// If DB doesn't exist yet, we need to create the .kai directory and open it
-	s.mu.Lock()
-	needsInit := s.db == nil
-	s.mu.Unlock()
-
-	if needsInit {
-		kaiDir := s.kaiDir
-		dbPath := filepath.Join(kaiDir, "db.sqlite")
-		objPath := filepath.Join(kaiDir, "objects")
-
-		// Create directories
-		if err := os.MkdirAll(kaiDir, 0755); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("error creating .kai: %v", err)), nil
-		}
-		if err := os.MkdirAll(objPath, 0755); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("error creating objects dir: %v", err)), nil
-		}
-
-		db, err := graph.Open(dbPath, objPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("error opening database: %v", err)), nil
-		}
-
-		s.mu.Lock()
-		s.db = db
-		s.resolver = ref.NewResolver(db)
-		s.snap = snapshot.NewCreator(db, nil)
-		// Clear any failed init job
-		s.initJob = nil
-		s.mu.Unlock()
-	}
-
-	// Load modules
-	modulesPath := filepath.Join(s.kaiDir, "rules", "modules.yaml")
-	matcher, err := module.LoadRulesOrEmpty(modulesPath)
-	if err != nil {
-		// Try legacy location
-		legacyPath := filepath.Join(s.workDir, "kai.modules.yaml")
-		matcher, err = module.LoadRulesOrEmpty(legacyPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("error loading modules: %v", err)), nil
-		}
-	}
-
-	creator := snapshot.NewCreator(s.db, matcher)
-
-	// Open directory source
-	source, err := dirio.OpenDirectory(s.workDir)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error opening directory: %v", err)), nil
-	}
-
-	// Create snapshot
-	snapshotID, err := creator.CreateSnapshot(source)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error creating snapshot: %v", err)), nil
-	}
-
-	// Analyze symbols (non-fatal)
-	_ = creator.AnalyzeSymbols(snapshotID, nil)
-
-	// Build call graph (non-fatal)
-	_ = creator.AnalyzeCalls(snapshotID, nil)
-
-	// Update refs
-	autoRefMgr := ref.NewAutoRefManager(s.db)
-	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("error updating refs: %v", err)), nil
-	}
-
-	files, _ := source.GetFiles()
-
-	return jsonResult(map[string]interface{}{
-		"status":      "captured",
-		"snapshot_id": hex.EncodeToString(snapshotID)[:12],
-		"files":       len(files),
-		"scope":       scope,
-	})
+	return textResult(b.String())
 }
 
 // --- Call Graph Helpers ---
@@ -1545,6 +1138,24 @@ type callInfo struct {
 	CalleeFile string `json:"callee_file,omitempty"`
 	CalleeName string `json:"callee_name"`
 	Line       int    `json:"line,omitempty"`
+}
+
+// formatCallInfos renders caller/callee results as compact text.
+func formatCallInfos(label, symbol string, infos []callInfo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d %s of %s\n", len(infos), label, symbol)
+	for _, ci := range infos {
+		file := ci.CallerFile
+		if file == "" {
+			file = ci.CalleeFile
+		}
+		if ci.Line > 0 {
+			fmt.Fprintf(&b, "%s:%d:%s\n", file, ci.Line, ci.CalleeName)
+		} else {
+			fmt.Fprintf(&b, "%s:%s\n", file, ci.CalleeName)
+		}
+	}
+	return b.String()
 }
 
 // findCallersViaFileEdges finds files that call the given symbol by scanning
@@ -1767,51 +1378,6 @@ func (s *Server) edgesToSymbolLocations(edges []*graph.Edge, useSrc bool) ([]sym
 	return results, nil
 }
 
-// snapshotFiles returns a map of file path -> content digest for a snapshot.
-func (s *Server) snapshotFiles(snapshotID []byte) (map[string]string, error) {
-	node, err := s.db.GetNode(snapshotID)
-	if err != nil {
-		return nil, err
-	}
-	if node == nil {
-		return nil, fmt.Errorf("snapshot not found")
-	}
-
-	files := make(map[string]string)
-
-	// Try inline file list first (fast path)
-	if fileList, ok := node.Payload["files"].([]interface{}); ok {
-		for _, f := range fileList {
-			if fm, ok := f.(map[string]interface{}); ok {
-				path, _ := fm["path"].(string)
-				digest, _ := fm["contentDigest"].(string)
-				if path != "" {
-					files[path] = digest
-				}
-			}
-		}
-		return files, nil
-	}
-
-	// Fall back to edge traversal
-	edges, err := s.db.GetEdges(snapshotID, graph.EdgeHasFile)
-	if err != nil {
-		return nil, err
-	}
-	for _, edge := range edges {
-		fileNode, err := s.db.GetNode(edge.Dst)
-		if err != nil || fileNode == nil {
-			continue
-		}
-		path, _ := fileNode.Payload["path"].(string)
-		digest, _ := fileNode.Payload["contentDigest"].(string)
-		if path != "" {
-			files[path] = digest
-		}
-	}
-	return files, nil
-}
-
 // gitOutput runs a git command and returns trimmed stdout.
 func gitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
@@ -1844,6 +1410,22 @@ func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("error marshaling result: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+// textResult returns a plain-text MCP result (no JSON overhead).
+func textResult(text string) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultText(text), nil
+}
+
+// formatPathList renders a labeled list of file paths as compact text.
+func formatPathList(label string, paths []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d %s\n", len(paths), label)
+	for _, p := range paths {
+		b.WriteString(p)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // optString returns an optional string argument, or "" if not present.
