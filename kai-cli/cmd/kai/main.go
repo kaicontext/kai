@@ -3681,23 +3681,10 @@ func printInitFinish(isGitRepo, hasClaude bool) {
 	fmt.Println("╰─────────────────────────────────────────────────────────────")
 }
 
-// detectClaudeCode checks for signs of Claude Code in the current directory.
+// detectClaudeCode checks if the claude CLI is installed.
 func detectClaudeCode() bool {
-	signs := []string{
-		"CLAUDE.md",
-		".claude",
-		".claude/settings.json",
-	}
-	for _, path := range signs {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	// Also check if claude CLI is available
-	if _, err := exec.LookPath("claude"); err == nil {
-		return true
-	}
-	return false
+	_, err := exec.LookPath("claude")
+	return err == nil
 }
 
 // detectAndOfferMCP detects AI coding tools and offers to install the Kai MCP server.
