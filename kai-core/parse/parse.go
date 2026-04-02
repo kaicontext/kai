@@ -1,4 +1,4 @@
-// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, Ruby, Rust, and SQL.
+// Package parse provides Tree-sitter based parsing for TypeScript, JavaScript, Python, Go, Ruby, Rust, SQL, PHP, and C#.
 package parse
 
 import (
@@ -7,8 +7,10 @@ import (
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/csharp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/php"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/ruby"
 	"github.com/smacker/go-tree-sitter/rust"
@@ -44,9 +46,11 @@ type Parser struct {
 	rbParser  *sitter.Parser
 	rsParser  *sitter.Parser
 	sqlParser *sitter.Parser
+	phpParser *sitter.Parser
+	csParser  *sitter.Parser
 }
 
-// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, Ruby, Rust, and SQL.
+// NewParser creates a new parser with support for JavaScript/TypeScript, Python, Go, Ruby, Rust, SQL, PHP, and C#.
 func NewParser() *Parser {
 	jsParser := sitter.NewParser()
 	jsParser.SetLanguage(javascript.GetLanguage())
@@ -66,6 +70,12 @@ func NewParser() *Parser {
 	sqlParser := sitter.NewParser()
 	sqlParser.SetLanguage(sql.GetLanguage())
 
+	phpParser := sitter.NewParser()
+	phpParser.SetLanguage(php.GetLanguage())
+
+	csParser := sitter.NewParser()
+	csParser.SetLanguage(csharp.GetLanguage())
+
 	return &Parser{
 		jsParser:  jsParser,
 		pyParser:  pyParser,
@@ -73,6 +83,8 @@ func NewParser() *Parser {
 		rbParser:  rbParser,
 		rsParser:  rsParser,
 		sqlParser: sqlParser,
+		phpParser: phpParser,
+		csParser:  csParser,
 	}
 }
 
@@ -100,6 +112,12 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 	case "sql":
 		parser = p.sqlParser
 		extractFn = extractSQLSymbols
+	case "php":
+		parser = p.phpParser
+		extractFn = extractPHPSymbols
+	case "cs", "csharp", "c#":
+		parser = p.csParser
+		extractFn = extractCSharpSymbols
 	default:
 		// Default to JavaScript parser for unknown languages
 		parser = p.jsParser
@@ -174,10 +192,6 @@ func extractFunctionSymbol(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	// Build signature from parameters
 	signature := buildFunctionSignature(node, content)
 
@@ -199,10 +213,6 @@ func extractClassSymbol(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "class",
@@ -222,10 +232,6 @@ func extractMethodsFromClass(classNode *sitter.Node, content []byte) []*Symbol {
 			classBody = child
 			break
 		}
-	}
-
-	if classBody == nil {
-		return methods
 	}
 
 	// Find class name
@@ -260,10 +266,6 @@ func extractMethodSymbol(node *sitter.Node, content []byte, className string) *S
 			name = child.Content(content)
 			break
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	signature := buildFunctionSignature(node, content)
@@ -479,10 +481,6 @@ func extractPythonFunction(node *sitter.Node, content []byte, className string) 
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	fullName := name
 	if className != "" {
 		fullName = className + "." + name
@@ -510,10 +508,6 @@ func extractPythonClass(node *sitter.Node, content []byte) *Symbol {
 		case "argument_list":
 			bases = child.Content(content)
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	signature := "class " + name
@@ -550,10 +544,6 @@ func extractPythonMethods(classNode *sitter.Node, content []byte) []*Symbol {
 			classBody = child
 			break
 		}
-	}
-
-	if classBody == nil {
-		return methods
 	}
 
 	// Find function definitions inside the block
@@ -670,10 +660,6 @@ func extractGoFunction(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	signature := "func " + name + params
 	if result != "" {
 		signature += " " + result
@@ -712,10 +698,6 @@ func extractGoMethod(node *sitter.Node, content []byte) *Symbol {
 		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type":
 			result = child.Content(content)
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	fullName := name
@@ -806,10 +788,6 @@ func extractGoTypeSpec(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	signature := "type " + name
 	if typeKind != "" {
 		signature += " " + typeKind
@@ -831,12 +809,21 @@ func extractGoVarConst(node *sitter.Node, content []byte) []*Symbol {
 		declKind = "const"
 	}
 
-	// var/const_declaration contains var_spec or const_spec
+	// var/const_declaration contains var_spec/const_spec directly
+	// or wrapped in var_spec_list/const_spec_list for grouped declarations.
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "var_spec" || child.Type() == "const_spec" {
 			syms := extractGoVarSpec(child, content, declKind)
 			symbols = append(symbols, syms...)
+		} else if child.Type() == "var_spec_list" || child.Type() == "const_spec_list" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "var_spec" || spec.Type() == "const_spec" {
+					syms := extractGoVarSpec(spec, content, declKind)
+					symbols = append(symbols, syms...)
+				}
+			}
 		}
 	}
 
@@ -925,6 +912,12 @@ func extractRubySymbols(node *sitter.Node, content []byte) []*Symbol {
 			// Also extract methods within the module
 			methods := extractRubyModuleMethods(n, content)
 			symbols = append(symbols, methods...)
+		case "call":
+			// Rails DSL calls: has_many, belongs_to, scope, validates, before_action, etc.
+			sym := extractRubyDSLCall(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
 		case "assignment":
 			// Top-level constant assignments (CONSTANT = value)
 			parent := n.Parent()
@@ -936,6 +929,84 @@ func extractRubySymbols(node *sitter.Node, content []byte) []*Symbol {
 	}
 
 	return symbols
+}
+
+// railsDSLMethods are Rails DSL methods that define symbols worth tracking.
+var railsDSLMethods = map[string]string{
+	// ActiveRecord associations
+	"has_many":                 "association",
+	"has_one":                  "association",
+	"belongs_to":              "association",
+	"has_and_belongs_to_many": "association",
+	// ActiveRecord validations
+	"validates":          "validation",
+	"validates_presence_of": "validation",
+	"validates_uniqueness_of": "validation",
+	"validate":           "validation",
+	// Callbacks
+	"before_action":  "callback",
+	"after_action":   "callback",
+	"around_action":  "callback",
+	"before_save":    "callback",
+	"after_save":     "callback",
+	"before_create":  "callback",
+	"after_create":   "callback",
+	"before_update":  "callback",
+	"after_update":   "callback",
+	"before_destroy": "callback",
+	"after_destroy":  "callback",
+	"before_validation": "callback",
+	"after_validation":  "callback",
+	// Scopes and delegations
+	"scope":    "scope",
+	"delegate": "delegation",
+	// Attribute macros
+	"attr_accessor": "attribute",
+	"attr_reader":   "attribute",
+	"attr_writer":   "attribute",
+	"enum":          "enum",
+}
+
+// extractRubyDSLCall extracts a symbol from a Rails DSL call like has_many :posts.
+func extractRubyDSLCall(node *sitter.Node, content []byte) *Symbol {
+	var methodName string
+	var argName string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if methodName == "" {
+				methodName = child.Content(content)
+			}
+		case "argument_list":
+			// First argument is usually a symbol like :posts
+			for j := 0; j < int(child.ChildCount()); j++ {
+				arg := child.Child(j)
+				if arg.Type() == "simple_symbol" || arg.Type() == "symbol" {
+					argName = strings.TrimPrefix(arg.Content(content), ":")
+					break
+				}
+			}
+		case "simple_symbol", "symbol":
+			// Direct symbol argument (no parentheses): has_many :posts
+			if argName == "" {
+				argName = strings.TrimPrefix(child.Content(content), ":")
+			}
+		}
+	}
+
+	kind, isDSL := railsDSLMethods[methodName]
+	if !isDSL || argName == "" {
+		return nil
+	}
+
+	return &Symbol{
+		Name:      argName,
+		Kind:      kind,
+		Range:     nodeRange(node),
+		Signature: methodName + " :" + argName,
+	}
 }
 
 func extractRubyMethod(node *sitter.Node, content []byte, className string) *Symbol {
@@ -952,10 +1023,6 @@ func extractRubyMethod(node *sitter.Node, content []byte, className string) *Sym
 		case "method_parameters":
 			params = child.Content(content)
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	fullName := name
@@ -995,10 +1062,6 @@ func extractRubySingletonMethod(node *sitter.Node, content []byte, className str
 		case "method_parameters":
 			params = child.Content(content)
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	fullName := name
@@ -1048,10 +1111,6 @@ func extractRubyClass(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	signature := "class " + name
 	if superclass != "" {
 		signature += " < " + superclass
@@ -1080,10 +1139,6 @@ func extractRubyModule(node *sitter.Node, content []byte) *Symbol {
 				name = child.Content(content)
 			}
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	return &Symbol{
@@ -1117,11 +1172,10 @@ func extractRubyClassMethods(classNode *sitter.Node, content []byte) []*Symbol {
 		}
 	}
 
+	// Find method definitions inside the body
 	if classBody == nil {
 		return methods
 	}
-
-	// Find method definitions inside the body
 	for i := 0; i < int(classBody.ChildCount()); i++ {
 		child := classBody.Child(i)
 		switch child.Type() {
@@ -1164,11 +1218,10 @@ func extractRubyModuleMethods(moduleNode *sitter.Node, content []byte) []*Symbol
 		}
 	}
 
+	// Find method definitions inside the body
 	if moduleBody == nil {
 		return methods
 	}
-
-	// Find method definitions inside the body
 	for i := 0; i < int(moduleBody.ChildCount()); i++ {
 		child := moduleBody.Child(i)
 		switch child.Type() {
@@ -1305,10 +1358,6 @@ func extractRustFunction(node *sitter.Node, content []byte, implType string) *Sy
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	fullName := name
 	if implType != "" {
 		fullName = implType + "::" + name
@@ -1338,10 +1387,6 @@ func extractRustStruct(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "class",
@@ -1361,10 +1406,6 @@ func extractRustEnum(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "class",
@@ -1382,10 +1423,6 @@ func extractRustTrait(node *sitter.Node, content []byte) *Symbol {
 			name = child.Content(content)
 			break
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	return &Symbol{
@@ -1477,10 +1514,6 @@ func extractRustTypeAlias(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "type",
@@ -1498,10 +1531,6 @@ func extractRustConst(node *sitter.Node, content []byte) *Symbol {
 			name = child.Content(content)
 			break
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	return &Symbol{
@@ -1523,10 +1552,6 @@ func extractRustStatic(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "variable",
@@ -1546,10 +1571,6 @@ func extractRustMod(node *sitter.Node, content []byte) *Symbol {
 		}
 	}
 
-	if name == "" {
-		return nil
-	}
-
 	return &Symbol{
 		Name:      name,
 		Kind:      "module",
@@ -1567,10 +1588,6 @@ func extractRustMacro(node *sitter.Node, content []byte) *Symbol {
 			name = child.Content(content)
 			break
 		}
-	}
-
-	if name == "" {
-		return nil
 	}
 
 	return &Symbol{
@@ -1623,10 +1640,6 @@ func extractSQLSymbols(node *sitter.Node, content []byte) []*Symbol {
 // extractSQLCreateTable extracts a table name and its columns.
 func extractSQLCreateTable(node *sitter.Node, content []byte) *Symbol {
 	name := sqlObjectName(node, content)
-	if name == "" {
-		return nil
-	}
-
 	// Collect column names
 	var cols []string
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -1662,28 +1675,25 @@ func extractSQLCreateTable(node *sitter.Node, content []byte) *Symbol {
 // extractSQLIndex extracts an index name.
 func extractSQLIndex(node *sitter.Node, content []byte) *Symbol {
 	// Index name is a direct identifier child (not inside object_reference)
+	var name string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "identifier" {
-			name := child.Content(content)
-			return &Symbol{
-				Name:      name,
-				Kind:      "variable",
-				Range:     nodeRange(node),
-				Signature: "CREATE INDEX " + name,
-			}
+			name = child.Content(content)
+			break
 		}
 	}
-	return nil
+	return &Symbol{
+		Name:      name,
+		Kind:      "variable",
+		Range:     nodeRange(node),
+		Signature: "CREATE INDEX " + name,
+	}
 }
 
 // extractSQLFunction extracts a function/procedure name with its arguments.
 func extractSQLFunction(node *sitter.Node, content []byte) *Symbol {
 	name := sqlObjectName(node, content)
-	if name == "" {
-		return nil
-	}
-
 	var params string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1709,9 +1719,6 @@ func extractSQLFunction(node *sitter.Node, content []byte) *Symbol {
 // extractSQLNamedObject extracts a named SQL object (view, trigger, etc.).
 func extractSQLNamedObject(node *sitter.Node, content []byte, kind, prefix string) *Symbol {
 	name := sqlObjectName(node, content)
-	if name == "" {
-		return nil
-	}
 	return &Symbol{
 		Name:      name,
 		Kind:      kind,
@@ -1722,15 +1729,485 @@ func extractSQLNamedObject(node *sitter.Node, content []byte, kind, prefix strin
 
 // sqlObjectName finds the name from an object_reference child.
 func sqlObjectName(node *sitter.Node, content []byte) string {
+	var name string
+outer:
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "object_reference" {
 			for j := 0; j < int(child.ChildCount()); j++ {
 				if child.Child(j).Type() == "identifier" {
-					return child.Child(j).Content(content)
+					name = child.Child(j).Content(content)
+					break outer
 				}
 			}
 		}
 	}
-	return ""
+	return name
+}
+
+// ==================== PHP Symbol Extraction ====================
+
+func extractPHPSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "function_definition":
+			sym := extractPHPFunction(n, content, "")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "class_declaration":
+			sym := extractPHPClass(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			methods := extractPHPClassMembers(n, content)
+			symbols = append(symbols, methods...)
+		case "interface_declaration":
+			sym := extractPHPInterface(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "trait_declaration":
+			sym := extractPHPTrait(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			methods := extractPHPClassMembers(n, content)
+			symbols = append(symbols, methods...)
+		case "namespace_definition":
+			sym := extractPHPNamespace(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractPHPFunction(node *sitter.Node, content []byte, className string) *Symbol {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "name":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "formal_parameters":
+			params = child.Content(content)
+		}
+	}
+
+	fullName := name
+	if className != "" {
+		fullName = className + "::" + name
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: fmt.Sprintf("function %s%s", name, params),
+	}
+}
+
+func extractPHPClass(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var base string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "name":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "base_clause":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				if child.Child(j).Type() == "name" || child.Child(j).Type() == "qualified_name" {
+					base = child.Child(j).Content(content)
+					break
+				}
+			}
+		}
+	}
+
+	sig := "class " + name
+	if base != "" {
+		sig += " extends " + base
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: sig,
+	}
+}
+
+func extractPHPInterface(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "name" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "interface",
+		Range:     nodeRange(node),
+		Signature: "interface " + name,
+	}
+}
+
+func extractPHPTrait(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "name" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "class",
+		Range:     nodeRange(node),
+		Signature: "trait " + name,
+	}
+}
+
+func extractPHPNamespace(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "namespace_name" || child.Type() == "name" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "module",
+		Range:     nodeRange(node),
+		Signature: "namespace " + name,
+	}
+}
+
+func extractPHPClassMembers(classNode *sitter.Node, content []byte) []*Symbol {
+	var methods []*Symbol
+
+	var className string
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "name" {
+			className = child.Content(content)
+			break
+		}
+	}
+
+	var body *sitter.Node
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		child := classNode.Child(i)
+		if child.Type() == "declaration_list" {
+			body = child
+			break
+		}
+	}
+
+	for i := 0; i < int(body.ChildCount()); i++ {
+		child := body.Child(i)
+		if child.Type() == "method_declaration" {
+			sym := extractPHPFunction(child, content, className)
+			if sym != nil {
+				methods = append(methods, sym)
+			}
+		}
+	}
+
+	return methods
+}
+
+// ==================== C# Symbol Extraction ====================
+
+func extractCSharpSymbols(node *sitter.Node, content []byte) []*Symbol {
+	var symbols []*Symbol
+
+	iter := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		switch n.Type() {
+		case "class_declaration":
+			sym := extractCSharpType(n, content, "class")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			members := extractCSharpTypeMembers(n, content)
+			symbols = append(symbols, members...)
+		case "interface_declaration":
+			sym := extractCSharpType(n, content, "interface")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			members := extractCSharpTypeMembers(n, content)
+			symbols = append(symbols, members...)
+		case "struct_declaration":
+			sym := extractCSharpType(n, content, "struct")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			members := extractCSharpTypeMembers(n, content)
+			symbols = append(symbols, members...)
+		case "enum_declaration":
+			sym := extractCSharpType(n, content, "enum")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "record_declaration":
+			sym := extractCSharpType(n, content, "record")
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+			members := extractCSharpTypeMembers(n, content)
+			symbols = append(symbols, members...)
+		case "namespace_declaration", "file_scoped_namespace_declaration":
+			sym := extractCSharpNamespace(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		case "delegate_declaration":
+			sym := extractCSharpDelegate(n, content)
+			if sym != nil {
+				symbols = append(symbols, sym)
+			}
+		}
+	}
+
+	return symbols
+}
+
+func extractCSharpMethod(node *sitter.Node, content []byte, typeName string) *Symbol {
+	var name string
+	var params string
+	var returnType string
+
+	// Collect all identifiers in order; the last identifier before
+	// the parameter_list is the method name, any preceding ones are
+	// the return type (custom type names are also "identifier" nodes).
+	var identifiers []string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			identifiers = append(identifiers, child.Content(content))
+		case "parameter_list":
+			params = child.Content(content)
+		case "predefined_type", "nullable_type", "array_type",
+			"generic_name", "qualified_name", "void_keyword":
+			if returnType == "" {
+				returnType = child.Content(content)
+			}
+		}
+	}
+
+	// The last identifier is the method name; earlier ones are the return type.
+	name = identifiers[len(identifiers)-1]
+	if returnType == "" && len(identifiers) > 1 {
+		returnType = identifiers[0]
+	}
+
+	fullName := name
+	if typeName != "" {
+		fullName = typeName + "." + name
+	}
+
+	sig := name + params
+	if returnType != "" {
+		sig = returnType + " " + sig
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: sig,
+	}
+}
+
+func extractCSharpConstructor(node *sitter.Node, content []byte, typeName string) *Symbol {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "parameter_list":
+			params = child.Content(content)
+		}
+	}
+
+	fullName := name
+	if typeName != "" {
+		fullName = typeName + "." + name
+	}
+
+	return &Symbol{
+		Name:      fullName,
+		Kind:      "function",
+		Range:     nodeRange(node),
+		Signature: name + params,
+	}
+}
+
+func extractCSharpType(node *sitter.Node, content []byte, keyword string) *Symbol {
+	var name string
+	var base string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "base_list":
+			// Collect first base type
+			for j := 0; j < int(child.ChildCount()); j++ {
+				bc := child.Child(j)
+				if bc.Type() == "identifier" || bc.Type() == "generic_name" || bc.Type() == "qualified_name" {
+					base = bc.Content(content)
+					break
+				}
+			}
+		}
+	}
+
+	kind := "class"
+	if keyword == "interface" {
+		kind = "interface"
+	} else if keyword == "enum" {
+		kind = "class"
+	}
+
+	sig := keyword + " " + name
+	if base != "" {
+		sig += " : " + base
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      kind,
+		Range:     nodeRange(node),
+		Signature: sig,
+	}
+}
+
+func extractCSharpNamespace(node *sitter.Node, content []byte) *Symbol {
+	var name string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" || child.Type() == "qualified_name" {
+			name = child.Content(content)
+			break
+		}
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "module",
+		Range:     nodeRange(node),
+		Signature: "namespace " + name,
+	}
+}
+
+func extractCSharpDelegate(node *sitter.Node, content []byte) *Symbol {
+	var name string
+	var params string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if name == "" {
+				name = child.Content(content)
+			}
+		case "parameter_list":
+			params = child.Content(content)
+		}
+	}
+
+	return &Symbol{
+		Name:      name,
+		Kind:      "type",
+		Range:     nodeRange(node),
+		Signature: "delegate " + name + params,
+	}
+}
+
+func extractCSharpTypeMembers(typeNode *sitter.Node, content []byte) []*Symbol {
+	var members []*Symbol
+
+	var typeName string
+	for i := 0; i < int(typeNode.ChildCount()); i++ {
+		child := typeNode.Child(i)
+		if child.Type() == "identifier" {
+			typeName = child.Content(content)
+			break
+		}
+	}
+
+	var body *sitter.Node
+	for i := 0; i < int(typeNode.ChildCount()); i++ {
+		child := typeNode.Child(i)
+		if child.Type() == "declaration_list" {
+			body = child
+			break
+		}
+	}
+
+	for i := 0; i < int(body.ChildCount()); i++ {
+		child := body.Child(i)
+		switch child.Type() {
+		case "method_declaration":
+			sym := extractCSharpMethod(child, content, typeName)
+			if sym != nil {
+				members = append(members, sym)
+			}
+		case "constructor_declaration":
+			sym := extractCSharpConstructor(child, content, typeName)
+			if sym != nil {
+				members = append(members, sym)
+			}
+		}
+	}
+
+	return members
 }

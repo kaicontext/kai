@@ -102,14 +102,7 @@ func parseCallExpression(node *sitter.Node, content []byte) *CallSite {
 	// call_expression has children: function (what's being called) and arguments
 	// function can be: identifier, member_expression, or another call_expression
 
-	if node.ChildCount() == 0 {
-		return nil
-	}
-
 	callee := node.Child(0) // First child is the thing being called
-	if callee == nil {
-		return nil
-	}
 
 	call := &CallSite{
 		Range: nodeRange(node),
@@ -132,20 +125,17 @@ func parseCallExpression(node *sitter.Node, content []byte) *CallSite {
 		return nil
 
 	case "parenthesized_expression":
-		// (foo)() - unwrap and try again
-		if callee.ChildCount() > 0 {
-			inner := callee.Child(0)
+		// (foo)() - unwrap and find the identifier inside parentheses
+		for i := 0; i < int(callee.ChildCount()); i++ {
+			inner := callee.Child(i)
 			if inner != nil && inner.Type() == "identifier" {
 				call.CalleeName = inner.Content(content)
+				break
 			}
 		}
 
 	default:
 		// Other cases: new_expression, await_expression, etc.
-		return nil
-	}
-
-	if call.CalleeName == "" {
 		return nil
 	}
 
@@ -246,26 +236,7 @@ func parseImportStatement(node *sitter.Node, content []byte) *Import {
 
 		case "import_clause":
 			parseImportClause(child, content, imp)
-
-		case "identifier":
-			// Side-effect import or default import
-			// This shouldn't happen at top level, but handle it
-			imp.Default = child.Content(content)
-
-		case "namespace_import":
-			// import * as foo
-			parseNamespaceImport(child, content, imp)
-
-		case "named_imports":
-			// import { a, b }
-			parseNamedImports(child, content, imp)
 		}
-	}
-
-	// Also check for source in nested string node
-	if imp.Source == "" {
-		// Try to find string in any child
-		findImportSource(node, content, imp)
 	}
 
 	if imp.Source == "" {
@@ -273,20 +244,6 @@ func parseImportStatement(node *sitter.Node, content []byte) *Import {
 	}
 
 	return imp
-}
-
-// findImportSource recursively finds the import source string.
-func findImportSource(node *sitter.Node, content []byte, imp *Import) {
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		if child.Type() == "string" {
-			source := strings.Trim(child.Content(content), "\"'`")
-			imp.Source = source
-			imp.IsRelative = strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/")
-			return
-		}
-		findImportSource(child, content, imp)
-	}
 }
 
 // parseImportClause parses the import clause (everything between 'import' and 'from').
@@ -345,20 +302,12 @@ func parseNamedImports(node *sitter.Node, content []byte, imp *Import) {
 				imp.Named[local] = exported
 			}
 
-		case "identifier":
-			// Direct identifier (no "as")
-			name := child.Content(content)
-			imp.Named[name] = name
 		}
 	}
 }
 
 // parseDynamicImport checks for import("./foo") calls.
 func parseDynamicImport(node *sitter.Node, content []byte) *Import {
-	if node.ChildCount() < 2 {
-		return nil
-	}
-
 	// First child should be "import"
 	callee := node.Child(0)
 	if callee == nil || callee.Type() != "import" {
@@ -372,20 +321,21 @@ func parseDynamicImport(node *sitter.Node, content []byte) *Import {
 	}
 
 	// Find the string argument
+	var source string
 	for i := 0; i < int(args.ChildCount()); i++ {
 		child := args.Child(i)
 		if child.Type() == "string" {
-			source := strings.Trim(child.Content(content), "\"'`")
-			return &Import{
-				Source:     source,
-				IsRelative: strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/"),
-				Named:      make(map[string]string),
-				Range:      nodeRange(node),
-			}
+			source = strings.Trim(child.Content(content), "\"'`")
+			break
 		}
 	}
 
-	return nil
+	return &Import{
+		Source:     source,
+		IsRelative: strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/"),
+		Named:      make(map[string]string),
+		Range:      nodeRange(node),
+	}
 }
 
 // parseRequireCall checks for CommonJS require("./foo") calls.
@@ -394,10 +344,6 @@ func parseDynamicImport(node *sitter.Node, content []byte) *Import {
 //   - const foo = require('./foo')
 //   - const { a, b } = require('./foo')
 func parseRequireCall(node *sitter.Node, content []byte) *Import {
-	if node.ChildCount() < 2 {
-		return nil
-	}
-
 	// First child should be identifier "require"
 	callee := node.Child(0)
 	if callee == nil {
@@ -416,20 +362,21 @@ func parseRequireCall(node *sitter.Node, content []byte) *Import {
 	}
 
 	// Find the string argument
+	var source string
 	for i := 0; i < int(args.ChildCount()); i++ {
 		child := args.Child(i)
 		if child.Type() == "string" {
-			source := strings.Trim(child.Content(content), "\"'`")
-			return &Import{
-				Source:     source,
-				IsRelative: strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/"),
-				Named:      make(map[string]string),
-				Range:      nodeRange(node),
-			}
+			source = strings.Trim(child.Content(content), "\"'`")
+			break
 		}
 	}
 
-	return nil
+	return &Import{
+		Source:     source,
+		IsRelative: strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/"),
+		Named:      make(map[string]string),
+		Range:      nodeRange(node),
+	}
 }
 
 // parseReexportSource extracts the source path from a re-export statement.
@@ -556,23 +503,27 @@ func parseExportClause(node *sitter.Node, content []byte) []string {
 // Helper functions to extract names from declarations
 
 func extractFunctionName(node *sitter.Node, content []byte) string {
+	var name string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "identifier" {
-			return child.Content(content)
+			name = child.Content(content)
+			break
 		}
 	}
-	return ""
+	return name
 }
 
 func extractClassName(node *sitter.Node, content []byte) string {
+	var name string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "identifier" {
-			return child.Content(content)
+			name = child.Content(content)
+			break
 		}
 	}
-	return ""
+	return name
 }
 
 func extractVarNames(node *sitter.Node, content []byte) []string {
@@ -862,10 +813,6 @@ func parseGoImportSpec(node *sitter.Node, content []byte) *Import {
 		}
 	}
 
-	if imp.Source == "" {
-		return nil
-	}
-
 	// Set alias info
 	if alias != "" {
 		switch alias {
@@ -916,15 +863,8 @@ func extractGoCallSites(node *sitter.Node, content []byte) []*CallSite {
 
 // parseGoCallExpression extracts call info from a Go call_expression.
 func parseGoCallExpression(node *sitter.Node, content []byte) *CallSite {
-	if node.ChildCount() == 0 {
-		return nil
-	}
-
 	// First child is the function being called
 	callee := node.Child(0)
-	if callee == nil {
-		return nil
-	}
 
 	call := &CallSite{
 		Range: nodeRange(node),
@@ -947,32 +887,15 @@ func parseGoCallExpression(node *sitter.Node, content []byte) *CallSite {
 
 	case "parenthesized_expression":
 		// (foo)()
-		if callee.ChildCount() > 0 {
-			for i := 0; i < int(callee.ChildCount()); i++ {
-				inner := callee.Child(i)
-				if inner != nil && inner.Type() == "identifier" {
-					call.CalleeName = inner.Content(content)
-					break
-				}
-			}
-		}
-
-	case "type_conversion_expression":
-		// Type conversion: int(x)
-		// Find the type being converted to
 		for i := 0; i < int(callee.ChildCount()); i++ {
-			child := callee.Child(i)
-			if child.Type() == "type_identifier" {
-				call.CalleeName = child.Content(content)
+			inner := callee.Child(i)
+			if inner != nil && inner.Type() == "identifier" {
+				call.CalleeName = inner.Content(content)
 				break
 			}
 		}
 
 	default:
-		return nil
-	}
-
-	if call.CalleeName == "" {
 		return nil
 	}
 
@@ -1085,9 +1008,14 @@ func isGoExported(name string) bool {
 
 // ==================== Ruby Import/Call Extraction ====================
 
-// extractRubyImports finds all require/require_relative/load statements in Ruby source.
+// extractRubyImports finds all require/require_relative/load statements in Ruby source,
+// plus inferred imports from constant references (for Rails Zeitwerk autoloading).
 func extractRubyImports(node *sitter.Node, content []byte) []*Import {
 	var imports []*Import
+	seen := make(map[string]bool)
+
+	// Track which constants are defined in this file (don't import yourself)
+	localConstants := make(map[string]bool)
 
 	iter := sitter.NewIterator(node, sitter.DFSMode)
 	for {
@@ -1096,16 +1024,267 @@ func extractRubyImports(node *sitter.Node, content []byte) []*Import {
 			break
 		}
 
-		// Look for method calls that are require, require_relative, or load
-		if n.Type() == "call" {
+		switch n.Type() {
+		case "call":
 			imp := parseRubyRequireCall(n, content)
 			if imp != nil {
 				imports = append(imports, imp)
 			}
+		case "class":
+			// Track locally defined classes
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "constant" || child.Type() == "scope_resolution" {
+					localConstants[child.Content(content)] = true
+				}
+			}
+		case "module":
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child.Type() == "constant" || child.Type() == "scope_resolution" {
+					localConstants[child.Content(content)] = true
+				}
+			}
 		}
 	}
 
+	// Second pass: find constant references that aren't locally defined.
+	// These are inferred imports via Rails autoloading (Zeitwerk).
+	// e.g. referencing User in a controller means app/models/user.rb
+	iter2 := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter2.Next()
+		if err != nil || n == nil {
+			break
+		}
+
+		var constName string
+
+		switch n.Type() {
+		case "constant":
+			// Skip if this constant is part of a class/module definition
+			parent := n.Parent()
+			if parent != nil && (parent.Type() == "class" || parent.Type() == "module") {
+				// Check if this is the name of the class/module (first constant child)
+				isDefinition := false
+				for i := 0; i < int(parent.ChildCount()); i++ {
+					child := parent.Child(i)
+					if child.Type() == "constant" || child.Type() == "scope_resolution" {
+						if child == n {
+							isDefinition = true
+						}
+						break
+					}
+				}
+				if isDefinition {
+					continue
+				}
+			}
+			constName = n.Content(content)
+
+		case "scope_resolution":
+			// e.g. ActiveRecord::Base, Admin::UsersController
+			constName = n.Content(content)
+			// Skip if this is a class/module definition name
+			parent := n.Parent()
+			if parent != nil && (parent.Type() == "class" || parent.Type() == "module") {
+				isDefinition := false
+				for i := 0; i < int(parent.ChildCount()); i++ {
+					child := parent.Child(i)
+					if child.Type() == "constant" || child.Type() == "scope_resolution" {
+						if child == n {
+							isDefinition = true
+						}
+						break
+					}
+				}
+				if isDefinition {
+					continue
+				}
+			}
+		}
+
+		if constName == "" {
+			continue
+		}
+
+		// Skip locally defined constants
+		if localConstants[constName] {
+			continue
+		}
+		// Skip common Ruby/Rails base constants that aren't project files
+		if isRubyStdlibConstant(constName) {
+			continue
+		}
+		// Deduplicate
+		if seen[constName] {
+			continue
+		}
+		seen[constName] = true
+
+		imports = append(imports, &Import{
+			Source:     "autoload:" + constName,
+			IsRelative: false,
+			Default:    constName,
+			Named:      make(map[string]string),
+			Range:      nodeRange(n),
+		})
+	}
+
+	// Third pass: infer model dependencies from Rails association DSL calls.
+	// has_many :posts -> Post, belongs_to :user -> User, has_one :profile -> Profile
+	iter3 := sitter.NewIterator(node, sitter.DFSMode)
+	for {
+		n, err := iter3.Next()
+		if err != nil || n == nil {
+			break
+		}
+		if n.Type() != "call" {
+			continue
+		}
+
+		var methodName, symbolArg string
+		for i := 0; i < int(n.ChildCount()); i++ {
+			child := n.Child(i)
+			switch child.Type() {
+			case "identifier":
+				if methodName == "" {
+					methodName = child.Content(content)
+				}
+			case "argument_list":
+				for j := 0; j < int(child.ChildCount()); j++ {
+					arg := child.Child(j)
+					if arg.Type() == "simple_symbol" || arg.Type() == "symbol" {
+						symbolArg = strings.TrimPrefix(arg.Content(content), ":")
+						break
+					}
+				}
+			case "simple_symbol", "symbol":
+				if symbolArg == "" {
+					symbolArg = strings.TrimPrefix(child.Content(content), ":")
+				}
+			}
+		}
+
+		if symbolArg == "" {
+			continue
+		}
+
+		// Convert association name to model constant
+		var constName string
+		switch methodName {
+		case "has_many", "has_and_belongs_to_many":
+			// has_many :posts -> Post (singularize)
+			constName = rubyInflectSingularize(symbolArg)
+		case "belongs_to", "has_one":
+			// belongs_to :user -> User
+			constName = symbolArg
+		default:
+			continue
+		}
+
+		constName = rubySnakeToCamel(constName)
+		if constName == "" || seen[constName] || localConstants[constName] || isRubyStdlibConstant(constName) {
+			continue
+		}
+		seen[constName] = true
+
+		imports = append(imports, &Import{
+			Source:     "autoload:" + constName,
+			IsRelative: false,
+			Default:    constName,
+			Named:      make(map[string]string),
+			Range:      nodeRange(n),
+		})
+	}
+
 	return imports
+}
+
+// rubySnakeToCamel converts snake_case to CamelCase.
+func rubySnakeToCamel(s string) string {
+	parts := strings.Split(s, "_")
+	var result strings.Builder
+	for _, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		result.WriteString(strings.ToUpper(p[:1]))
+		result.WriteString(p[1:])
+	}
+	return result.String()
+}
+
+// rubyInflectSingularize does a basic English singularization for Rails conventions.
+func rubyInflectSingularize(s string) string {
+	if strings.HasSuffix(s, "ies") {
+		return strings.TrimSuffix(s, "ies") + "y"
+	}
+	if strings.HasSuffix(s, "sses") {
+		return strings.TrimSuffix(s, "es")
+	}
+	if strings.HasSuffix(s, "ses") {
+		return strings.TrimSuffix(s, "es")
+	}
+	if strings.HasSuffix(s, "ves") {
+		return strings.TrimSuffix(s, "ves") + "f"
+	}
+	if strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss") && !strings.HasSuffix(s, "us") {
+		return strings.TrimSuffix(s, "s")
+	}
+	return s
+}
+
+// isRubyStdlibConstant returns true for constants from Ruby stdlib or Rails framework
+// that should not be resolved as project file imports.
+func isRubyStdlibConstant(name string) bool {
+	// Strip scope resolution to check the root constant
+	root := name
+	if idx := strings.Index(name, "::"); idx > 0 {
+		root = name[:idx]
+	}
+	stdlib := map[string]bool{
+		// Ruby stdlib
+		"Object": true, "String": true, "Integer": true, "Float": true,
+		"Array": true, "Hash": true, "Symbol": true, "NilClass": true,
+		"TrueClass": true, "FalseClass": true, "Numeric": true,
+		"Comparable": true, "Enumerable": true, "Enumerator": true,
+		"Kernel": true, "Module": true, "Class": true, "BasicObject": true,
+		"Proc": true, "Method": true, "IO": true, "File": true, "Dir": true,
+		"Regexp": true, "Range": true, "Struct": true, "Exception": true,
+		"StandardError": true, "RuntimeError": true, "ArgumentError": true,
+		"TypeError": true, "NameError": true, "NoMethodError": true,
+		"NotImplementedError": true, "Errno": true, "SystemCallError": true,
+		"Thread": true, "Mutex": true, "Fiber": true, "Time": true,
+		"Date": true, "DateTime": true, "Set": true, "OpenStruct": true,
+		"StringIO": true, "Tempfile": true, "Logger": true, "URI": true,
+		"JSON": true, "YAML": true, "CSV": true, "ERB": true,
+		"Digest": true, "Base64": true, "SecureRandom": true,
+		"Net": true, "OpenSSL": true, "Socket": true, "Pathname": true,
+		"FileUtils": true, "Benchmark": true, "Forwardable": true,
+		"Singleton": true, "Observable": true, "Delegator": true,
+		"SimpleDelegator": true, "BigDecimal": true, "Rational": true,
+		"Complex": true, "Math": true, "GC": true, "ObjectSpace": true,
+		"Marshal": true, "Encoding": true, "ENV": true, "ARGV": true,
+		"STDIN": true, "STDOUT": true, "STDERR": true,
+		// Rails framework
+		"ActiveRecord": true, "ActiveModel": true, "ActiveSupport": true,
+		"ActiveStorage": true, "ActiveJob": true, "ActionController": true,
+		"ActionView": true, "ActionMailer": true, "ActionCable": true,
+		"ActionDispatch": true, "ActionPack": true, "ActionText": true,
+		"ActionMailbox": true, "ApplicationRecord": true, "ApplicationController": true,
+		"ApplicationMailer": true, "ApplicationJob": true,
+		"ApplicationHelper": true, "ApplicationCable": true,
+		"Rails": true, "Rack": true, "Mime": true, "Arel": true,
+		"Sprockets": true, "Webpacker": true, "Turbo": true, "Stimulus": true,
+		"Devise": true, "Pundit": true, "CanCanCan": true, "Doorkeeper": true,
+		"Sidekiq": true, "Resque": true, "DelayedJob": true,
+		"RSpec": true, "FactoryBot": true, "Faker": true, "Capybara": true,
+		"Minitest": true, "Test": true,
+		"Bundler": true, "Gem": true, "Rake": true,
+		"I18n": true, "Concurrent": true, "Zeitwerk": true,
+	}
+	return stdlib[root]
 }
 
 // parseRubyRequireCall parses require/require_relative/load calls.
@@ -1143,10 +1322,6 @@ func parseRubyRequireCall(node *sitter.Node, content []byte) *Import {
 
 	// Check if it's a require-type call
 	if methodName != "require" && methodName != "require_relative" && methodName != "load" {
-		return nil
-	}
-
-	if source == "" {
 		return nil
 	}
 
@@ -1235,10 +1410,6 @@ func parseRubyCallExpression(node *sitter.Node, content []byte) *CallSite {
 	// In Ruby tree-sitter, this might be represented differently
 	if call.CalleeObject != "" {
 		call.IsMethodCall = true
-	}
-
-	if call.CalleeName == "" {
-		return nil
 	}
 
 	// Skip require/require_relative/load as they're handled as imports
@@ -1397,10 +1568,6 @@ func parseRustUseDeclaration(node *sitter.Node, content []byte) *Import {
 		}
 	}
 
-	if source == "" {
-		return nil
-	}
-
 	// Check if it's a relative import (crate::, super::, self::)
 	isRelative := strings.HasPrefix(source, "crate::") ||
 		strings.HasPrefix(source, "super::") ||
@@ -1447,10 +1614,6 @@ func parseRustExternCrate(node *sitter.Node, content []byte) *Import {
 		}
 	}
 
-	if crateName == "" {
-		return nil
-	}
-
 	return &Import{
 		Source:     crateName,
 		IsRelative: false,
@@ -1474,11 +1637,6 @@ func extractRustCallSites(node *sitter.Node, content []byte) []*CallSite {
 		switch n.Type() {
 		case "call_expression":
 			call := parseRustCallExpression(n, content)
-			if call != nil {
-				calls = append(calls, call)
-			}
-		case "method_call_expression":
-			call := parseRustMethodCall(n, content)
 			if call != nil {
 				calls = append(calls, call)
 			}
@@ -1508,45 +1666,30 @@ func parseRustCallExpression(node *sitter.Node, content []byte) *CallSite {
 			// e.g., std::io::read
 			call.CalleeName = child.Content(content)
 		case "field_expression":
-			// e.g., self.method
-			call.CalleeObject = "(field)"
+			// e.g., self.method or obj.func
 			call.IsMethodCall = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				fc := child.Child(j)
+				switch fc.Type() {
+				case "field_identifier":
+					call.CalleeName = fc.Content(content)
+				case "identifier":
+					if call.CalleeObject == "" {
+						call.CalleeObject = fc.Content(content)
+					}
+				default:
+					if call.CalleeObject == "" {
+						call.CalleeObject = "(expr)"
+					}
+				}
+			}
 		}
-	}
-
-	if call.CalleeName == "" {
-		return nil
 	}
 
 	return call
 }
 
 // parseRustMethodCall parses method call expressions.
-func parseRustMethodCall(node *sitter.Node, content []byte) *CallSite {
-	call := &CallSite{
-		Range:        nodeRange(node),
-		IsMethodCall: true,
-	}
-
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		switch child.Type() {
-		case "identifier":
-			// Method name
-			call.CalleeName = child.Content(content)
-		case "field_identifier":
-			// Method name in method call position
-			call.CalleeName = child.Content(content)
-		}
-	}
-
-	if call.CalleeName == "" {
-		return nil
-	}
-
-	return call
-}
-
 // parseRustMacroInvocation parses macro invocations.
 func parseRustMacroInvocation(node *sitter.Node, content []byte) *CallSite {
 	call := &CallSite{
@@ -1559,10 +1702,6 @@ func parseRustMacroInvocation(node *sitter.Node, content []byte) *CallSite {
 			call.CalleeName = child.Content(content) + "!"
 			break
 		}
-	}
-
-	if call.CalleeName == "" {
-		return nil
 	}
 
 	return call
@@ -1615,11 +1754,13 @@ func extractRustExports(node *sitter.Node, content []byte) []string {
 
 // extractRustItemName finds the name of a Rust item by looking for the given node type.
 func extractRustItemName(node *sitter.Node, content []byte, nodeType string) string {
+	var name string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == nodeType {
-			return child.Content(content)
+			name = child.Content(content)
+			break
 		}
 	}
-	return ""
+	return name
 }

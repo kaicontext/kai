@@ -368,6 +368,26 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		pyFileIndex[modPath] = path
 	}
 
+	// Build Ruby autoload index: constant name -> file path
+	// Maps CamelCase class/module names to snake_case file paths using
+	// Rails/Zeitwerk conventions. Searches app/, lib/, and root directories.
+	// e.g. "User" -> "app/models/user.rb", "PostsController" -> "app/controllers/posts_controller.rb"
+	rubyAutoloadIndex := make(map[string]string) // constant name -> file path
+	for path, fi := range filesByPath {
+		if fi.lang != "rb" {
+			continue
+		}
+		// Derive the constant name from the file path using Zeitwerk conventions:
+		// app/models/user.rb -> User
+		// app/controllers/posts_controller.rb -> PostsController
+		// app/models/admin/user.rb -> Admin::User
+		// lib/payment_gateway.rb -> PaymentGateway
+		constName := rubyPathToConstant(path)
+		if constName != "" {
+			rubyAutoloadIndex[constName] = path
+		}
+	}
+
 	// Build JS/TS workspace package index: package name -> entry file path
 	// Scans package.json files in the snapshot to map "@scope/pkg" or "pkg"
 	// to the package's main/types entry point (e.g., "packages/foo/src/index.ts").
@@ -457,6 +477,35 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 				// Python: convert dotted import to path
 				resolved := resolvePythonImport(imp.Source, fi.path, pyFileIndex, allPaths)
 				imports = append(imports, resolved...)
+
+			case "rb":
+				// Ruby: handle both explicit require and autoloaded constants
+				if strings.HasPrefix(imp.Source, "autoload:") {
+					// Zeitwerk autoload: resolve constant name to file
+					constName := strings.TrimPrefix(imp.Source, "autoload:")
+					resolved := resolveRubyAutoload(constName, fi.path, rubyAutoloadIndex)
+					imports = append(imports, resolved...)
+				} else if imp.IsRelative {
+					// require_relative: resolve against file directory
+					dir := filepath.Dir(fi.path)
+					basePath := filepath.Join(dir, imp.Source)
+					// Try with and without .rb extension
+					for _, candidate := range []string{basePath + ".rb", basePath} {
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				} else {
+					// require 'foo': try lib/foo.rb, app/**/foo.rb
+					for _, prefix := range []string{"lib/", "app/models/", "app/controllers/", "app/helpers/", "app/services/", "app/jobs/", "app/mailers/", ""} {
+						candidate := prefix + imp.Source + ".rb"
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				}
 
 			default:
 				// JS/TS/Ruby/Rust: import resolution
@@ -1106,6 +1155,106 @@ func resolvePythonImport(importSource, importingFile string, pyIndex map[string]
 		prefix := strings.Join(parts[:i], ".")
 		if path, ok := pyIndex[prefix]; ok {
 			return []string{path}
+		}
+	}
+
+	return nil
+}
+
+// rubyPathToConstant converts a Ruby file path to its Zeitwerk constant name.
+// Examples:
+//
+//	app/models/user.rb -> User
+//	app/controllers/posts_controller.rb -> PostsController
+//	app/models/admin/user.rb -> Admin::User
+//	lib/payment_gateway.rb -> PaymentGateway
+//	app/services/stripe/charge_service.rb -> Stripe::ChargeService
+func rubyPathToConstant(path string) string {
+	// Strip .rb extension
+	if !strings.HasSuffix(path, ".rb") {
+		return ""
+	}
+	path = strings.TrimSuffix(path, ".rb")
+
+	// Strip known Rails root prefixes
+	for _, prefix := range []string{
+		"app/models/", "app/controllers/", "app/helpers/",
+		"app/services/", "app/jobs/", "app/mailers/",
+		"app/channels/", "app/serializers/", "app/policies/",
+		"app/decorators/", "app/forms/", "app/validators/",
+		"app/uploaders/", "app/presenters/", "app/workers/",
+		"app/components/", "app/interactors/",
+		"lib/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			path = strings.TrimPrefix(path, prefix)
+			break
+		}
+	}
+
+	// Skip files that don't map to constants (config, db, spec, etc.)
+	if strings.HasPrefix(path, "config/") || strings.HasPrefix(path, "db/") ||
+		strings.HasPrefix(path, "spec/") || strings.HasPrefix(path, "test/") ||
+		strings.HasPrefix(path, "bin/") || strings.HasPrefix(path, "script/") ||
+		strings.HasPrefix(path, "vendor/") || strings.HasPrefix(path, "node_modules/") {
+		return ""
+	}
+
+	// Skip special files
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, ".") || base == "application" ||
+		base == "routes" || base == "schema" || base == "seeds" {
+		return ""
+	}
+
+	// Convert path segments to CamelCase and join with ::
+	// admin/user -> Admin::User
+	parts := strings.Split(path, "/")
+	var constParts []string
+	for _, part := range parts {
+		constParts = append(constParts, snakeToCamel(part))
+	}
+
+	return strings.Join(constParts, "::")
+}
+
+// snakeToCamel converts a snake_case string to CamelCase.
+// e.g. "posts_controller" -> "PostsController", "user" -> "User"
+func snakeToCamel(s string) string {
+	parts := strings.Split(s, "_")
+	var result strings.Builder
+	for _, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		result.WriteString(strings.ToUpper(p[:1]))
+		result.WriteString(p[1:])
+	}
+	return result.String()
+}
+
+// resolveRubyAutoload resolves a Ruby constant name to file paths using the autoload index.
+// Handles both exact matches and nested constant lookups.
+// e.g. "User" -> ["app/models/user.rb"]
+//
+//	"Admin::User" -> ["app/models/admin/user.rb"]
+func resolveRubyAutoload(constName, importingFile string, index map[string]string) []string {
+	// Don't self-import
+	if path, ok := index[constName]; ok {
+		if path != importingFile {
+			return []string{path}
+		}
+		return nil
+	}
+
+	// Try stripping outer module for nested references
+	// e.g. if we have Admin::UsersController and index has UsersController
+	if idx := strings.LastIndex(constName, "::"); idx > 0 {
+		inner := constName[idx+2:]
+		if path, ok := index[inner]; ok {
+			if path != importingFile {
+				return []string{path}
+			}
 		}
 	}
 
