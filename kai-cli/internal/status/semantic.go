@@ -78,8 +78,26 @@ func AnalyzeSemantic(db *graph.DB, statusResult *Result, opts SemanticOptions) (
 			continue
 		}
 
+		// Determine language from file extension
+		lang := "js" // default
+		ext := filepath.Ext(path)
+		switch ext {
+		case ".ts", ".tsx":
+			lang = "ts"
+		case ".py":
+			lang = "py"
+		case ".go":
+			lang = "go"
+		case ".rb":
+			lang = "rb"
+		case ".rs":
+			lang = "rs"
+		case ".js", ".jsx":
+			lang = "js"
+		}
+
 		// Detect changes
-		changes, err := detector.DetectChanges(path, beforeContent, afterContent, "")
+		changes, err := detector.DetectChanges(path, beforeContent, afterContent, "", lang)
 		if err != nil {
 			continue
 		}
