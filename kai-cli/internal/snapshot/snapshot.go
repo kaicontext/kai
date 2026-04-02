@@ -608,7 +608,17 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 						}
 					}
 				}
+			} else if fi.lang == "rb" {
+				// Ruby: match calls by method name against exported methods.
+				// Ruby is dynamically typed so we can't resolve receivers,
+				// but matching method names to definitions is useful.
+				if target, ok := exportMap[call.CalleeName]; ok {
+					if target.path != fi.path {
+						targetFiles = append(targetFiles, target.path)
+					}
+				}
 			} else {
+				// JS/TS/Python: match non-method calls via imports
 				if call.IsMethodCall {
 					continue
 				}
