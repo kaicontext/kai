@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.28"
+var Version = "0.9.29"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -1929,6 +1929,243 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+// bench command — run a task with and without Kai MCP and compare token usage
+var benchTask string
+var benchModel string
+
+var benchCmd = &cobra.Command{
+	Use:   "bench",
+	Short: "Benchmark token savings: run a task with and without Kai",
+	Long: `Run a coding task twice using Claude Code — once without Kai's semantic
+graph and once with it — then compare token usage and cost.
+
+Requires the 'claude' CLI to be installed and authenticated.
+
+Examples:
+  kai bench --task "find where authentication is handled"
+  kai bench --task "what tests cover the payment module" --model sonnet
+  kai bench --task "explain the data flow in the API layer"`,
+	RunE: runBench,
+}
+
+// claudeResult holds the parsed JSON output from claude -p --output-format json
+type claudeResult struct {
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	Usage        struct {
+		InputTokens                int `json:"input_tokens"`
+		CacheCreationInputTokens   int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens       int `json:"cache_read_input_tokens"`
+		OutputTokens               int `json:"output_tokens"`
+	} `json:"usage"`
+	DurationMS    int    `json:"duration_ms"`
+	DurationAPIMS int    `json:"duration_api_ms"`
+	Result        string `json:"result"`
+	IsError       bool   `json:"is_error"`
+}
+
+func (r claudeResult) totalTokens() int {
+	return r.Usage.InputTokens + r.Usage.CacheCreationInputTokens +
+		r.Usage.CacheReadInputTokens + r.Usage.OutputTokens
+}
+
+func runBench(cmd *cobra.Command, args []string) error {
+	if benchTask == "" {
+		return fmt.Errorf("--task is required")
+	}
+
+	// Check that claude CLI is available
+	if _, err := exec.LookPath("claude"); err != nil {
+		return fmt.Errorf("claude CLI not found in PATH — install it from https://claude.ai/code")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	// Ensure Kai is initialized so the MCP server has a graph to serve
+	kaiPath := filepath.Join(cwd, ".kai")
+	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "No .kai directory found — running 'kai capture' first...")
+		captureCmd := exec.Command("kai", "capture", ".")
+		captureCmd.Dir = cwd
+		captureCmd.Stdout = os.Stderr
+		captureCmd.Stderr = os.Stderr
+		if err := captureCmd.Run(); err != nil {
+			return fmt.Errorf("kai capture failed: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	modelFlag := ""
+	if benchModel != "" {
+		modelFlag = benchModel
+	}
+
+	fmt.Fprintf(os.Stderr, "Task: %s\n", benchTask)
+	fmt.Fprintf(os.Stderr, "Repo: %s\n\n", cwd)
+
+	// --- Warm caches ---
+	// The Anthropic API caches system prompts + tool definitions with a ~5 min TTL.
+	// Without warming, the first run pays expensive cache-write costs while the
+	// second benefits from cache reads — skewing the comparison. We send a trivial
+	// prompt for each mode first so that both measured runs hit warm caches.
+	fmt.Fprintf(os.Stderr, "Warming caches...\n")
+	warmupPrompt := "say ok"
+	if _, err := runClaude(cwd, warmupPrompt, modelFlag, false); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: warm-up without Kai failed: %v\n", err)
+	}
+	if _, err := runClaude(cwd, warmupPrompt, modelFlag, true); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: warm-up with Kai failed: %v\n", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Done\n\n")
+
+	// --- Run 1: Without Kai ---
+	fmt.Fprintf(os.Stderr, "Running without Kai (--strict-mcp-config with no servers)...\n")
+	withoutResult, err := runClaude(cwd, benchTask, modelFlag, false)
+	if err != nil {
+		return fmt.Errorf("run without Kai failed: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Done (%s, $%.4f)\n\n",
+		formatDuration(float64(withoutResult.DurationMS)/1000), withoutResult.TotalCostUSD)
+
+	// --- Run 2: With Kai ---
+	fmt.Fprintf(os.Stderr, "Running with Kai MCP...\n")
+	withResult, err := runClaude(cwd, benchTask, modelFlag, true)
+	if err != nil {
+		return fmt.Errorf("run with Kai failed: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Done (%s, $%.4f)\n\n",
+		formatDuration(float64(withResult.DurationMS)/1000), withResult.TotalCostUSD)
+
+	// --- Display results ---
+	withoutTokens := withoutResult.totalTokens()
+	withTokens := withResult.totalTokens()
+
+	costWithout := withoutResult.TotalCostUSD
+	costWith := withResult.TotalCostUSD
+	costSaved := costWithout - costWith
+	var costPct float64
+	if costWithout > 0 {
+		costPct = costSaved / costWithout * 100
+	}
+
+	// Token breakdown
+	fmt.Println()
+	fmt.Println("Token breakdown:")
+	fmt.Printf("  %-14s %10s  %10s  %10s  %10s  %10s\n", "", "Input", "Output", "Cache Write", "Cache Read", "Total")
+	fmt.Printf("  %-14s %10s  %10s  %10s  %10s  %10s\n", "Without Kai",
+		formatNumber(withoutResult.Usage.InputTokens),
+		formatNumber(withoutResult.Usage.OutputTokens),
+		formatNumber(withoutResult.Usage.CacheCreationInputTokens),
+		formatNumber(withoutResult.Usage.CacheReadInputTokens),
+		formatNumber(withoutTokens))
+	fmt.Printf("  %-14s %10s  %10s  %10s  %10s  %10s\n", "With Kai",
+		formatNumber(withResult.Usage.InputTokens),
+		formatNumber(withResult.Usage.OutputTokens),
+		formatNumber(withResult.Usage.CacheCreationInputTokens),
+		formatNumber(withResult.Usage.CacheReadInputTokens),
+		formatNumber(withTokens))
+	fmt.Println()
+
+	// Cost comparison (the authoritative metric)
+	fmt.Println("Cost:")
+	fmt.Printf("  Without Kai:  $%.4f\n", costWithout)
+	fmt.Printf("  With Kai:     $%.4f\n", costWith)
+	if costSaved > 0 {
+		fmt.Printf("  Saved:        $%.4f (%.1f%%)\n", costSaved, costPct)
+	} else if costSaved < 0 {
+		fmt.Printf("  Diff:        +$%.4f (%.1f%% more with Kai)\n", -costSaved, -costPct)
+	} else {
+		fmt.Printf("  Saved:        $0.0000 (0.0%%)\n")
+	}
+
+	if withoutResult.DurationMS > 0 && withResult.DurationMS > 0 {
+		speedup := float64(withoutResult.DurationMS) / float64(withResult.DurationMS)
+		fmt.Println()
+		if speedup >= 1 {
+			fmt.Printf("Speed:          %.1fx faster with Kai\n", speedup)
+		} else {
+			fmt.Printf("Speed:          %.1fx slower with Kai\n", 1/speedup)
+		}
+	}
+
+	// Also output JSON to stdout for scripting
+	resultJSON := map[string]interface{}{
+		"task": benchTask,
+		"without_kai": map[string]interface{}{
+			"total_tokens":               withoutTokens,
+			"input_tokens":               withoutResult.Usage.InputTokens,
+			"output_tokens":              withoutResult.Usage.OutputTokens,
+			"cache_creation_input_tokens": withoutResult.Usage.CacheCreationInputTokens,
+			"cache_read_input_tokens":     withoutResult.Usage.CacheReadInputTokens,
+			"cost_usd":                   costWithout,
+			"duration_ms":                withoutResult.DurationMS,
+		},
+		"with_kai": map[string]interface{}{
+			"total_tokens":               withTokens,
+			"input_tokens":               withResult.Usage.InputTokens,
+			"output_tokens":              withResult.Usage.OutputTokens,
+			"cache_creation_input_tokens": withResult.Usage.CacheCreationInputTokens,
+			"cache_read_input_tokens":     withResult.Usage.CacheReadInputTokens,
+			"cost_usd":                   costWith,
+			"duration_ms":                withResult.DurationMS,
+		},
+		"savings": map[string]interface{}{
+			"cost_saved":        costSaved,
+			"cost_percent_saved": costPct,
+		},
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(resultJSON)
+}
+
+// runClaude executes claude -p with the given task, returns parsed result.
+// If withKai is false, it disables all MCP servers via --strict-mcp-config with an empty config.
+// If withKai is true, it runs normally (Kai MCP available via user's config).
+func runClaude(cwd, task, model string, withKai bool) (claudeResult, error) {
+	args := []string{"-p", task, "--output-format", "json"}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	if !withKai {
+		// Create a temp file with empty MCP config to disable all MCP servers
+		tmpFile, err := os.CreateTemp("", "kai-bench-mcp-*.json")
+		if err != nil {
+			return claudeResult{}, fmt.Errorf("creating temp MCP config: %w", err)
+		}
+		defer os.Remove(tmpFile.Name())
+		if _, err := tmpFile.WriteString(`{"mcpServers":{}}`); err != nil {
+			tmpFile.Close()
+			return claudeResult{}, fmt.Errorf("writing temp MCP config: %w", err)
+		}
+		tmpFile.Close()
+		args = append(args, "--strict-mcp-config", "--mcp-config", tmpFile.Name())
+	}
+
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = cwd
+	cmd.Stderr = os.Stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		// claude may exit non-zero but still produce valid JSON
+		if len(out) == 0 {
+			return claudeResult{}, fmt.Errorf("claude exited with error: %w", err)
+		}
+	}
+
+	var result claudeResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return claudeResult{}, fmt.Errorf("failed to parse claude output: %w\nraw: %s", err, string(out[:min(len(out), 500)]))
+	}
+
+	return result, nil
+}
+
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
 	Short: "MCP server for AI coding assistants",
@@ -2574,6 +2811,13 @@ func init() {
 
 	// Version subcommand
 	rootCmd.AddCommand(versionCmd)
+
+	// Bench
+	benchCmd.GroupID = groupCI
+	benchCmd.Flags().StringVar(&benchTask, "task", "", "The coding task/question to benchmark (required)")
+	benchCmd.Flags().StringVar(&benchModel, "model", "", "Claude model to use (e.g. sonnet, opus)")
+	_ = benchCmd.MarkFlagRequired("task")
+	rootCmd.AddCommand(benchCmd)
 
 	// MCP server
 	mcpCmd.GroupID = groupAdvanced
