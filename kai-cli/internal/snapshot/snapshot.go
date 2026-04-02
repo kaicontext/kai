@@ -234,7 +234,7 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 		}
 
 		path, _ := fileNode.Payload["path"].(string)
-		lang, _ := fileNode.Payload["lang"].(string)
+		lang := normalizeLang(fileNode.Payload["lang"])
 
 		// Read content for package.json files
 		if filepath.Base(path) == "package.json" {
@@ -682,7 +682,7 @@ func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error
 			continue
 		}
 
-		lang, _ := fileNode.Payload["lang"].(string)
+		lang := normalizeLang(fileNode.Payload["lang"])
 		parsed, err := parser.Parse(content, lang)
 		if err != nil {
 			continue
@@ -753,7 +753,7 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		}
 
 		path, _ := fileNode.Payload["path"].(string)
-		lang, _ := fileNode.Payload["lang"].(string)
+		lang := normalizeLang(fileNode.Payload["lang"])
 
 		// Read content for package.json files (needed for workspace resolution)
 		if filepath.Base(path) == "package.json" {
@@ -1513,6 +1513,30 @@ func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error
 
 // isBinaryOrImageFile returns true if the file extension indicates a binary or image file
 // that shouldn't be parsed for symbols.
+// normalizeLang converts long language names to short canonical forms.
+// detectLang in dirio returns "ruby", "python", "golang", "csharp" etc.
+// but the parser and snapshot code historically use "rb", "py", "go", "cs".
+func normalizeLang(v interface{}) string {
+	lang, _ := v.(string)
+	switch lang {
+	case "ruby":
+		return "rb"
+	case "python":
+		return "py"
+	case "golang":
+		return "go"
+	case "csharp":
+		return "cs"
+	case "rust":
+		return "rs"
+	case "javascript":
+		return "js"
+	case "typescript":
+		return "ts"
+	}
+	return lang
+}
+
 // isParseableLang returns true for languages that tree-sitter can parse
 // and that produce symbols/calls during Analyze. Files in other languages
 // still get tracked in snapshots but don't need their content stored in

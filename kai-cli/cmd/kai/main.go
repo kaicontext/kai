@@ -3416,34 +3416,86 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		}
 	}
 
-	// ── Step 5: Offer to install MCP tool ──
-	fmt.Println()
-	detectAndOfferMCP(reader)
-
-	// ── Step 2: Offer to run kai bench (if Claude/Codex detected) ──
+	// ── Step 5: Detect AI tools, install MCP, offer bench ──
 	hasClaude := detectClaudeCode()
-	if hasClaude {
+	hasCodex := func() bool { _, err := exec.LookPath("codex"); return err == nil }()
+
+	if hasClaude || hasCodex {
 		fmt.Println()
-		fmt.Println("  Claude Code detected!")
-		fmt.Println("  Kai can benchmark how much it saves on tokens and cost")
-		fmt.Println("  when AI explores your codebase.")
-		fmt.Println()
-		fmt.Print("  Run kai bench now? [Y/n]: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "" || input == "y" || input == "yes" {
-			fmt.Println()
-			benchTask = "find the main entry point and explain the architecture"
-			if benchErr := runBench(cmd, nil); benchErr != nil {
-				fmt.Printf("  Bench failed: %v\n", benchErr)
+		if hasClaude {
+			fmt.Println("  Claude Code detected.")
+			fmt.Print("  Install Kai MCP server for Claude Code? [Y/n]: ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" || input == "y" || input == "yes" {
+				mcpCmd := exec.Command("claude", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
+				mcpCmd.Stdout = os.Stdout
+				mcpCmd.Stderr = os.Stderr
+				if err := mcpCmd.Run(); err != nil {
+					fmt.Printf("  Warning: MCP install failed: %v\n", err)
+					fmt.Println("  You can install manually: claude mcp add kai -- kai mcp serve")
+				} else {
+					fmt.Println("  ✓ Kai MCP server installed for Claude Code")
+				}
 			}
-			benchTask = "" // reset
 		}
-		fmt.Println()
-		fmt.Println("  You can run benchmarks anytime with: kai bench")
+		if hasCodex {
+			fmt.Println()
+			fmt.Println("  Codex detected.")
+			fmt.Print("  Install Kai MCP server for Codex? [Y/n]: ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" || input == "y" || input == "yes" {
+				mcpCmd := exec.Command("codex", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
+				mcpCmd.Stdout = os.Stdout
+				mcpCmd.Stderr = os.Stderr
+				if err := mcpCmd.Run(); err != nil {
+					fmt.Printf("  Warning: MCP install failed: %v\n", err)
+					fmt.Println("  You can install manually: codex mcp add kai -- kai mcp serve")
+				} else {
+					fmt.Println("  ✓ Kai MCP server installed for Codex")
+				}
+			}
+		}
+
+		// Offer bench if Claude is available
+		if hasClaude {
+			fmt.Println()
+			fmt.Println("  Kai can benchmark how much it saves on tokens and cost")
+			fmt.Println("  when AI explores your codebase.")
+			fmt.Println()
+			fmt.Print("  Run kai bench now? [Y/n]: ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" || input == "y" || input == "yes" {
+				fmt.Println()
+				benchTask = "find the main entry point and explain the architecture"
+				if benchErr := runBench(cmd, nil); benchErr != nil {
+					fmt.Printf("  Bench failed: %v\n", benchErr)
+				}
+				benchTask = "" // reset
+			}
+			fmt.Println()
+			fmt.Println("  You can run benchmarks anytime with: kai bench")
+		}
 	}
 
 	// ── Step 3: Offer to set up kaicontext.com ──
+	fmt.Println()
+	fmt.Println("  Sync your semantic graph to kaicontext.com (free) for shared")
+	fmt.Println("  reviews, team code intelligence, and history across machines.")
+	fmt.Println()
+	fmt.Print("  Would you like to set that up? [Y/n]: ")
+	{
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "n" || input == "no" {
+			fmt.Println("  No problem! You can set up later with: kai auth login")
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
+		}
+	}
+
 	serverURL := os.Getenv("KAI_SERVER")
 	if serverURL == "" {
 		serverURL = remote.DefaultServer
@@ -3452,14 +3504,11 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	token, authErr := remote.GetValidAccessToken()
 	if authErr != nil || token == "" {
 		fmt.Println()
-		fmt.Println("  Sync your semantic graph to kaicontext.com (free) for shared")
-		fmt.Println("  reviews, team code intelligence, and history across machines.")
-		fmt.Println()
-		fmt.Print("  Enter your email to get started (or press Enter to skip): ")
+		fmt.Print("  Enter your email: ")
 		email, _ := reader.ReadString('\n')
 		email = strings.TrimSpace(email)
 		if email == "" {
-			fmt.Println("  No problem! You can set up later with: kai auth login")
+			fmt.Println("  Skipped. You can set up later with: kai auth login")
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
 		}
