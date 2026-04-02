@@ -318,8 +318,7 @@ func (s *Server) runInit(job *initState) {
 	s.mu.Unlock()
 
 	// Non-fatal errors: continue even if some files fail to parse
-	_ = creator.AnalyzeSymbols(snapshotID, nil)
-	_ = creator.AnalyzeCalls(snapshotID, nil)
+	_ = creator.Analyze(snapshotID, nil)
 
 	// Step 6: Update refs
 	s.mu.Lock()

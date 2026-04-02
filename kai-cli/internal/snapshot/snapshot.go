@@ -183,8 +183,441 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 // current is the current item number (1-based), total is the total count, filename is the current file.
 type ProgressFunc func(current, total int, filename string)
 
+// Analyze extracts symbols, calls, imports, and builds the full semantic graph
+// in a single pass over all files. This is ~2x faster than calling
+// AnalyzeSymbols + AnalyzeCalls separately since each file is parsed only once.
+func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
+	edges, err := c.db.GetEdges(snapshotID, graph.EdgeHasFile)
+	if err != nil {
+		return fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	parser := parse.NewParser()
+
+	// Collect all files, reading content from object store
+	type fileInfo struct {
+		id       []byte
+		path     string
+		lang     string
+		content  []byte
+		isTest   bool
+		exported []string
+		parsed   *parse.ParsedCalls
+	}
+	var files []*fileInfo
+	filesByPath := make(map[string]*fileInfo)
+
+	type pkgJSONInfo struct {
+		path    string
+		content []byte
+	}
+	var pkgJSONFiles []pkgJSONInfo
+
+	// Track which files need symbol analysis (new/changed content)
+	needsSymbols := make(map[string]bool)
+
+	for _, edge := range edges {
+		fileNode, err := c.db.GetNode(edge.Dst)
+		if err != nil {
+			return fmt.Errorf("getting file node: %w", err)
+		}
+		if fileNode == nil {
+			continue
+		}
+
+		path, _ := fileNode.Payload["path"].(string)
+		lang, _ := fileNode.Payload["lang"].(string)
+
+		// Read content for package.json files
+		if filepath.Base(path) == "package.json" {
+			digest, ok := fileNode.Payload["digest"].(string)
+			if ok {
+				content, err := c.db.ReadObject(digest)
+				if err == nil {
+					pkgJSONFiles = append(pkgJSONFiles, pkgJSONInfo{path: path, content: content})
+				}
+			}
+		}
+
+		// Only process supported languages for graph analysis
+		if lang != "js" && lang != "ts" && lang != "jsx" && lang != "tsx" &&
+			lang != "go" && lang != "py" && lang != "rb" && lang != "rs" &&
+			lang != "php" && lang != "cs" {
+			continue
+		}
+
+		digest, ok := fileNode.Payload["digest"].(string)
+		if !ok {
+			continue
+		}
+		content, err := c.db.ReadObject(digest)
+		if err != nil {
+			continue
+		}
+		if len(content) > 500*1024 {
+			continue
+		}
+
+		// Check if symbols need extraction (content not seen before)
+		alreadyAnalyzed, _ := c.db.HasEdgeByDst(graph.EdgeDefinesIn, edge.Dst)
+		if !alreadyAnalyzed {
+			needsSymbols[path] = true
+		}
+
+		fi := &fileInfo{
+			id:      edge.Dst,
+			path:    path,
+			lang:    lang,
+			content: content,
+			isTest:  parse.IsTestFile(path),
+		}
+		files = append(files, fi)
+		filesByPath[path] = fi
+	}
+
+	// Single parse pass: extract symbols + calls together
+	tx, err := c.db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	total := len(files)
+	for i, fi := range files {
+		if progress != nil {
+			progress(i+1, total, fi.path)
+		}
+
+		if isBinaryOrImageFile(fi.path) {
+			continue
+		}
+
+		// Single tree-sitter parse for both symbols and calls
+		analysis, err := parser.AnalyzeFull(fi.content, fi.lang)
+		if err != nil {
+			continue
+		}
+
+		fi.parsed = analysis.Calls
+		fi.exported = analysis.Calls.Exports
+
+		// Insert symbols only for files that haven't been analyzed before
+		if needsSymbols[fi.path] {
+			fileIDHex := util.BytesToHex(fi.id)
+			for _, sym := range analysis.Symbols {
+				symbolPayload := map[string]interface{}{
+					"fqName":    sym.Name,
+					"kind":      sym.Kind,
+					"fileId":    fileIDHex,
+					"range":     map[string]interface{}{"start": sym.Range.Start, "end": sym.Range.End},
+					"signature": sym.Signature,
+				}
+				symbolID, err := c.db.InsertNode(tx, graph.KindSymbol, symbolPayload)
+				if err != nil {
+					return fmt.Errorf("inserting symbol: %w", err)
+				}
+				if err := c.db.InsertEdge(tx, symbolID, graph.EdgeDefinesIn, fi.id, snapshotID); err != nil {
+					return fmt.Errorf("inserting DEFINES_IN edge: %w", err)
+				}
+			}
+		}
+	}
+
+	// Build language-specific indices for import resolution
+	goPkgIndex := make(map[string][]string)
+	for path, fi := range filesByPath {
+		if fi.lang != "go" {
+			continue
+		}
+		dir := filepath.Dir(path)
+		parts := strings.Split(dir, "/")
+		for i := len(parts) - 1; i >= 0; i-- {
+			suffix := strings.Join(parts[i:], "/")
+			goPkgIndex[suffix] = append(goPkgIndex[suffix], path)
+		}
+	}
+
+	pyFileIndex := make(map[string]string)
+	allPaths := make(map[string]bool)
+	for path, fi := range filesByPath {
+		allPaths[path] = true
+		if fi.lang != "py" {
+			continue
+		}
+		modPath := strings.TrimSuffix(path, ".py")
+		modPath = strings.TrimSuffix(modPath, "/__init__")
+		modPath = strings.ReplaceAll(modPath, "/", ".")
+		pyFileIndex[modPath] = path
+	}
+
+	rubyAutoloadIndex := make(map[string]string)
+	for path, fi := range filesByPath {
+		if fi.lang != "rb" {
+			continue
+		}
+		constName := rubyPathToConstant(path)
+		if constName != "" {
+			rubyAutoloadIndex[constName] = path
+		}
+	}
+
+	jsWorkspaceIndex := make(map[string]string)
+	for _, pjf := range pkgJSONFiles {
+		var pkg struct {
+			Name    string `json:"name"`
+			Main    string `json:"main"`
+			Types   string `json:"types"`
+			Exports json.RawMessage `json:"exports"`
+		}
+		if err := json.Unmarshal(pjf.content, &pkg); err != nil || pkg.Name == "" {
+			continue
+		}
+		pkgDir := filepath.Dir(pjf.path)
+		entry := pkg.Main
+		if entry == "" {
+			entry = pkg.Types
+		}
+		if entry == "" {
+			for _, candidate := range []string{
+				"src/index.ts", "src/index.tsx", "src/index.js",
+				"index.ts", "index.tsx", "index.js",
+				"lib/index.ts", "lib/index.js",
+			} {
+				full := filepath.Join(pkgDir, candidate)
+				if _, ok := filesByPath[full]; ok {
+					entry = candidate
+					break
+				}
+			}
+		}
+		if entry == "" {
+			continue
+		}
+		entryPath := filepath.Clean(filepath.Join(pkgDir, entry))
+		if _, ok := filesByPath[entryPath]; ok {
+			jsWorkspaceIndex[pkg.Name] = entryPath
+		} else {
+			for _, candidate := range parse.PossibleFilePaths(entryPath) {
+				if _, ok := filesByPath[candidate]; ok {
+					jsWorkspaceIndex[pkg.Name] = candidate
+					break
+				}
+			}
+		}
+	}
+
+	// Build import graph from parsed calls
+	importGraph := make(map[string][]string)
+	for _, fi := range files {
+		if fi.parsed == nil {
+			continue
+		}
+		var imports []string
+		for _, imp := range fi.parsed.Imports {
+			switch fi.lang {
+			case "go":
+				resolved := resolveGoImport(imp.Source, fi.path, goPkgIndex)
+				imports = append(imports, resolved...)
+			case "py":
+				resolved := resolvePythonImport(imp.Source, fi.path, pyFileIndex, allPaths)
+				imports = append(imports, resolved...)
+			case "rb":
+				if strings.HasPrefix(imp.Source, "autoload:") {
+					constName := strings.TrimPrefix(imp.Source, "autoload:")
+					resolved := resolveRubyAutoload(constName, fi.path, rubyAutoloadIndex)
+					imports = append(imports, resolved...)
+				} else if imp.IsRelative {
+					dir := filepath.Dir(fi.path)
+					basePath := filepath.Join(dir, imp.Source)
+					for _, candidate := range []string{basePath + ".rb", basePath} {
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				} else {
+					for _, prefix := range []string{"lib/", "app/models/", "app/controllers/", "app/helpers/", "app/services/", "app/jobs/", "app/mailers/", ""} {
+						candidate := prefix + imp.Source + ".rb"
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				}
+			default:
+				if imp.IsRelative {
+					dir := filepath.Dir(fi.path)
+					basePath := parse.ResolveImportPath(dir, imp.Source)
+					for _, candidate := range parse.PossibleFilePaths(basePath) {
+						if _, ok := filesByPath[candidate]; ok {
+							imports = append(imports, candidate)
+							break
+						}
+					}
+				} else if fi.lang == "js" || fi.lang == "ts" || fi.lang == "jsx" || fi.lang == "tsx" {
+					if entryPath, ok := jsWorkspaceIndex[imp.Source]; ok {
+						imports = append(imports, entryPath)
+					}
+				}
+			}
+		}
+		importGraph[fi.path] = imports
+	}
+
+	// Store IMPORTS edges
+	for _, fi := range files {
+		for _, importedPath := range importGraph[fi.path] {
+			if targetFile, ok := filesByPath[importedPath]; ok {
+				if err := c.db.InsertEdge(tx, fi.id, graph.EdgeImports, targetFile.id, snapshotID); err != nil {
+					return fmt.Errorf("inserting IMPORTS edge: %w", err)
+				}
+			}
+		}
+	}
+
+	// TESTS edges
+	goFilesByDir := make(map[string][]*fileInfo)
+	for _, fi := range files {
+		if fi.lang == "go" {
+			dir := filepath.Dir(fi.path)
+			goFilesByDir[dir] = append(goFilesByDir[dir], fi)
+		}
+	}
+	for _, fi := range files {
+		if !fi.isTest {
+			continue
+		}
+		if fi.lang == "go" {
+			dir := filepath.Dir(fi.path)
+			for _, sibling := range goFilesByDir[dir] {
+				if sibling.path != fi.path && !sibling.isTest {
+					c.db.InsertEdge(tx, fi.id, graph.EdgeTests, sibling.id, snapshotID)
+				}
+			}
+		}
+		visited := make(map[string]bool)
+		queue := []string{fi.path}
+		visited[fi.path] = true
+		for len(queue) > 0 {
+			current := queue[0]
+			queue = queue[1:]
+			for _, imported := range importGraph[current] {
+				if visited[imported] {
+					continue
+				}
+				visited[imported] = true
+				queue = append(queue, imported)
+				if !parse.IsTestFile(imported) {
+					if targetFile, ok := filesByPath[imported]; ok {
+						c.db.InsertEdge(tx, fi.id, graph.EdgeTests, targetFile.id, snapshotID)
+					}
+				}
+			}
+		}
+	}
+
+	// CALLS edges
+	exportMap := make(map[string]*fileInfo)
+	for _, fi := range files {
+		for _, exp := range fi.exported {
+			exportMap[exp] = fi
+		}
+	}
+	for _, fi := range files {
+		if fi.parsed == nil {
+			continue
+		}
+		var goImportAliasMap map[string][]string
+		if fi.lang == "go" {
+			goImportAliasMap = make(map[string][]string)
+			for _, imp := range fi.parsed.Imports {
+				alias := imp.Default
+				if alias == "" || alias == "_" {
+					continue
+				}
+				resolved := resolveGoImport(imp.Source, fi.path, goPkgIndex)
+				if len(resolved) > 0 {
+					goImportAliasMap[alias] = resolved
+				}
+			}
+		}
+		for _, call := range fi.parsed.Calls {
+			var targetFiles []string
+			if fi.lang == "go" {
+				if call.IsMethodCall && call.CalleeObject != "" {
+					if resolvedFiles, ok := goImportAliasMap[call.CalleeObject]; ok {
+						for _, f := range resolvedFiles {
+							if tf, ok := filesByPath[f]; ok {
+								for _, exp := range tf.exported {
+									if exp == call.CalleeName {
+										targetFiles = append(targetFiles, f)
+									}
+								}
+							}
+						}
+					}
+				} else if !call.IsMethodCall {
+					if target, ok := exportMap[call.CalleeName]; ok {
+						if target.path != fi.path {
+							targetFiles = append(targetFiles, target.path)
+						}
+					}
+				}
+			} else {
+				if call.IsMethodCall {
+					continue
+				}
+				for _, imp := range fi.parsed.Imports {
+					var importedAs string
+					if imp.Default == call.CalleeName {
+						importedAs = imp.Default
+					} else if originalName, ok := imp.Named[call.CalleeName]; ok {
+						importedAs = originalName
+					}
+					if importedAs == "" {
+						continue
+					}
+					if imp.IsRelative {
+						dir := filepath.Dir(fi.path)
+						basePath := parse.ResolveImportPath(dir, imp.Source)
+						for _, candidate := range parse.PossibleFilePaths(basePath) {
+							if _, ok := filesByPath[candidate]; ok {
+								targetFiles = append(targetFiles, candidate)
+								break
+							}
+						}
+					} else if fi.lang == "js" || fi.lang == "ts" || fi.lang == "jsx" || fi.lang == "tsx" {
+						if entryPath, ok := jsWorkspaceIndex[imp.Source]; ok {
+							targetFiles = append(targetFiles, entryPath)
+						}
+					}
+				}
+			}
+			for _, resolved := range targetFiles {
+				targetFile, ok := filesByPath[resolved]
+				if !ok {
+					continue
+				}
+				callPayload := map[string]interface{}{
+					"calleeName": call.CalleeName,
+					"callerFile": fi.path,
+					"calleeFile": resolved,
+					"line":       call.Range.Start[0],
+				}
+				callID, _ := c.db.InsertNode(tx, graph.KindSymbol, callPayload)
+				if callID != nil {
+					c.db.InsertEdge(tx, fi.id, graph.EdgeCalls, targetFile.id, callID)
+				}
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
 // AnalyzeSymbols extracts symbols from all files in a snapshot.
 // Files whose content was already analyzed (DEFINES_IN edges exist) are skipped.
+// Deprecated: use Analyze() for single-pass analysis.
 func (c *Creator) AnalyzeSymbols(snapshotID []byte, progress ProgressFunc) error {
 	// Get all files in the snapshot
 	edges, err := c.db.GetEdges(snapshotID, graph.EdgeHasFile)

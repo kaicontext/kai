@@ -56,8 +56,8 @@ func (m *Manager) Stage(nameOrID string, source filesource.FileSource, matcher *
 		return nil, fmt.Errorf("creating snapshot from source: %w", err)
 	}
 
-	// Auto-analyze symbols for better intent generation
-	creator.AnalyzeSymbols(newSnapID, nil) // Non-fatal if fails
+	// Auto-analyze for better intent generation
+	creator.Analyze(newSnapID, nil) // Non-fatal if fails
 
 	// Add description to snapshot if message provided
 	if message != "" {

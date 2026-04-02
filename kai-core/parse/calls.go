@@ -33,6 +33,58 @@ type ParsedCalls struct {
 	Exports []string    `json:"exports"` // Exported symbol names
 }
 
+// FullAnalysis contains both symbols and calls from a single parse pass.
+type FullAnalysis struct {
+	Symbols []*Symbol
+	Calls   *ParsedCalls
+}
+
+// AnalyzeFull extracts symbols, calls, imports, and exports in a single tree-sitter parse.
+// This is ~2x faster than calling Parse() + ExtractCalls() separately.
+func (p *Parser) AnalyzeFull(content []byte, lang string) (*FullAnalysis, error) {
+	parsed, err := p.Parse(content, lang)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &FullAnalysis{
+		Symbols: parsed.Symbols,
+	}
+
+	calls := &ParsedCalls{
+		Calls:   make([]*CallSite, 0),
+		Imports: make([]*Import, 0),
+		Exports: make([]string, 0),
+	}
+
+	root := parsed.Tree.RootNode()
+
+	switch lang {
+	case "go", "golang":
+		calls.Imports = extractGoImports(root, content)
+		calls.Calls = extractGoCallSites(root, content)
+		calls.Exports = extractGoExports(root, content)
+	case "rb", "ruby":
+		calls.Imports = extractRubyImports(root, content)
+		calls.Calls = extractRubyCallSites(root, content)
+		calls.Exports = extractRubyExports(root, content)
+	case "rs", "rust":
+		calls.Imports = extractRustImports(root, content)
+		calls.Calls = extractRustCallSites(root, content)
+		calls.Exports = extractRustExports(root, content)
+	case "sql":
+		// no-op
+	default:
+		// JavaScript/TypeScript/Python/PHP/C#
+		calls.Imports = extractImports(root, content)
+		calls.Calls = extractCallSites(root, content)
+		calls.Exports = extractExports(root, content)
+	}
+
+	result.Calls = calls
+	return result, nil
+}
+
 // ExtractCalls extracts function calls and imports from source code.
 func (p *Parser) ExtractCalls(content []byte, lang string) (*ParsedCalls, error) {
 	parsed, err := p.Parse(content, lang)

@@ -4119,8 +4119,8 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	if skipAnalysis {
 		debugf("Snapshot unchanged, skipping analysis")
 	} else {
-		// Step 2: Analyze symbols
-		debugf("Step 2/3: Analyzing symbols...")
+		// Step 2: Analyze symbols + build call graph (single pass)
+		debugf("Step 2/2: Analyzing...")
 		phaseStart = time.Now()
 		progress := func(current, total int, filename string) {
 			display := filename
@@ -4130,45 +4130,19 @@ func runCapture(cmd *cobra.Command, args []string) error {
 			if verbose {
 				debugf("Analyzing... %d/%d %s", current, total, display)
 			} else {
-				fmt.Fprintf(os.Stderr, "\rAnalyzing symbols... %d/%d", current, total)
+				fmt.Fprintf(os.Stderr, "\rAnalyzing... %d/%d", current, total)
 			}
 		}
-		if err := creator.AnalyzeSymbols(snapshotID, progress); err != nil {
+		if err := creator.Analyze(snapshotID, progress); err != nil {
 			fmt.Fprintf(os.Stderr, "\r\033[K")
-			debugf("Analyzing symbols: warning: some files failed")
+			debugf("Analysis: warning: some files failed")
 			fmt.Fprintf(os.Stderr, "  %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "\r\033[K")
-			debugf("Analyzing symbols: done")
+			debugf("Analysis: done")
 		}
 		if te != nil {
-			te.SetPhase("symbols", time.Since(phaseStart).Milliseconds())
-		}
-
-		// Step 3: Analyze calls (build call graph)
-		debugf("Step 3/3: Building call graph...")
-		phaseStart = time.Now()
-		callProgress := func(current, total int, filename string) {
-			display := filename
-			if len(display) > 40 {
-				display = "..." + display[len(display)-37:]
-			}
-			if verbose {
-				debugf("Building graph... %d/%d %s", current, total, display)
-			} else {
-				fmt.Fprintf(os.Stderr, "\rBuilding graph... %d/%d", current, total)
-			}
-		}
-		if err := creator.AnalyzeCalls(snapshotID, callProgress); err != nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K")
-			debugf("Building call graph: warning: some files failed")
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "\r\033[K")
-			debugf("Building call graph: done")
-		}
-		if te != nil {
-			te.SetPhase("graph", time.Since(phaseStart).Milliseconds())
+			te.SetPhase("analyze", time.Since(phaseStart).Milliseconds())
 		}
 	}
 
