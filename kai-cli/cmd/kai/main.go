@@ -3423,20 +3423,6 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			}
 		}
 
-		// Detect GitHub/GitLab and offer CI sync config
-		ciPlatform := detectCIPlatform()
-		if ciPlatform != "" {
-			fmt.Println()
-			fmt.Printf("  %s detected.\n", ciPlatform)
-			fmt.Printf("  Add CI workflow to auto-sync Kai on push? [y/N]: ")
-			input, _ = reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input == "y" || input == "yes" {
-				if err := generateCIConfig(ciPlatform); err != nil {
-					fmt.Printf("  Warning: CI config generation failed: %v\n", err)
-				}
-			}
-		}
 	}
 
 	// Offer to install git hooks (capture on commit, push on git push)
