@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.35"
+var Version = "0.9.36"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3389,21 +3389,25 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		fmt.Println("  Git repository detected.")
 		fmt.Println()
 
-		// Offer to import git history
-		fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "y" || input == "yes" {
-			fmt.Println()
-			if err := runGitImport(db); err != nil {
-				fmt.Printf("  Warning: import failed: %v\n", err)
+		// Offer to import git history (only if there are commits)
+		if countOut, err := exec.Command("git", "rev-list", "--count", "HEAD").Output(); err == nil {
+			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 {
+				fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(strings.ToLower(input))
+				if input == "y" || input == "yes" {
+					fmt.Println()
+					if err := runGitImport(db); err != nil {
+						fmt.Printf("  Warning: import failed: %v\n", err)
+					}
+				}
 			}
 		}
 
 		// ── Step 3: Install hooks (auto-capture on commit, auto-push on git push) ──
 		fmt.Println()
 		fmt.Print("  Install git hooks? (auto-capture on commit, auto-push on git push) [Y/n]: ")
-		input, _ = reader.ReadString('\n')
+		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "" || input == "y" || input == "yes" {
 			if err := runHookInstall(cmd, nil); err != nil {

@@ -72,14 +72,13 @@ main() {
     echo "kai ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
     echo ""
 
-    # Run kai init if we're in a git repo or any project directory
+    # Run kai init if we're in a project directory
     if [ -d ".git" ] || [ -f "package.json" ] || [ -f "go.mod" ] || [ -f "Cargo.toml" ] || [ -f "requirements.txt" ] || [ -f "Makefile" ] || [ -f "pom.xml" ]; then
-        echo "Project detected — running kai init..."
+        echo "Running kai init..."
         echo ""
         kai init
     else
-        echo "Get started:"
-        echo "  cd your-project && kai init"
+        echo "Run 'kai init' in your project to get started."
         echo ""
     fi
 }
