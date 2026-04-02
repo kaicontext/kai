@@ -63,7 +63,7 @@ jobs:
           go-version: '1.24'
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc gcc-aarch64-linux-gnu
 
       - name: Build Linux amd64
         run: |
@@ -71,11 +71,23 @@ jobs:
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o kai-linux-amd64 ./cmd/kai
           gzip -kf kai-linux-amd64
 
-      - name: Upload artifact
+      - name: Build Linux arm64
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -ldflags="-s -w" -o kai-linux-arm64 ./cmd/kai
+          gzip -kf kai-linux-arm64
+
+      - name: Upload amd64 artifact
         uses: actions/upload-artifact@v4
         with:
           name: kai-linux-amd64
           path: kai-cli/kai-linux-amd64.gz
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-linux-arm64
+          path: kai-cli/kai-linux-arm64.gz
 
   # Build kai-cli for macOS
   build-kai-cli-darwin:
@@ -131,6 +143,7 @@ jobs:
         run: |
           mkdir -p release
           cp dist/kai-linux-amd64/kai-linux-amd64.gz release/
+          cp dist/kai-linux-arm64/kai-linux-arm64.gz release/
           cp dist/kai-darwin-arm64/kai-darwin-arm64.gz release/
           cp dist/kai-darwin-amd64/kai-darwin-amd64.gz release/
           ls -la release/
