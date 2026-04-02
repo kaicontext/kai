@@ -90,11 +90,18 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 			tx.Exec(`INSERT OR IGNORE INTO nodes (id, kind, payload, created_at) VALUES (?, ?, ?, ?)`,
 				fileID, string(graph.KindFile), string(payloadJSON), cas.NowMs())
 		} else {
-			// File changed or new — write content and create node normally.
-			var err error
-			digest, err = c.db.WriteObject(file.Content)
-			if err != nil {
-				return nil, fmt.Errorf("writing object: %w", err)
+			// File changed or new.
+			// Only write the blob to object store if the file is parseable
+			// (will be read back during Analyze). Non-parseable files (json,
+			// yaml, md, html, css, etc.) only need the digest for the node ID.
+			if isParseableLang(file.Lang) {
+				var err error
+				digest, err = c.db.WriteObject(file.Content)
+				if err != nil {
+					return nil, fmt.Errorf("writing object: %w", err)
+				}
+			} else {
+				digest = cas.Blake3HashHex(file.Content)
 			}
 
 			filePayload := map[string]interface{}{
@@ -102,6 +109,7 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 				"lang":   file.Lang,
 				"digest": digest,
 			}
+			var err error
 			fileID, err = c.db.InsertNode(tx, graph.KindFile, filePayload)
 			if err != nil {
 				return nil, fmt.Errorf("inserting file: %w", err)
@@ -1505,6 +1513,20 @@ func cleanDirectory(targetDir string, snapshotPaths map[string]bool) (int, error
 
 // isBinaryOrImageFile returns true if the file extension indicates a binary or image file
 // that shouldn't be parsed for symbols.
+// isParseableLang returns true for languages that tree-sitter can parse
+// and that produce symbols/calls during Analyze. Files in other languages
+// still get tracked in snapshots but don't need their content stored in
+// the object store.
+func isParseableLang(lang string) bool {
+	switch lang {
+	case "go", "golang", "py", "python", "rb", "ruby", "rs", "rust",
+		"js", "ts", "jsx", "tsx", "javascript", "typescript",
+		"sql", "php", "csharp", "cs":
+		return true
+	}
+	return false
+}
+
 func isBinaryOrImageFile(filename string) bool {
 	// Check lock files by name (captured in snapshots for CI, but not analyzed)
 	if isLockFile(filename) {
