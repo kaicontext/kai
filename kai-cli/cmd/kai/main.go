@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.37"
+var Version = "0.9.38"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3389,9 +3389,9 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		fmt.Println("  Git repository detected.")
 		fmt.Println()
 
-		// Offer to import git history (only if there are commits)
+		// Offer to import git history (only for small repos — large repos are too slow)
 		if countOut, err := exec.Command("git", "rev-list", "--count", "HEAD").Output(); err == nil {
-			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 {
+			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 && count <= 1000 {
 				fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
 				input, _ := reader.ReadString('\n')
 				input = strings.TrimSpace(strings.ToLower(input))
