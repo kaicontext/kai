@@ -3440,109 +3440,79 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	}
 
 	// ── Step 3: Offer to set up kaicontext.com ──
-	fmt.Println()
-	fmt.Print("  Set up a free account on kaicontext.com? [Y/n]: ")
-	{
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "n" || input == "no" {
-			fmt.Println()
-			fmt.Println("  No problem! You can set up later with: kai auth login")
-			printInitFinish(isGitRepo, hasClaude)
-			return nil
-		}
-	}
-
 	serverURL := os.Getenv("KAI_SERVER")
 	if serverURL == "" {
 		serverURL = remote.DefaultServer
 	}
 
-	// Auth flow
 	token, authErr := remote.GetValidAccessToken()
 	if authErr != nil || token == "" {
 		fmt.Println()
-		fmt.Print("  Do you have an account on kaicontext.com? [y/N]: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-
-		if input == "y" || input == "yes" {
-			// Existing user — log them in
-			fmt.Println()
-			if err := remote.Login(serverURL); err != nil {
-				fmt.Printf("  Login failed: %v\n", err)
-				fmt.Println("  You can log in later with: kai auth login")
-				printInitFinish(isGitRepo, hasClaude)
-				return nil
-			}
-		} else {
-			// New user — sign them up right here
-			fmt.Println()
-			fmt.Println("  Let's create your account right now.")
-			fmt.Print("  Email: ")
-			email, _ := reader.ReadString('\n')
-			email = strings.TrimSpace(email)
-			if email == "" {
-				fmt.Println("  Skipped. You can sign up later with: kai auth login")
-				printInitFinish(isGitRepo, hasClaude)
-				return nil
-			}
-
-			// Use source=cli to skip the approval gate
-			authClient := remote.NewAuthClient(serverURL)
-			fmt.Printf("  Sending login link to %s...\n", email)
-			mlResult, err := authClient.SendMagicLinkWithSource(email, "cli")
-			if err != nil {
-				fmt.Printf("  Failed: %v\n", err)
-				fmt.Println("  You can try again later with: kai auth login")
-				printInitFinish(isGitRepo, hasClaude)
-				return nil
-			}
-
-			var magicToken string
-			if mlResult.DevToken != "" {
-				magicToken = mlResult.DevToken
-			} else {
-				fmt.Println("  Check your email for a login link (from support@kaicontext.com).")
-				fmt.Print("  Paste the token here: ")
-				tokenInput, _ := reader.ReadString('\n')
-				tokenInput = strings.TrimSpace(tokenInput)
-				if strings.Contains(tokenInput, "token=") {
-					parts := strings.Split(tokenInput, "token=")
-					if len(parts) > 1 {
-						magicToken = strings.Split(parts[1], "&")[0]
-					}
-				} else {
-					magicToken = tokenInput
-				}
-			}
-
-			if magicToken == "" {
-				fmt.Println("  Skipped. You can sign up later with: kai auth login")
-				printInitFinish(isGitRepo, hasClaude)
-				return nil
-			}
-
-			tokens, err := authClient.ExchangeToken(magicToken)
-			if err != nil {
-				fmt.Printf("  Login failed: %v\n", err)
-				printInitFinish(isGitRepo, hasClaude)
-				return nil
-			}
-
-			creds := &remote.Credentials{
-				AccessToken:  tokens.AccessToken,
-				RefreshToken: tokens.RefreshToken,
-				Email:        email,
-				ExpiresAt:    time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix(),
-				ServerURL:    serverURL,
-			}
-			if err := remote.SaveCredentials(creds); err != nil {
-				fmt.Printf("  Warning: could not save credentials: %v\n", err)
-			}
-			fmt.Printf("  ✓ Logged in as %s\n", email)
-			fmt.Println("  Your account is ready — you skipped the waitlist!")
+		fmt.Println("  Sync your semantic graph to kaicontext.com (free) for shared")
+		fmt.Println("  reviews, team code intelligence, and history across machines.")
+		fmt.Println()
+		fmt.Print("  Enter your email to get started (or press Enter to skip): ")
+		email, _ := reader.ReadString('\n')
+		email = strings.TrimSpace(email)
+		if email == "" {
+			fmt.Println("  No problem! You can set up later with: kai auth login")
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
 		}
+
+		// Use source=cli to skip the approval gate
+		authClient := remote.NewAuthClient(serverURL)
+		fmt.Printf("  Sending login link to %s...\n", email)
+		mlResult, err := authClient.SendMagicLinkWithSource(email, "cli")
+		if err != nil {
+			fmt.Printf("  Failed: %v\n", err)
+			fmt.Println("  You can try again later with: kai auth login")
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
+		}
+
+		var magicToken string
+		if mlResult.DevToken != "" {
+			magicToken = mlResult.DevToken
+		} else {
+			fmt.Println("  Check your email for a login link (from support@kaicontext.com).")
+			fmt.Print("  Paste the token here: ")
+			tokenInput, _ := reader.ReadString('\n')
+			tokenInput = strings.TrimSpace(tokenInput)
+			if strings.Contains(tokenInput, "token=") {
+				parts := strings.Split(tokenInput, "token=")
+				if len(parts) > 1 {
+					magicToken = strings.Split(parts[1], "&")[0]
+				}
+			} else {
+				magicToken = tokenInput
+			}
+		}
+
+		if magicToken == "" {
+			fmt.Println("  Skipped. You can set up later with: kai auth login")
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
+		}
+
+		tokens, err := authClient.ExchangeToken(magicToken)
+		if err != nil {
+			fmt.Printf("  Login failed: %v\n", err)
+			printInitFinish(isGitRepo, hasClaude)
+			return nil
+		}
+
+		creds := &remote.Credentials{
+			AccessToken:  tokens.AccessToken,
+			RefreshToken: tokens.RefreshToken,
+			Email:        email,
+			ExpiresAt:    time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix(),
+			ServerURL:    serverURL,
+		}
+		if err := remote.SaveCredentials(creds); err != nil {
+			fmt.Printf("  Warning: could not save credentials: %v\n", err)
+		}
+		fmt.Printf("  ✓ Logged in as %s\n", email)
 		fmt.Println()
 	} else {
 		email, _, _ := remote.GetAuthStatus()
