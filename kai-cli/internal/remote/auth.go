@@ -108,16 +108,36 @@ type TokenResponse struct {
 
 // MeResponse is the response from /api/v1/me.
 type MeResponse struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	Name      string `json:"name,omitempty"`
-	CreatedAt string `json:"created_at"`
+	ID       string      `json:"id"`
+	Email    string      `json:"email"`
+	Username string      `json:"username,omitempty"`
+	Name     string      `json:"name,omitempty"`
+	Orgs     []OrgBrief  `json:"orgs,omitempty"`
+	CreatedAt string     `json:"created_at"`
+}
+
+// OrgBrief is a summary of an org in the me response.
+type OrgBrief struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	Role string `json:"role,omitempty"`
 }
 
 // SendMagicLink requests a magic link email.
+// If fromCLI is true, passes ?source=cli to skip signup gating.
 func (c *AuthClient) SendMagicLink(email string) (*MagicLinkResponse, error) {
+	return c.SendMagicLinkWithSource(email, "")
+}
+
+// SendMagicLinkWithSource requests a magic link email with an optional source param.
+func (c *AuthClient) SendMagicLinkWithSource(email, source string) (*MagicLinkResponse, error) {
 	body, _ := json.Marshal(map[string]string{"email": email})
-	resp, err := c.HTTPClient.Post(c.BaseURL+"/api/v1/auth/magic-link", "application/json", bytes.NewReader(body))
+	url := c.BaseURL + "/api/v1/auth/magic-link"
+	if source != "" {
+		url += "?source=" + source
+	}
+	resp, err := c.HTTPClient.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("sending request: %w", err)
 	}
@@ -196,6 +216,67 @@ func (c *AuthClient) GetMe(accessToken string) (*MeResponse, error) {
 	return &result, nil
 }
 
+// CreateOrgResponse is the response from creating an org.
+type CreateOrgResponse struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// CreateOrg creates an org.
+func (c *AuthClient) CreateOrg(accessToken, slug, name string) (*CreateOrgResponse, error) {
+	body, _ := json.Marshal(map[string]string{"slug": slug, "name": name})
+	req, _ := http.NewRequest("POST", c.BaseURL+"/api/v1/orgs", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var result CreateOrgResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result, nil
+}
+
+// CreateRepoResponse is the response from creating a repo.
+type CreateRepoResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CreateRepo creates a repo in an org.
+func (c *AuthClient) CreateRepo(accessToken, orgSlug, repoName string) (*CreateRepoResponse, error) {
+	body, _ := json.Marshal(map[string]string{"name": repoName, "visibility": "private"})
+	req, _ := http.NewRequest("POST", c.BaseURL+"/api/v1/orgs/"+orgSlug+"/repos", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var result CreateRepoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *AuthClient) parseError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 	var errResp struct {
@@ -222,9 +303,9 @@ func Login(serverURL string) error {
 		return fmt.Errorf("email required")
 	}
 
-	// Send magic link
+	// Send magic link (source=cli skips signup gating for instant access)
 	fmt.Printf("Sending login link to %s...\n", email)
-	result, err := client.SendMagicLink(email)
+	result, err := client.SendMagicLinkWithSource(email, "cli")
 	if err != nil {
 		return fmt.Errorf("sending magic link: %w", err)
 	}

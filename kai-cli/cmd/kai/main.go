@@ -68,7 +68,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.30"
+var Version = "0.9.31"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3377,26 +3377,17 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	}
 
 	fmt.Println()
-	fmt.Println("╭─────────────────────────────────────────────")
-	fmt.Println("│  ✓ Initialized Kai in .kai/")
-	fmt.Println("│")
-	fmt.Println("│  Quickstart:")
-	fmt.Println("│    kai capture        # Snapshot your code")
-	fmt.Println("│    kai diff           # See what changed")
-	fmt.Println("│    kai push           # Push to remote")
-	fmt.Println("│")
-	fmt.Println("│  That's it. Semantic snapshots + push to share.")
-	fmt.Println("│")
-	fmt.Println("│  Use --explain on any command to learn more.")
-	fmt.Println("╰─────────────────────────────────────────────")
+	fmt.Println("  ✓ Initialized Kai in .kai/")
+	fmt.Println()
 
-	// Detect git repo and offer import + auto-sync
+	reader := bufio.NewReader(os.Stdin)
+
+	// ── Step 2: Detect git repo ──
+	isGitRepo := false
 	if _, err := os.Stat(".git"); err == nil {
-		fmt.Println()
+		isGitRepo = true
 		fmt.Println("  Git repository detected.")
 		fmt.Println()
-
-		reader := bufio.NewReader(os.Stdin)
 
 		// Offer to import git history
 		fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
@@ -3409,27 +3400,10 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			}
 		}
 
-		// Offer to install post-commit hook
+		// ── Step 3: Install hooks (auto-capture on commit, auto-push on git push) ──
 		fmt.Println()
-		fmt.Print("  Install git hook to auto-capture on commit? [y/N]: ")
+		fmt.Print("  Install git hooks? (auto-capture on commit, auto-push on git push) [Y/n]: ")
 		input, _ = reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "y" || input == "yes" {
-			if err := installGitHook(); err != nil {
-				fmt.Printf("  Warning: hook install failed: %v\n", err)
-			} else {
-				fmt.Println("  ✓ Installed .git/hooks/post-commit")
-				fmt.Println("    Kai will auto-capture after each git commit.")
-			}
-		}
-
-	}
-
-	// Offer to install git hooks (capture on commit, push on git push)
-	if _, err := os.Stat(".git"); err == nil {
-		fmt.Print("\nInstall git hooks? (auto-capture on commit, auto-push on git push) [Y/n] ")
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "" || input == "y" || input == "yes" {
 			if err := runHookInstall(cmd, nil); err != nil {
@@ -3438,7 +3412,311 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		}
 	}
 
+	// ── Step 5: Offer to install MCP tool ──
+	fmt.Println()
+	detectAndOfferMCP(reader)
+
+	// ── Step 6: Detect Claude Code and suggest kai bench ──
+	hasClaude := detectClaudeCode()
+	if hasClaude {
+		fmt.Println()
+		fmt.Println("  Claude Code detected! Run 'kai bench' to see how much Kai")
+		fmt.Println("  saves on tokens and cost when AI explores your codebase.")
+	}
+
+	// ── Step 7: Connect to kaicontext.com ──
+	fmt.Println()
+	fmt.Println("╭─────────────────────────────────────────────────────────────")
+	fmt.Println("│")
+	fmt.Println("│  Push your semantic graph to kaicontext.com (free) to get:")
+	fmt.Println("│    • Shareable code reviews with semantic diffs")
+	fmt.Println("│    • Team-wide code intelligence")
+	fmt.Println("│    • History across machines")
+	fmt.Println("│")
+	fmt.Println("╰─────────────────────────────────────────────────────────────")
+	fmt.Println()
+
+	serverURL := os.Getenv("KAI_SERVER")
+	if serverURL == "" {
+		serverURL = remote.DefaultServer
+	}
+
+	// ── Step 7b/c: Auth flow ──
+	token, authErr := remote.GetValidAccessToken()
+	if authErr != nil || token == "" {
+		fmt.Print("  Do you have an account on kaicontext.com? [y/N]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+
+		if input == "y" || input == "yes" {
+			// Existing user — log them in
+			fmt.Println()
+			if err := remote.Login(serverURL); err != nil {
+				fmt.Printf("  Login failed: %v\n", err)
+				fmt.Println("  You can log in later with: kai auth login")
+				printInitFinish(isGitRepo)
+				return nil
+			}
+		} else {
+			// New user — sign them up right here
+			fmt.Println()
+			fmt.Println("  Let's create your account right now.")
+			fmt.Print("  Email: ")
+			email, _ := reader.ReadString('\n')
+			email = strings.TrimSpace(email)
+			if email == "" {
+				fmt.Println("  Skipped. You can sign up later with: kai auth login")
+				printInitFinish(isGitRepo)
+				return nil
+			}
+
+			// Use source=cli to skip the approval gate
+			authClient := remote.NewAuthClient(serverURL)
+			fmt.Printf("  Sending login link to %s...\n", email)
+			mlResult, err := authClient.SendMagicLinkWithSource(email, "cli")
+			if err != nil {
+				fmt.Printf("  Failed: %v\n", err)
+				fmt.Println("  You can try again later with: kai auth login")
+				printInitFinish(isGitRepo)
+				return nil
+			}
+
+			var magicToken string
+			if mlResult.DevToken != "" {
+				magicToken = mlResult.DevToken
+			} else {
+				fmt.Println("  Check your email for a login link (from support@kaicontext.com).")
+				fmt.Print("  Paste the token here: ")
+				tokenInput, _ := reader.ReadString('\n')
+				tokenInput = strings.TrimSpace(tokenInput)
+				if strings.Contains(tokenInput, "token=") {
+					parts := strings.Split(tokenInput, "token=")
+					if len(parts) > 1 {
+						magicToken = strings.Split(parts[1], "&")[0]
+					}
+				} else {
+					magicToken = tokenInput
+				}
+			}
+
+			if magicToken == "" {
+				fmt.Println("  Skipped. You can sign up later with: kai auth login")
+				printInitFinish(isGitRepo)
+				return nil
+			}
+
+			tokens, err := authClient.ExchangeToken(magicToken)
+			if err != nil {
+				fmt.Printf("  Login failed: %v\n", err)
+				printInitFinish(isGitRepo)
+				return nil
+			}
+
+			creds := &remote.Credentials{
+				AccessToken:  tokens.AccessToken,
+				RefreshToken: tokens.RefreshToken,
+				Email:        email,
+				ExpiresAt:    time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix(),
+				ServerURL:    serverURL,
+			}
+			if err := remote.SaveCredentials(creds); err != nil {
+				fmt.Printf("  Warning: could not save credentials: %v\n", err)
+			}
+			fmt.Printf("  ✓ Logged in as %s\n", email)
+			fmt.Println("  Your account is ready — you skipped the waitlist!")
+		}
+		fmt.Println()
+	} else {
+		email, _, _ := remote.GetAuthStatus()
+		fmt.Printf("  Already logged in as %s\n\n", email)
+	}
+
+	// ── Step 8: Ensure personal org exists, Step 9: Create repo ──
+	token, authErr = remote.GetValidAccessToken()
+	if authErr == nil && token != "" {
+		ctrl := remote.NewControlClient(serverURL)
+		orgs, err := ctrl.ListOrgs()
+
+		var selectedOrg *remote.OrgInfo
+
+		if err == nil {
+			if len(orgs) == 0 {
+				// This shouldn't happen (server auto-creates personal org)
+				// but handle it just in case
+				creds, _ := remote.LoadCredentials()
+				defaultSlug := "my-org"
+				if creds != nil && creds.Email != "" {
+					if idx := strings.Index(creds.Email, "@"); idx > 0 {
+						defaultSlug = strings.ToLower(strings.ReplaceAll(creds.Email[:idx], ".", "-"))
+					}
+				}
+				fmt.Printf("  Choose a username [%s]: ", defaultSlug)
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(input)
+				if input == "" {
+					input = defaultSlug
+				}
+				newOrg, err := ctrl.CreateOrg(input, input)
+				if err != nil {
+					fmt.Printf("  Warning: could not create org: %v\n", err)
+				} else {
+					selectedOrg = newOrg
+					fmt.Printf("  ✓ Created org: %s\n", selectedOrg.Slug)
+				}
+			} else if len(orgs) == 1 {
+				selectedOrg = &orgs[0]
+				fmt.Printf("  Using org: %s\n", selectedOrg.Slug)
+			} else {
+				fmt.Println("  Select an organization:")
+				for i, org := range orgs {
+					fmt.Printf("    [%d] %s\n", i+1, org.Slug)
+				}
+				fmt.Print("  Enter number: ")
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(input)
+				idx, parseErr := strconv.Atoi(input)
+				if parseErr == nil && idx >= 1 && idx <= len(orgs) {
+					selectedOrg = &orgs[idx-1]
+				} else {
+					selectedOrg = &orgs[0]
+				}
+				fmt.Printf("  Using org: %s\n", selectedOrg.Slug)
+			}
+		}
+
+		// ── Step 9: Create repo for current directory ──
+		if selectedOrg != nil {
+			projectName := remote.DetectProjectName()
+			fmt.Println()
+			fmt.Printf("  Creating repo '%s/%s' on kaicontext.com...\n", selectedOrg.Slug, projectName)
+			_, err := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
+			if err != nil {
+				if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "409") {
+					fmt.Printf("  Repo %s/%s already exists.\n", selectedOrg.Slug, projectName)
+				} else {
+					fmt.Printf("  Warning: could not create repo: %v\n", err)
+				}
+			} else {
+				fmt.Printf("  ✓ Created repo: %s/%s\n", selectedOrg.Slug, projectName)
+			}
+
+			// Set up the remote
+			remoteEntry := &remote.RemoteEntry{
+				URL:    serverURL,
+				Tenant: selectedOrg.Slug,
+				Repo:   projectName,
+			}
+			if err := remote.SetRemote("origin", remoteEntry); err != nil {
+				debugf("setting remote: %v", err)
+			}
+
+			// ── Step 10: Offer to push ──
+			fmt.Println()
+			fmt.Print("  Push your semantic graph now? [Y/n]: ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" || input == "y" || input == "yes" {
+				fmt.Println("  Pushing...")
+				if pushErr := runPush(cmd, []string{"origin"}); pushErr != nil {
+					fmt.Printf("  Push failed: %v\n", pushErr)
+					fmt.Println("  You can push later with: kai push")
+				} else {
+					fmt.Println("  ✓ Pushed to kaicontext.com")
+				}
+			}
+		}
+	}
+
+	printInitFinish(isGitRepo)
 	return nil
+}
+
+// printInitFinish prints the final success message.
+func printInitFinish(isGitRepo bool) {
+	fmt.Println()
+	fmt.Println("╭─────────────────────────────────────────────────────────────")
+	fmt.Println("│")
+	fmt.Println("│  ✓ You're all set!")
+	fmt.Println("│")
+	fmt.Println("│  Your project now has semantic version control.")
+	fmt.Println("│")
+	if isGitRepo {
+		fmt.Println("│  Git hooks are capturing and pushing automatically.")
+		fmt.Println("│  Just commit and push as usual — Kai rides along.")
+	} else {
+		fmt.Println("│  Next steps:")
+		fmt.Println("│    kai capture        # Snapshot your code")
+		fmt.Println("│    kai diff           # See what changed")
+		fmt.Println("│    kai push           # Push to remote")
+	}
+	fmt.Println("│")
+	fmt.Println("╰─────────────────────────────────────────────────────────────")
+}
+
+// detectClaudeCode checks for signs of Claude Code in the current directory.
+func detectClaudeCode() bool {
+	signs := []string{
+		"CLAUDE.md",
+		".claude",
+		".claude/settings.json",
+	}
+	for _, path := range signs {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	// Also check if claude CLI is available
+	if _, err := exec.LookPath("claude"); err == nil {
+		return true
+	}
+	return false
+}
+
+// detectAndOfferMCP detects AI coding tools and offers to install the Kai MCP server.
+func detectAndOfferMCP(reader *bufio.Reader) {
+	type mcpTool struct {
+		name    string
+		cmd     string
+		detect  func() bool
+		install string
+	}
+
+	tools := []mcpTool{
+		{
+			name:   "Claude Code",
+			cmd:    "claude",
+			detect: func() bool { _, err := exec.LookPath("claude"); return err == nil },
+			install: "claude mcp add kai -- kai mcp serve",
+		},
+		{
+			name:   "Codex",
+			cmd:    "codex",
+			detect: func() bool { _, err := exec.LookPath("codex"); return err == nil },
+			install: "codex mcp add kai -- kai mcp serve",
+		},
+	}
+
+	for _, tool := range tools {
+		if !tool.detect() {
+			continue
+		}
+		fmt.Printf("  %s detected.\n", tool.name)
+		fmt.Printf("  Install Kai MCP server for %s? [Y/n]: ", tool.name)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" || input == "y" || input == "yes" {
+			parts := strings.Fields(tool.install)
+			cmd := exec.Command(parts[0], parts[1:]...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("  Warning: MCP install failed: %v\n", err)
+				fmt.Printf("  You can install manually: %s\n", tool.install)
+			} else {
+				fmt.Printf("  ✓ Kai MCP server installed for %s\n", tool.name)
+			}
+		}
+	}
 }
 
 // ensureGitignore appends entry to .gitignore if not already present.
