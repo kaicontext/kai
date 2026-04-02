@@ -283,12 +283,15 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 		filesByPath[path] = fi
 	}
 
-	// Single parse pass: extract symbols + calls together
+	// Single parse pass: extract symbols + calls together.
+	// Batch symbol inserts into transactions of ~5000 operations to avoid
+	// massive single-transaction commits that hang on large repos.
+	const batchSize = 5000
 	tx, err := c.db.BeginTx()
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback()
+	opsInTx := 0
 
 	total := len(files)
 	for i, fi := range files {
@@ -327,8 +330,24 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 				if err := c.db.InsertEdge(tx, symbolID, graph.EdgeDefinesIn, fi.id, snapshotID); err != nil {
 					return fmt.Errorf("inserting DEFINES_IN edge: %w", err)
 				}
+				opsInTx += 2
+				if opsInTx >= batchSize {
+					if err := tx.Commit(); err != nil {
+						return fmt.Errorf("committing symbol batch: %w", err)
+					}
+					tx, err = c.db.BeginTx()
+					if err != nil {
+						return fmt.Errorf("starting new batch: %w", err)
+					}
+					opsInTx = 0
+				}
 			}
 		}
+	}
+
+	// Commit remaining symbols
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing symbols: %w", err)
 	}
 
 	// Build language-specific indices for import resolution
@@ -472,11 +491,18 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 		importGraph[fi.path] = imports
 	}
 
+	// New transaction for edges (symbols were committed above)
+	tx2, err := c.db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting edge transaction: %w", err)
+	}
+	defer tx2.Rollback()
+
 	// Store IMPORTS edges
 	for _, fi := range files {
 		for _, importedPath := range importGraph[fi.path] {
 			if targetFile, ok := filesByPath[importedPath]; ok {
-				if err := c.db.InsertEdge(tx, fi.id, graph.EdgeImports, targetFile.id, snapshotID); err != nil {
+				if err := c.db.InsertEdge(tx2, fi.id, graph.EdgeImports, targetFile.id, snapshotID); err != nil {
 					return fmt.Errorf("inserting IMPORTS edge: %w", err)
 				}
 			}
@@ -499,7 +525,7 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 			dir := filepath.Dir(fi.path)
 			for _, sibling := range goFilesByDir[dir] {
 				if sibling.path != fi.path && !sibling.isTest {
-					c.db.InsertEdge(tx, fi.id, graph.EdgeTests, sibling.id, snapshotID)
+					c.db.InsertEdge(tx2, fi.id, graph.EdgeTests, sibling.id, snapshotID)
 				}
 			}
 		}
@@ -517,14 +543,25 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 				queue = append(queue, imported)
 				if !parse.IsTestFile(imported) {
 					if targetFile, ok := filesByPath[imported]; ok {
-						c.db.InsertEdge(tx, fi.id, graph.EdgeTests, targetFile.id, snapshotID)
+						c.db.InsertEdge(tx2, fi.id, graph.EdgeTests, targetFile.id, snapshotID)
 					}
 				}
 			}
 		}
 	}
 
-	// CALLS edges
+	// Commit IMPORTS + TESTS edges
+	if err := tx2.Commit(); err != nil {
+		return fmt.Errorf("committing import/test edges: %w", err)
+	}
+
+	// CALLS edges in a separate transaction
+	tx3, err := c.db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting calls transaction: %w", err)
+	}
+	defer tx3.Rollback()
+
 	exportMap := make(map[string]*fileInfo)
 	for _, fi := range files {
 		for _, exp := range fi.exported {
@@ -612,15 +649,15 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 					"calleeFile": resolved,
 					"line":       call.Range.Start[0],
 				}
-				callID, _ := c.db.InsertNode(tx, graph.KindSymbol, callPayload)
+				callID, _ := c.db.InsertNode(tx3, graph.KindSymbol, callPayload)
 				if callID != nil {
-					c.db.InsertEdge(tx, fi.id, graph.EdgeCalls, targetFile.id, callID)
+					c.db.InsertEdge(tx3, fi.id, graph.EdgeCalls, targetFile.id, callID)
 				}
 			}
 		}
 	}
 
-	return tx.Commit()
+	return tx3.Commit()
 }
 
 // AnalyzeSymbols extracts symbols from all files in a snapshot.
