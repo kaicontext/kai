@@ -3588,6 +3588,12 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		if selectedOrg != nil {
 			projectName := remote.DetectProjectName()
 			fmt.Println()
+			fmt.Printf("  Repository name [%s]: ", projectName)
+			repoInput, _ := reader.ReadString('\n')
+			repoInput = strings.TrimSpace(repoInput)
+			if repoInput != "" {
+				projectName = repoInput
+			}
 			fmt.Printf("  Creating repo '%s/%s' on kaicontext.com...\n", selectedOrg.Slug, projectName)
 			_, err := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
 			if err != nil {
