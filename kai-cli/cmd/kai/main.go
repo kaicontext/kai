@@ -12399,6 +12399,31 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Also collect content blob digests from File nodes so the negotiate
+	// can detect missing blobs. Without this, a normal push after a failed
+	// push would say "Already up to date" even though content blobs are missing.
+	contentDigestPaths := make(map[string]string) // digest -> file path for disk fallback
+	for _, d := range allDigests {
+		nodeKind, rawPayloadJSON, err := db.GetNodeRawPayload(d)
+		if err != nil || rawPayloadJSON == nil {
+			continue
+		}
+		if nodeKind == graph.KindFile {
+			var filePayload map[string]interface{}
+			if err := json.Unmarshal(rawPayloadJSON, &filePayload); err == nil {
+				if contentDigest, ok := filePayload["digest"].(string); ok {
+					if filePath, ok := filePayload["path"].(string); ok {
+						contentDigestPaths[contentDigest] = filePath
+					}
+					cd, err := hex.DecodeString(contentDigest)
+					if err == nil {
+						addDigest(cd)
+					}
+				}
+			}
+		}
+	}
+
 	debugf("Pushing to %s (%s)...", remoteName, client.BaseURL)
 	fmt.Fprintf(os.Stderr, "\rPushing to %s... negotiating", remoteName)
 
@@ -12429,7 +12454,6 @@ func runPush(cmd *cobra.Command, args []string) error {
 		// Build pack from missing objects
 		var packObjects []remote.PackObject
 		contentDigestSet := make(map[string]bool)
-		contentDigestPaths := make(map[string]string) // digest -> file path for disk fallback
 
 		for _, digest := range missing {
 			digestHex := hex.EncodeToString(digest)
@@ -12443,10 +12467,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 			// Get the raw payload JSON to avoid serialization differences
 			// (JSON round-tripping can change types like int64 to float64)
 			nodeKind, rawPayloadJSON, err := db.GetNodeRawPayload(digest)
-			if err != nil {
-				continue
-			}
-			if rawPayloadJSON == nil {
+			if err != nil || rawPayloadJSON == nil {
+				// Not a node — might be a content blob digest
+				contentDigestSet[digestHex] = true
 				continue
 			}
 
