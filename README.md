@@ -128,6 +128,30 @@ agent executes with proof, not generation with hope.
 
 ---
 
+## Language Support
+
+Kai uses [tree-sitter](https://tree-sitter.github.io/) for parsing and builds semantic graphs for 9 languages.
+Each language is validated with [end-to-end tests](kai-e2e/) against real open-source projects:
+
+| Language | Symbols | Callers/Callees | Dependencies | Tests | Impact | E2E Fixtures |
+|----------|---------|-----------------|--------------|-------|--------|-------------|
+| **Go** | functions, methods, interfaces, structs | cross-package via import aliases | Go package resolution | same-dir `_test.go` + transitive | via dependency graph | [chi](https://github.com/go-chi/chi), [lo](https://github.com/samber/lo) |
+| **Rust** | functions, structs, enums, traits, impl methods, macros | cross-file via exports | `crate::`, `super::`, `self::`, `mod`, wildcards | filename pattern matching for integration tests | via dependency graph | [just](https://github.com/casey/just), [miniserve](https://github.com/svenstaro/miniserve) |
+| **TypeScript/JavaScript** | functions, classes, methods, variables | via imports | relative + workspace resolution | `*.test.ts`, `__tests__/` patterns | via dependency graph | — |
+| **Python** | functions, classes, methods | via imports | dotted module resolution | `test_*.py`, `*_test.py` patterns | via dependency graph | — |
+| **Ruby** | methods, classes, modules | via exports | `require`, `require_relative`, Zeitwerk autoload | `*_spec.rb`, `*_test.rb` patterns | via dependency graph | — |
+| **SQL** | — | — | — | — | — | — |
+| **PHP** | functions, classes, methods | — | — | — | — | — |
+| **C#** | functions, classes, methods | — | — | — | — | — |
+
+67 E2E tests across Go and Rust, all passing. Run them with:
+
+```bash
+cd kai-e2e && ./scripts/run-tests.sh
+```
+
+---
+
 ## Architecture
 
 Kai is fully open source under Apache 2.0: core engine, CLI, and server.
