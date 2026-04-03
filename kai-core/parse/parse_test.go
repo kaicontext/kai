@@ -1228,3 +1228,1853 @@ func searchString(s, substr string) bool {
 	}
 	return false
 }
+
+// ==================== Ruby Tests ====================
+
+func TestParser_ParseRubyMethod(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+def hello(name)
+  "Hello, #{name}"
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "hello" && sym.Kind == "function" {
+			found = true
+			if sym.Signature == "" {
+				t.Error("expected function signature")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find method 'hello'")
+	}
+}
+
+func TestParser_ParseRubyClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class User
+  def initialize(name)
+    @name = name
+  end
+
+  def greet
+    "Hello, #{@name}"
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundClass := false
+	foundInit := false
+	foundGreet := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			foundClass = true
+		}
+		if sym.Name == "User#initialize" && sym.Kind == "function" {
+			foundInit = true
+		}
+		if sym.Name == "User#greet" && sym.Kind == "function" {
+			foundGreet = true
+		}
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'User'")
+	}
+	if !foundInit {
+		t.Error("Expected to find method 'User#initialize'")
+	}
+	if !foundGreet {
+		t.Error("Expected to find method 'User#greet'")
+	}
+}
+
+func TestParser_ParseRubyInheritance(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class Admin < User
+  def promote
+    true
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundClass := false
+	foundMethod := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Admin" && sym.Kind == "class" {
+			foundClass = true
+			if sym.Signature != "class Admin < User" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+		}
+		if sym.Name == "Admin#promote" && sym.Kind == "function" {
+			foundMethod = true
+		}
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'Admin'")
+	}
+	if !foundMethod {
+		t.Error("Expected to find method 'Admin#promote'")
+	}
+}
+
+func TestParser_ParseRubySingletonMethod(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class Config
+  def self.load(path)
+    new(path)
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Config.load" && sym.Kind == "function" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find singleton method 'Config.load'")
+	}
+}
+
+func TestParser_ParseRubyModule(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+module Greetable
+  def greet
+    "Hello!"
+  end
+
+  def farewell
+    "Goodbye!"
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundModule := false
+	foundGreet := false
+	foundFarewell := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Greetable" && sym.Kind == "module" {
+			foundModule = true
+		}
+		if sym.Name == "Greetable#greet" && sym.Kind == "function" {
+			foundGreet = true
+		}
+		if sym.Name == "Greetable#farewell" && sym.Kind == "function" {
+			foundFarewell = true
+		}
+	}
+	if !foundModule {
+		t.Error("Expected to find module 'Greetable'")
+	}
+	if !foundGreet {
+		t.Error("Expected to find method 'Greetable#greet'")
+	}
+	if !foundFarewell {
+		t.Error("Expected to find method 'Greetable#farewell'")
+	}
+}
+
+func TestParser_ParseRubyConstant(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+MAX_RETRIES = 3
+DEFAULT_TIMEOUT = 30
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundMax := false
+	foundTimeout := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "MAX_RETRIES" {
+			foundMax = true
+		}
+		if sym.Name == "DEFAULT_TIMEOUT" {
+			foundTimeout = true
+		}
+	}
+	if !foundMax {
+		t.Error("Expected to find constant 'MAX_RETRIES'")
+	}
+	if !foundTimeout {
+		t.Error("Expected to find constant 'DEFAULT_TIMEOUT'")
+	}
+}
+
+func TestParser_ParseRubyEmptyFile(t *testing.T) {
+	parser := NewParser()
+	parsed, err := parser.Parse([]byte(""), "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for empty file, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestParser_ParseRubyComments(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+# This is a comment
+def commented
+  # inline comment
+  true
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "commented" && sym.Kind == "function" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find method 'commented'")
+	}
+}
+
+func TestParser_ParseRubyMultipleMethods(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+def foo; end
+def bar(x); end
+def baz(x, y); end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	expected := map[string]bool{"foo": false, "bar": false, "baz": false}
+	for _, sym := range parsed.Symbols {
+		if _, ok := expected[sym.Name]; ok {
+			expected[sym.Name] = true
+		}
+	}
+	for name, found := range expected {
+		if !found {
+			t.Errorf("Expected to find method '%s'", name)
+		}
+	}
+}
+
+// ==================== Rust Tests ====================
+
+func TestParser_ParseRustFunction(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+fn hello(name: &str) -> String {
+    format!("Hello, {}", name)
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "hello" && sym.Kind == "function" {
+			found = true
+			if sym.Signature == "" {
+				t.Error("expected function signature")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find function 'hello'")
+	}
+}
+
+func TestParser_ParseRustStruct(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+struct User {
+    name: String,
+    email: String,
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			found = true
+			if sym.Signature != "struct User" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find struct 'User'")
+	}
+}
+
+func TestParser_ParseRustEnum(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+enum Status {
+    Active,
+    Inactive,
+    Pending,
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Status" && sym.Kind == "class" {
+			found = true
+			if sym.Signature != "enum Status" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find enum 'Status'")
+	}
+}
+
+func TestParser_ParseRustTrait(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+trait Greetable {
+    fn greet(&self) -> String;
+    fn farewell(&self) -> String;
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundTrait := false
+	foundGreet := false
+	foundFarewell := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Greetable" && sym.Kind == "type" {
+			foundTrait = true
+		}
+		if sym.Name == "Greetable::greet" && sym.Kind == "function" {
+			foundGreet = true
+		}
+		if sym.Name == "Greetable::farewell" && sym.Kind == "function" {
+			foundFarewell = true
+		}
+	}
+	if !foundTrait {
+		t.Error("Expected to find trait 'Greetable'")
+	}
+	if !foundGreet {
+		t.Error("Expected to find trait method 'Greetable::greet'")
+	}
+	if !foundFarewell {
+		t.Error("Expected to find trait method 'Greetable::farewell'")
+	}
+}
+
+func TestParser_ParseRustImpl(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+struct Counter {
+    value: i32,
+}
+
+impl Counter {
+    fn new() -> Self {
+        Counter { value: 0 }
+    }
+
+    fn increment(&mut self) {
+        self.value += 1;
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundStruct := false
+	foundNew := false
+	foundIncrement := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Counter" && sym.Kind == "class" {
+			foundStruct = true
+		}
+		if sym.Name == "Counter::new" && sym.Kind == "function" {
+			foundNew = true
+		}
+		if sym.Name == "Counter::increment" && sym.Kind == "function" {
+			foundIncrement = true
+		}
+	}
+	if !foundStruct {
+		t.Error("Expected to find struct 'Counter'")
+	}
+	if !foundNew {
+		t.Error("Expected to find impl method 'Counter::new'")
+	}
+	if !foundIncrement {
+		t.Error("Expected to find impl method 'Counter::increment'")
+	}
+}
+
+func TestParser_ParseRustTypeAlias(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`type Result<T> = std::result::Result<T, Error>;`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Result" && sym.Kind == "type" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find type alias 'Result'")
+	}
+}
+
+func TestParser_ParseRustConstAndStatic(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+const MAX_SIZE: usize = 1024;
+static GREETING: &str = "Hello";
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundConst := false
+	foundStatic := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "MAX_SIZE" && sym.Kind == "variable" {
+			foundConst = true
+		}
+		if sym.Name == "GREETING" && sym.Kind == "variable" {
+			foundStatic = true
+		}
+	}
+	if !foundConst {
+		t.Error("Expected to find const 'MAX_SIZE'")
+	}
+	if !foundStatic {
+		t.Error("Expected to find static 'GREETING'")
+	}
+}
+
+func TestParser_ParseRustMod(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+mod utils {
+    pub fn helper() {}
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "utils" && sym.Kind == "module" {
+			found = true
+			if sym.Signature != "mod utils" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find mod 'utils'")
+	}
+}
+
+func TestParser_ParseRustMacro(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+macro_rules! say_hello {
+    () => { println!("Hello!"); };
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "say_hello!" && sym.Kind == "function" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find macro 'say_hello!'")
+	}
+}
+
+func TestParser_ParseRustEmptyFile(t *testing.T) {
+	parser := NewParser()
+	parsed, err := parser.Parse([]byte(""), "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for empty file, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestParser_ParseRustMultipleFunctions(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn subtract(a: i32, b: i32) -> i32 { a - b }
+fn multiply(a: i32, b: i32) -> i32 { a * b }
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	expected := map[string]bool{"add": false, "subtract": false, "multiply": false}
+	for _, sym := range parsed.Symbols {
+		if _, ok := expected[sym.Name]; ok {
+			expected[sym.Name] = true
+		}
+	}
+	for name, found := range expected {
+		if !found {
+			t.Errorf("Expected to find function '%s'", name)
+		}
+	}
+}
+
+// ==================== PHP Tests ====================
+
+func TestParser_ParsePHPFunction(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+function hello($name) {
+    return "Hello, " . $name;
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "hello" && sym.Kind == "function" {
+			found = true
+			if sym.Signature == "" {
+				t.Error("expected function signature")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find function 'hello'")
+	}
+}
+
+func TestParser_ParsePHPClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+class User {
+    public function __construct($name) {
+        $this->name = $name;
+    }
+
+    public function greet() {
+        return "Hello, " . $this->name;
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundClass := false
+	foundConstruct := false
+	foundGreet := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			foundClass = true
+		}
+		if sym.Name == "User::__construct" && sym.Kind == "function" {
+			foundConstruct = true
+		}
+		if sym.Name == "User::greet" && sym.Kind == "function" {
+			foundGreet = true
+		}
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'User'")
+	}
+	if !foundConstruct {
+		t.Error("Expected to find method 'User::__construct'")
+	}
+	if !foundGreet {
+		t.Error("Expected to find method 'User::greet'")
+	}
+}
+
+func TestParser_ParsePHPInheritance(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+class Admin extends User {
+    public function promote() {
+        return true;
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundClass := false
+	foundMethod := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Admin" && sym.Kind == "class" {
+			foundClass = true
+			if sym.Signature != "class Admin extends User" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+		}
+		if sym.Name == "Admin::promote" && sym.Kind == "function" {
+			foundMethod = true
+		}
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'Admin'")
+	}
+	if !foundMethod {
+		t.Error("Expected to find method 'Admin::promote'")
+	}
+}
+
+func TestParser_ParsePHPInterface(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+interface Authenticatable {
+    public function login($user, $pass);
+    public function logout();
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Authenticatable" && sym.Kind == "interface" {
+			found = true
+			if sym.Signature != "interface Authenticatable" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find interface 'Authenticatable'")
+	}
+}
+
+func TestParser_ParsePHPTrait(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+trait Timestamps {
+    public function createdAt() {
+        return $this->created_at;
+    }
+
+    public function updatedAt() {
+        return $this->updated_at;
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundTrait := false
+	foundCreated := false
+	foundUpdated := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Timestamps" && sym.Kind == "class" {
+			foundTrait = true
+		}
+		if sym.Name == "Timestamps::createdAt" && sym.Kind == "function" {
+			foundCreated = true
+		}
+		if sym.Name == "Timestamps::updatedAt" && sym.Kind == "function" {
+			foundUpdated = true
+		}
+	}
+	if !foundTrait {
+		t.Error("Expected to find trait 'Timestamps'")
+	}
+	if !foundCreated {
+		t.Error("Expected to find method 'Timestamps::createdAt'")
+	}
+	if !foundUpdated {
+		t.Error("Expected to find method 'Timestamps::updatedAt'")
+	}
+}
+
+func TestParser_ParsePHPNamespace(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+namespace App\Controllers;
+
+class HomeController {
+    public function index() {}
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundNS := false
+	foundClass := false
+	for _, sym := range parsed.Symbols {
+		if sym.Kind == "module" && sym.Signature == "namespace App\\Controllers" {
+			foundNS = true
+		}
+		if sym.Name == "HomeController" && sym.Kind == "class" {
+			foundClass = true
+		}
+	}
+	if !foundNS {
+		t.Error("Expected to find namespace 'App\\Controllers'")
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'HomeController'")
+	}
+}
+
+func TestParser_ParsePHPEmptyFile(t *testing.T) {
+	parser := NewParser()
+	parsed, err := parser.Parse([]byte("<?php"), "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for empty PHP file, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestParser_ParsePHPMultipleFunctions(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+function add($a, $b) { return $a + $b; }
+function subtract($a, $b) { return $a - $b; }
+function multiply($a, $b) { return $a * $b; }
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	expected := map[string]bool{"add": false, "subtract": false, "multiply": false}
+	for _, sym := range parsed.Symbols {
+		if _, ok := expected[sym.Name]; ok {
+			expected[sym.Name] = true
+		}
+	}
+	for name, found := range expected {
+		if !found {
+			t.Errorf("Expected to find function '%s'", name)
+		}
+	}
+}
+
+func TestParser_ParsePHPStaticMethod(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+class DB {
+    public static function connect($dsn) {
+        return new self($dsn);
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "DB::connect" && sym.Kind == "function" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find static method 'DB::connect'")
+	}
+}
+
+// ==================== C# Tests ====================
+
+func TestParser_ParseCSharpClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public class User {
+    public string Name { get; set; }
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "User" && sym.Kind == "class" {
+			found = true
+			if sym.Signature != "class User" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find class 'User'")
+	}
+}
+
+func TestParser_ParseCSharpMethod(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public class UserService {
+    public User GetById(int id) {
+        return null;
+    }
+
+    public void Delete(int id) {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundClass := false
+	foundGet := false
+	foundDelete := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "UserService" && sym.Kind == "class" {
+			foundClass = true
+		}
+		if sym.Name == "UserService.GetById" && sym.Kind == "function" {
+			foundGet = true
+		}
+		if sym.Name == "UserService.Delete" && sym.Kind == "function" {
+			foundDelete = true
+		}
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'UserService'")
+	}
+	if !foundGet {
+		t.Error("Expected to find method 'UserService.GetById'")
+	}
+	if !foundDelete {
+		t.Error("Expected to find method 'UserService.Delete'")
+	}
+}
+
+func TestParser_ParseCSharpConstructor(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public class Repository {
+    public Repository(IDbContext ctx) {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Repository.Repository" && sym.Kind == "function" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find constructor 'Repository.Repository'")
+	}
+}
+
+func TestParser_ParseCSharpInheritance(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public class AdminService : UserService {
+    public void Promote(int userId) {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "AdminService" && sym.Kind == "class" {
+			found = true
+			if sym.Signature != "class AdminService : UserService" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find class 'AdminService'")
+	}
+}
+
+func TestParser_ParseCSharpInterface(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public interface IUserService {
+    User GetById(int id);
+    void Delete(int id);
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundInterface := false
+	foundGet := false
+	foundDelete := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "IUserService" && sym.Kind == "interface" {
+			foundInterface = true
+		}
+		if sym.Name == "IUserService.GetById" && sym.Kind == "function" {
+			foundGet = true
+		}
+		if sym.Name == "IUserService.Delete" && sym.Kind == "function" {
+			foundDelete = true
+		}
+	}
+	if !foundInterface {
+		t.Error("Expected to find interface 'IUserService'")
+	}
+	if !foundGet {
+		t.Error("Expected to find interface method 'IUserService.GetById'")
+	}
+	if !foundDelete {
+		t.Error("Expected to find interface method 'IUserService.Delete'")
+	}
+}
+
+func TestParser_ParseCSharpStruct(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public struct Point {
+    public int X { get; set; }
+    public int Y { get; set; }
+
+    public double Distance() { return 0; }
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundStruct := false
+	foundMethod := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Point" && sym.Kind == "class" {
+			foundStruct = true
+			if sym.Signature != "struct Point" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+		}
+		if sym.Name == "Point.Distance" && sym.Kind == "function" {
+			foundMethod = true
+		}
+	}
+	if !foundStruct {
+		t.Error("Expected to find struct 'Point'")
+	}
+	if !foundMethod {
+		t.Error("Expected to find method 'Point.Distance'")
+	}
+}
+
+func TestParser_ParseCSharpEnum(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public enum Status {
+    Active,
+    Inactive,
+    Pending
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Status" && sym.Kind == "class" {
+			found = true
+			if sym.Signature != "enum Status" {
+				t.Errorf("unexpected signature: %q", sym.Signature)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find enum 'Status'")
+	}
+}
+
+func TestParser_ParseCSharpRecord(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public record UserDto(string Name, string Email) {
+    public string Display() => Name;
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundRecord := false
+	foundMethod := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "UserDto" && sym.Kind == "class" {
+			foundRecord = true
+		}
+		if sym.Name == "UserDto.Display" && sym.Kind == "function" {
+			foundMethod = true
+		}
+	}
+	if !foundRecord {
+		t.Error("Expected to find record 'UserDto'")
+	}
+	if !foundMethod {
+		t.Error("Expected to find method 'UserDto.Display'")
+	}
+}
+
+func TestParser_ParseCSharpNamespace(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+namespace MyApp.Services {
+    public class FooService {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundNS := false
+	foundClass := false
+	for _, sym := range parsed.Symbols {
+		if sym.Kind == "module" && sym.Name == "MyApp.Services" {
+			foundNS = true
+		}
+		if sym.Name == "FooService" && sym.Kind == "class" {
+			foundClass = true
+		}
+	}
+	if !foundNS {
+		t.Error("Expected to find namespace 'MyApp.Services'")
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'FooService'")
+	}
+}
+
+func TestParser_ParseCSharpDelegate(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`public delegate void EventHandler(object sender, EventArgs e);`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "EventHandler" && sym.Kind == "type" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected to find delegate 'EventHandler'")
+	}
+}
+
+func TestParser_ParseCSharpEmptyFile(t *testing.T) {
+	parser := NewParser()
+	parsed, err := parser.Parse([]byte(""), "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if len(parsed.Symbols) != 0 {
+		t.Errorf("expected 0 symbols for empty file, got %d", len(parsed.Symbols))
+	}
+}
+
+func TestParser_ParseCSharpFileScopedNamespace(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+namespace MyApp.Controllers;
+
+public class HomeController {
+    public string Index() => "Home";
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	foundNS := false
+	foundClass := false
+	for _, sym := range parsed.Symbols {
+		if sym.Kind == "module" {
+			foundNS = true
+		}
+		if sym.Name == "HomeController" && sym.Kind == "class" {
+			foundClass = true
+		}
+	}
+	if !foundNS {
+		t.Error("Expected to find file-scoped namespace")
+	}
+	if !foundClass {
+		t.Error("Expected to find class 'HomeController'")
+	}
+}
+
+// ==================== Additional coverage tests ====================
+
+// Test Parse with alternate language aliases
+func TestParser_ParseLanguageAliases(t *testing.T) {
+	parser := NewParser()
+
+	// "python" alias
+	code := []byte(`def foo(): pass`)
+	parsed, err := parser.Parse(code, "python")
+	if err != nil {
+		t.Fatalf("Parse with 'python' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for python alias")
+	}
+
+	// "golang" alias
+	code = []byte(`package main
+func Foo() {}`)
+	parsed, err = parser.Parse(code, "golang")
+	if err != nil {
+		t.Fatalf("Parse with 'golang' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for golang alias")
+	}
+
+	// "javascript" alias
+	code = []byte(`function foo() {}`)
+	parsed, err = parser.Parse(code, "javascript")
+	if err != nil {
+		t.Fatalf("Parse with 'javascript' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for javascript alias")
+	}
+
+	// "typescript" alias
+	parsed, err = parser.Parse(code, "typescript")
+	if err != nil {
+		t.Fatalf("Parse with 'typescript' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for typescript alias")
+	}
+
+	// "ruby" alias
+	code = []byte(`def foo; end`)
+	parsed, err = parser.Parse(code, "ruby")
+	if err != nil {
+		t.Fatalf("Parse with 'ruby' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for ruby alias")
+	}
+
+	// "rust" alias
+	code = []byte(`fn foo() {}`)
+	parsed, err = parser.Parse(code, "rust")
+	if err != nil {
+		t.Fatalf("Parse with 'rust' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for rust alias")
+	}
+
+	// "csharp" and "c#" aliases
+	code = []byte(`public class Foo {}`)
+	parsed, err = parser.Parse(code, "csharp")
+	if err != nil {
+		t.Fatalf("Parse with 'csharp' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for csharp alias")
+	}
+	parsed, err = parser.Parse(code, "c#")
+	if err != nil {
+		t.Fatalf("Parse with 'c#' failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected symbols for c# alias")
+	}
+
+	// Unknown language falls back to JS
+	code = []byte(`function foo() {}`)
+	parsed, err = parser.Parse(code, "unknown_lang")
+	if err != nil {
+		t.Fatalf("Parse with unknown lang failed: %v", err)
+	}
+	if len(parsed.Symbols) == 0 {
+		t.Error("expected JS fallback for unknown language")
+	}
+}
+
+// Python: tuple unpacking assignment
+func TestParser_ParsePythonTupleUnpacking(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+a, b = 1, 2
+_private, c = 3, 4
+`)
+	parsed, err := parser.Parse(code, "py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["a"] {
+		t.Error("expected variable 'a' from tuple unpacking")
+	}
+	if !names["b"] {
+		t.Error("expected variable 'b' from tuple unpacking")
+	}
+	if names["_private"] {
+		t.Error("_private should be filtered out")
+	}
+	if !names["c"] {
+		t.Error("expected variable 'c' from tuple unpacking")
+	}
+}
+
+// Python: private variable filtering
+func TestParser_ParsePythonPrivateVariable(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+_private = 1
+public = 2
+`)
+	parsed, err := parser.Parse(code, "py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if names["_private"] {
+		t.Error("_private should be excluded")
+	}
+	if !names["public"] {
+		t.Error("public should be included")
+	}
+}
+
+// Go: receiver type extraction edge cases
+func TestParser_ParseGoPointerReceiver(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`package main
+type MyStruct struct{}
+func (m *MyStruct) PointerMethod() {}
+func (m MyStruct) ValueMethod() {}
+`)
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["*MyStruct.PointerMethod"] {
+		t.Error("expected *MyStruct.PointerMethod")
+	}
+	if !names["MyStruct.ValueMethod"] {
+		t.Error("expected MyStruct.ValueMethod")
+	}
+}
+
+// Go: var/const blocks
+func TestParser_ParseGoVarConstBlock(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`package main
+var (
+	x = 1
+	y = 2
+)
+const (
+	A = "a"
+	B = "b"
+)
+`)
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	for _, name := range []string{"x", "y", "A", "B"} {
+		if !names[name] {
+			t.Errorf("expected variable/const %q", name)
+		}
+	}
+}
+
+// Ruby: module with methods inside
+func TestParser_ParseRubyModuleWithMethods(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+module Helper
+  def self.format(value)
+    value.to_s
+  end
+
+  def instance_method
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Helper"] {
+		t.Error("expected module Helper")
+	}
+	if !names["Helper.format"] {
+		t.Error("expected Helper.format singleton method")
+	}
+}
+
+// SQL: index without UNIQUE
+func TestSQL_PlainIndex(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE INDEX idx_users_email ON users (email);
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "idx_users_email" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected index idx_users_email")
+	}
+}
+
+// PHP: namespace with class and methods
+func TestParser_ParsePHPNamespaceWithClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+namespace App\Controllers;
+
+class UserController {
+    public function index() {}
+    public static function create() {}
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["UserController"] {
+		t.Error("expected class UserController")
+	}
+}
+
+// C#: method with no return type (should handle gracefully)
+func TestParser_ParseCSharpMethodNoReturnType(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public class Foo {
+    public void Bar() {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Foo.Bar" && sym.Kind == "function" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected Foo.Bar")
+	}
+}
+
+// C#: record with methods
+func TestParser_ParseCSharpRecordWithMembers(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public record Person(string Name, int Age) {
+    public string Display() { return Name; }
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Person"] {
+		t.Error("expected record Person")
+	}
+}
+
+// C#: struct with methods
+func TestParser_ParseCSharpStructWithMethods(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+public struct Vector {
+    public double Length() { return 0; }
+    public Vector(double x) {}
+}
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Vector"] {
+		t.Error("expected struct Vector")
+	}
+	if !names["Vector.Length"] {
+		t.Error("expected method Vector.Length")
+	}
+	if !names["Vector.Vector"] {
+		t.Error("expected constructor Vector.Vector")
+	}
+}
+
+// C#: delegate with no name should return nil
+func TestParser_ParseCSharpEmptyDelegate(t *testing.T) {
+	parser := NewParser()
+	// Parse something with a delegate
+	code := []byte(`
+public delegate void Handler(string msg);
+`)
+	parsed, err := parser.Parse(code, "cs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Handler" && sym.Kind == "type" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected delegate Handler")
+	}
+}
+
+// Rust: impl block with methods
+func TestParser_ParseRustImplBlock(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn new(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+    fn distance(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Point"] {
+		t.Error("expected struct Point")
+	}
+	if !names["Point::new"] {
+		t.Error("expected Point::new")
+	}
+	if !names["Point::distance"] {
+		t.Error("expected Point::distance")
+	}
+}
+
+// PHP: interface and trait
+func TestParser_ParsePHPInterfaceAndTrait(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+interface Cacheable {
+    public function cacheKey();
+}
+
+trait Timestamps {
+    public function createdAt() {}
+    public function updatedAt() {}
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Cacheable"] {
+		t.Error("expected interface Cacheable")
+	}
+	if !names["Timestamps"] {
+		t.Error("expected trait Timestamps")
+	}
+}
+
+// PHP: class with inheritance
+func TestParser_ParsePHPClassInheritance(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`<?php
+class Animal {}
+class Dog extends Animal {
+    public function bark() {}
+}
+`)
+	parsed, err := parser.Parse(code, "php")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["Dog"] {
+		t.Error("expected class Dog")
+	}
+}
+
+// Go: interface with multiple methods
+func TestParser_ParseGoInterfaceMultipleMethods(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`package main
+type Reader interface {
+	Read(p []byte) (n int, err error)
+	Close() error
+}
+`)
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Reader" && sym.Kind == "interface" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected interface Reader")
+	}
+}
+
+// Python: class with no methods (empty body)
+func TestParser_ParsePythonEmptyClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class Empty:
+    pass
+`)
+	parsed, err := parser.Parse(code, "py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Empty" && sym.Kind == "class" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected class Empty")
+	}
+}
+
+// Rust: all item types to cover nil branches
+func TestParser_ParseRustAllItems(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+fn standalone() {}
+pub fn public_standalone() {}
+struct MyStruct { x: i32 }
+enum MyEnum { A, B }
+trait MyTrait { fn required(&self); }
+type Alias = i32;
+const CONSTANT: i32 = 42;
+static STATIC_VAR: i32 = 1;
+mod mymod {}
+macro_rules! mymacro { () => {} }
+impl MyStruct { fn method(&self) {} }
+impl MyTrait for MyStruct { fn required(&self) {} }
+`)
+	parsed, err := parser.Parse(code, "rs")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	for _, name := range []string{"standalone", "public_standalone", "MyStruct", "MyEnum", "MyTrait", "Alias", "CONSTANT", "STATIC_VAR", "mymod", "mymacro!"} {
+		if !names[name] {
+			t.Errorf("missing %q", name)
+		}
+	}
+}
+
+// SQL: view and function
+func TestSQL_ViewAndFunction(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+CREATE VIEW active_users AS SELECT * FROM users WHERE active = true;
+CREATE OR REPLACE FUNCTION get_user(p_id INT)
+RETURNS TABLE(id INT, name TEXT) AS $$
+BEGIN
+  RETURN QUERY SELECT id, name FROM users WHERE id = p_id;
+END;
+$$ LANGUAGE plpgsql;
+`)
+	parsed, err := parser.Parse(code, "sql")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["active_users"] {
+		t.Error("expected view active_users")
+	}
+}
+
+// Go: function with multiple return values
+func TestParser_ParseGoFunctionMultiReturn(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`package main
+func divide(a, b int) (int, error) {
+	return a / b, nil
+}
+`)
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "divide" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected function divide")
+	}
+}
+
+// Go: typed variable declaration
+func TestParser_ParseGoTypedVar(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`package main
+var handler func()
+var count int
+var items []string
+var lookup map[string]int
+`)
+	parsed, err := parser.Parse(code, "go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	kinds := map[string]string{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+		kinds[sym.Name] = sym.Kind
+	}
+	if !names["handler"] {
+		t.Error("expected variable handler")
+	}
+	// func type should be "function" kind
+	if kinds["handler"] != "function" {
+		t.Errorf("expected handler to be function kind, got %q", kinds["handler"])
+	}
+	if !names["count"] {
+		t.Error("expected variable count")
+	}
+}
+
+// Ruby: class with inheritance
+func TestParser_ParseRubyClassInheritance(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class Dog < Animal
+  def bark
+    puts "woof"
+  end
+end
+`)
+	parsed, err := parser.Parse(code, "rb")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "Dog" && sym.Kind == "class" {
+			found = true
+			if sym.Signature == "" {
+				t.Error("expected non-empty signature for Dog")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected class Dog")
+	}
+}
+
+// Python: function with no body (syntax edge)
+func TestParser_ParsePythonMethodInClass(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+class MyClass:
+    def __init__(self, name):
+        self.name = name
+
+    def greet(self):
+        return f"Hello, {self.name}"
+
+    @staticmethod
+    def static_method():
+        pass
+`)
+	parsed, err := parser.Parse(code, "py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sym := range parsed.Symbols {
+		names[sym.Name] = true
+	}
+	if !names["MyClass"] {
+		t.Error("expected class MyClass")
+	}
+	if !names["MyClass.__init__"] {
+		t.Error("expected MyClass.__init__")
+	}
+	if !names["MyClass.greet"] {
+		t.Error("expected MyClass.greet")
+	}
+}
+
+// JS: class with no identifier in function_expression (anonymous)
+func TestParser_ParseJSAnonymousFunctionExpression(t *testing.T) {
+	parser := NewParser()
+	code := []byte(`
+const handler = function() {};
+`)
+	parsed, err := parser.Parse(code, "js")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	found := false
+	for _, sym := range parsed.Symbols {
+		if sym.Name == "handler" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected variable handler")
+	}
+}

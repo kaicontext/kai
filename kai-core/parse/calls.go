@@ -1606,6 +1606,34 @@ func extractRustImports(node *sitter.Node, content []byte) []*Import {
 			if imp != nil {
 				imports = append(imports, imp)
 			}
+		case "mod_item":
+			// Only extract file-backed mod declarations (mod foo;)
+			// Skip inline modules (mod foo { ... }) which have a declaration_list child
+			hasBody := false
+			for i := 0; i < int(n.ChildCount()); i++ {
+				if n.Child(i).Type() == "declaration_list" {
+					hasBody = true
+					break
+				}
+			}
+			if !hasBody {
+				var modName string
+				for i := 0; i < int(n.ChildCount()); i++ {
+					if n.Child(i).Type() == "identifier" {
+						modName = n.Child(i).Content(content)
+						break
+					}
+				}
+				if modName != "" {
+					imports = append(imports, &Import{
+						Source:     "mod:" + modName,
+						IsRelative: true,
+						Default:    modName,
+						Named:      make(map[string]string),
+						Range:      nodeRange(n),
+					})
+				}
+			}
 		}
 	}
 

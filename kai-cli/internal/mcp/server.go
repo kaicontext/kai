@@ -1160,9 +1160,14 @@ func formatCallInfos(label, symbol string, infos []callInfo) string {
 // findCallersViaFileEdges finds files that call the given symbol by scanning
 // CALLS edges and matching the call node's calleeName payload.
 func (s *Server) findCallersViaFileEdges(snapID []byte, symbolName, filePath string) ([]callInfo, error) {
-	// Normalize Go receiver-qualified names: *Resolver.Resolve → Resolve, Type.Method → Method
+	// Normalize qualified names:
+	// Go: *Resolver.Resolve → Resolve, Type.Method → Method
 	if idx := strings.LastIndex(symbolName, "."); idx >= 0 {
 		symbolName = symbolName[idx+1:]
+	}
+	// Rust: Analyzer::analyze → analyze, crate::foo::bar → bar
+	if idx := strings.LastIndex(symbolName, "::"); idx >= 0 {
+		symbolName = symbolName[idx+2:]
 	}
 
 	// If file specified, find the file node and get edges TO it
@@ -1193,7 +1198,12 @@ func (s *Server) findCallersViaFileEdges(snapID []byte, symbolName, filePath str
 			continue
 		}
 		calleeName, _ := callNode.Payload["calleeName"].(string)
-		if calleeName != symbolName {
+		// Normalize stored callee name (may be scoped: Analyzer::analyze, auth::handle_auth)
+		normalizedCallee := calleeName
+		if idx := strings.LastIndex(normalizedCallee, "::"); idx >= 0 {
+			normalizedCallee = normalizedCallee[idx+2:]
+		}
+		if normalizedCallee != symbolName {
 			continue
 		}
 

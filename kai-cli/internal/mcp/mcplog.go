@@ -141,8 +141,8 @@ func withLogging(toolName string, handler server.ToolHandlerFunc) server.ToolHan
 	}
 }
 
-// pathPattern matches common file path patterns in JSON responses.
-var pathPattern = regexp.MustCompile(`"(?:path|file|source_file|test_file)"\s*:\s*"([^"]+)"`)
+// pathPattern matches file paths in both JSON ("path": "x") and compact text (file.go:123:...) responses.
+var pathPattern = regexp.MustCompile(`(?:"(?:path|file|source_file|test_file)"\s*:\s*"([^"]+)"|([\w][\w./\-]*\.\w+):\d+:)`)
 
 // symbolPattern matches symbol name patterns in JSON responses.
 var symbolPattern = regexp.MustCompile(`"(?:name|symbol|fqName|caller|callee)"\s*:\s*"([^"]+)"`)
@@ -167,8 +167,10 @@ func extractReferences(result *mcpsdk.CallToolResult) (files, symbols []string) 
 
 	fileSet := make(map[string]struct{})
 	for _, m := range pathPattern.FindAllStringSubmatch(text, -1) {
-		if len(m) > 1 {
+		if len(m) > 1 && m[1] != "" {
 			fileSet[m[1]] = struct{}{}
+		} else if len(m) > 2 && m[2] != "" {
+			fileSet[m[2]] = struct{}{}
 		}
 	}
 	for f := range fileSet {

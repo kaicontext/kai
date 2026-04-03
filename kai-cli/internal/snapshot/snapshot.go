@@ -435,6 +435,11 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 
 	// Build import graph from parsed calls
 	importGraph := make(map[string][]string)
+	// Pre-build Rust path list for wildcard import resolution
+	rustPaths := make([]string, 0, len(filesByPath))
+	for p := range filesByPath {
+		rustPaths = append(rustPaths, p)
+	}
 	for _, fi := range files {
 		if fi.parsed == nil {
 			continue
@@ -471,6 +476,9 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 						}
 					}
 				}
+			case "rs":
+				resolved := resolveRustImport(imp.Source, fi.path, func(p string) bool { _, ok := filesByPath[p]; return ok }, rustPaths)
+				imports = append(imports, resolved...)
 			default:
 				if imp.IsRelative {
 					dir := filepath.Dir(fi.path)
@@ -532,6 +540,7 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 		visited := make(map[string]bool)
 		queue := []string{fi.path}
 		visited[fi.path] = true
+		foundSourceDeps := false
 		for len(queue) > 0 {
 			current := queue[0]
 			queue = queue[1:]
@@ -544,6 +553,29 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 				if !parse.IsTestFile(imported) {
 					if targetFile, ok := filesByPath[imported]; ok {
 						c.db.InsertEdge(tx2, fi.id, graph.EdgeTests, targetFile.id, snapshotID)
+						foundSourceDeps = true
+					}
+				}
+			}
+		}
+		// Rust integration tests (tests/*.rs) are separate crates that don't
+		// import from src/ via the module system. Fall back to filename pattern
+		// matching: tests/auth.rs -> src/auth.rs
+		if !foundSourceDeps && fi.lang == "rs" {
+			allPaths := make([]string, 0, len(filesByPath))
+			for p := range filesByPath {
+				allPaths = append(allPaths, p)
+			}
+			for _, srcPath := range allPaths {
+				if parse.IsTestFile(srcPath) {
+					continue
+				}
+				matched := parse.FindTestsForFile(srcPath, []string{fi.path})
+				for _, m := range matched {
+					if m == fi.path {
+						if targetFile, ok := filesByPath[srcPath]; ok {
+							c.db.InsertEdge(tx2, fi.id, graph.EdgeTests, targetFile.id, snapshotID)
+						}
 					}
 				}
 			}
@@ -615,6 +647,34 @@ func (c *Creator) Analyze(snapshotID []byte, progress ProgressFunc) error {
 				if target, ok := exportMap[call.CalleeName]; ok {
 					if target.path != fi.path {
 						targetFiles = append(targetFiles, target.path)
+					}
+				}
+			} else if fi.lang == "rs" {
+				// Rust: match call names against exports in imported files.
+				// For non-method calls, check all files this file imports.
+				// For method calls, also check imported files (methods are exported by name).
+				calleeName := call.CalleeName
+				// Strip scoped prefix: "Sha256::digest" -> "digest"
+				if idx := strings.LastIndex(calleeName, "::"); idx >= 0 {
+					calleeName = calleeName[idx+2:]
+				}
+				// Check exported symbols in files we import
+				for _, imported := range importGraph[fi.path] {
+					if tf, ok := filesByPath[imported]; ok {
+						for _, exp := range tf.exported {
+							if exp == calleeName {
+								targetFiles = append(targetFiles, imported)
+							}
+						}
+					}
+				}
+				// Also check the global export map for calls to symbols
+				// not in directly imported files (e.g., re-exports)
+				if len(targetFiles) == 0 {
+					if target, ok := exportMap[calleeName]; ok {
+						if target.path != fi.path {
+							targetFiles = append(targetFiles, target.path)
+						}
 					}
 				}
 			} else {
@@ -960,6 +1020,10 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 	// Second pass: extract imports and build import graph
 	// importGraph maps file path -> list of imported file paths
 	importGraph := make(map[string][]string)
+	rustPaths2 := make([]string, 0, len(filesByPath))
+	for p := range filesByPath {
+		rustPaths2 = append(rustPaths2, p)
+	}
 
 	total := len(files)
 	for i, fi := range files {
@@ -1020,8 +1084,12 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 					}
 				}
 
+			case "rs":
+				resolved := resolveRustImport(imp.Source, fi.path, func(p string) bool { _, ok := filesByPath[p]; return ok }, rustPaths2)
+				imports = append(imports, resolved...)
+
 			default:
-				// JS/TS/Ruby/Rust: import resolution
+				// JS/TS: import resolution
 				if imp.IsRelative {
 					// Relative import: resolve against file directory
 					dir := filepath.Dir(fi.path)
@@ -1139,6 +1207,7 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 		visited := make(map[string]bool)
 		queue := []string{fi.path}
 		visited[fi.path] = true
+		foundSourceDeps := false
 
 		for len(queue) > 0 {
 			current := queue[0]
@@ -1156,6 +1225,32 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 					if targetFile, ok := filesByPath[imported]; ok {
 						if err := c.db.InsertEdge(tx, fi.id, graph.EdgeTests, targetFile.id, snapshotID); err != nil {
 							return fmt.Errorf("inserting TESTS edge: %w", err)
+						}
+						foundSourceDeps = true
+					}
+				}
+			}
+		}
+
+		// Rust integration tests (tests/*.rs) are separate crates that don't
+		// import from src/ via the module system. Fall back to filename pattern
+		// matching: tests/auth.rs -> src/auth.rs
+		if !foundSourceDeps && fi.lang == "rs" {
+			allPaths := make([]string, 0, len(filesByPath))
+			for p := range filesByPath {
+				allPaths = append(allPaths, p)
+			}
+			for _, srcPath := range allPaths {
+				if parse.IsTestFile(srcPath) {
+					continue
+				}
+				matched := parse.FindTestsForFile(srcPath, []string{fi.path})
+				for _, m := range matched {
+					if m == fi.path {
+						if targetFile, ok := filesByPath[srcPath]; ok {
+							if err := c.db.InsertEdge(tx, fi.id, graph.EdgeTests, targetFile.id, snapshotID); err != nil {
+								return fmt.Errorf("inserting TESTS edge: %w", err)
+							}
 						}
 					}
 				}
@@ -1227,6 +1322,28 @@ func (c *Creator) AnalyzeCalls(snapshotID []byte, progress ProgressFunc) error {
 				} else if !call.IsMethodCall {
 					// Direct call to an exported symbol (same package or dot-import)
 					if target, ok := exportMap[call.CalleeName]; ok {
+						if target.path != fi.path {
+							targetFiles = append(targetFiles, target.path)
+						}
+					}
+				}
+			} else if fi.lang == "rs" {
+				// Rust: match call names against exports in imported files
+				calleeName := call.CalleeName
+				if idx := strings.LastIndex(calleeName, "::"); idx >= 0 {
+					calleeName = calleeName[idx+2:]
+				}
+				for _, imported := range importGraph[fi.path] {
+					if tf, ok := filesByPath[imported]; ok {
+						for _, exp := range tf.exported {
+							if exp == calleeName {
+								targetFiles = append(targetFiles, imported)
+							}
+						}
+					}
+				}
+				if len(targetFiles) == 0 {
+					if target, ok := exportMap[calleeName]; ok {
 						if target.path != fi.path {
 							targetFiles = append(targetFiles, target.path)
 						}
@@ -1811,4 +1928,154 @@ func resolveRubyAutoload(constName, importingFile string, index map[string]strin
 	}
 
 	return nil
+}
+
+// resolveRustImport resolves a Rust import to files in the snapshot.
+// Handles:
+//   - mod declarations: "mod:foo" resolves to foo.rs or foo/mod.rs relative to declaring file
+//   - crate:: imports: "crate::foo::bar::Baz" resolves from src/ root
+//   - super:: imports: relative to parent module directory
+//   - self:: imports: relative to current module directory
+//   - External crates (std::, serde::, etc.): skipped (returns nil)
+func resolveRustImport(importSource, importingFile string, pathExists func(string) bool, allPaths []string) []string {
+	// mod declaration (mod foo;)
+	if strings.HasPrefix(importSource, "mod:") {
+		modName := strings.TrimPrefix(importSource, "mod:")
+		return resolveRustModDecl(modName, importingFile, pathExists)
+	}
+
+	// crate:: import — resolve from crate root (src/)
+	if strings.HasPrefix(importSource, "crate::") {
+		path := strings.TrimPrefix(importSource, "crate::")
+		segments := strings.Split(path, "::")
+		crateRoot := findRustCrateRoot(importingFile)
+		if crateRoot == "" {
+			return nil
+		}
+		if segments[len(segments)-1] == "*" {
+			return resolveRustWildcard(segments[:len(segments)-1], crateRoot, importingFile, allPaths)
+		}
+		return resolveRustSegments(segments, crateRoot, pathExists)
+	}
+
+	// super:: import — resolve relative to parent module
+	if strings.HasPrefix(importSource, "super::") {
+		path := strings.TrimPrefix(importSource, "super::")
+		segments := strings.Split(path, "::")
+		moduleDir := rustModuleDir(importingFile)
+		parentDir := filepath.Dir(moduleDir)
+		if segments[len(segments)-1] == "*" {
+			return resolveRustWildcard(segments[:len(segments)-1], parentDir, importingFile, allPaths)
+		}
+		return resolveRustSegments(segments, parentDir, pathExists)
+	}
+
+	// self:: import — resolve relative to current module
+	if strings.HasPrefix(importSource, "self::") {
+		path := strings.TrimPrefix(importSource, "self::")
+		segments := strings.Split(path, "::")
+		moduleDir := rustModuleDir(importingFile)
+		if segments[len(segments)-1] == "*" {
+			return resolveRustWildcard(segments[:len(segments)-1], moduleDir, importingFile, allPaths)
+		}
+		return resolveRustSegments(segments, moduleDir, pathExists)
+	}
+
+	// External crate (std::, serde::, tokio::, etc.) — not in repo
+	return nil
+}
+
+// resolveRustModDecl resolves a `mod foo;` declaration to a file path.
+// In Rust, `mod foo;` in main.rs/lib.rs/mod.rs looks for foo.rs or foo/mod.rs
+// in the same directory. In other files (bar.rs), it looks under bar/.
+func resolveRustModDecl(modName, importingFile string, pathExists func(string) bool) []string {
+	dir := filepath.Dir(importingFile)
+	base := filepath.Base(importingFile)
+
+	var searchDir string
+	if base == "mod.rs" || base == "main.rs" || base == "lib.rs" {
+		searchDir = dir
+	} else {
+		// foo.rs -> look in foo/ directory
+		searchDir = filepath.Join(dir, strings.TrimSuffix(base, ".rs"))
+	}
+
+	candidates := []string{
+		filepath.Join(searchDir, modName+".rs"),
+		filepath.Join(searchDir, modName, "mod.rs"),
+	}
+	for _, c := range candidates {
+		if pathExists(c) {
+			return []string{c}
+		}
+	}
+	return nil
+}
+
+// resolveRustSegments tries to resolve Rust path segments to a file.
+// The last N segments may be symbols rather than modules, so we try
+// progressively shorter paths.
+// e.g., ["foo", "bar", "Baz"] tries:
+//   - baseDir/foo/bar/Baz.rs, baseDir/foo/bar/Baz/mod.rs
+//   - baseDir/foo/bar.rs, baseDir/foo/bar/mod.rs       (Baz is a symbol in bar)
+//   - baseDir/foo.rs, baseDir/foo/mod.rs                (bar::Baz are symbols in foo)
+func resolveRustSegments(segments []string, baseDir string, pathExists func(string) bool) []string {
+	for i := len(segments); i > 0; i-- {
+		modulePath := filepath.Join(baseDir, filepath.Join(segments[:i]...))
+		candidates := []string{
+			modulePath + ".rs",
+			filepath.Join(modulePath, "mod.rs"),
+		}
+		for _, c := range candidates {
+			if pathExists(c) {
+				return []string{c}
+			}
+		}
+	}
+	return nil
+}
+
+// resolveRustWildcard resolves `use super::*` or `use crate::foo::*` by finding
+// all .rs files in the target directory.
+func resolveRustWildcard(segments []string, baseDir, importingFile string, allPaths []string) []string {
+	// If segments is empty (e.g., `use super::*`), the target is baseDir itself
+	targetDir := baseDir
+	if len(segments) > 0 {
+		targetDir = filepath.Join(baseDir, filepath.Join(segments...))
+	}
+	targetDir = filepath.Clean(targetDir)
+
+	var results []string
+	for _, p := range allPaths {
+		if p == importingFile {
+			continue
+		}
+		if !strings.HasSuffix(p, ".rs") {
+			continue
+		}
+		dir := filepath.Dir(p)
+		// Direct children of targetDir (e.g., src/foo.rs for target src/)
+		if dir == targetDir {
+			results = append(results, p)
+		}
+	}
+	return results
+}
+
+// findRustCrateRoot finds the crate root directory (typically src/) for a file.
+func findRustCrateRoot(filePath string) string {
+	normalized := filepath.ToSlash(filePath)
+	if idx := strings.Index(normalized, "/src/"); idx >= 0 {
+		return normalized[:idx+4] // includes "src"
+	}
+	if strings.HasPrefix(normalized, "src/") {
+		return "src"
+	}
+	// Fallback for non-src layouts (e.g., tests/)
+	return filepath.Dir(filePath)
+}
+
+// rustModuleDir returns the directory that a Rust file "owns" as a module.
+func rustModuleDir(filePath string) string {
+	return filepath.Dir(filePath)
 }
