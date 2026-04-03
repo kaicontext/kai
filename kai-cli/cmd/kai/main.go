@@ -12429,6 +12429,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		// Build pack from missing objects
 		var packObjects []remote.PackObject
 		contentDigestSet := make(map[string]bool)
+		contentDigestPaths := make(map[string]string) // digest -> file path for disk fallback
 
 		for _, digest := range missing {
 			digestHex := hex.EncodeToString(digest)
@@ -12481,24 +12482,46 @@ func runPush(cmd *cobra.Command, args []string) error {
 				Content: content,
 			})
 
-			// For File nodes, also collect the content blob digest
+			// For File nodes, also collect the content blob digest and path
 			if nodeKind == graph.KindFile {
-				// Parse the raw payload to get the digest field
+				// Parse the raw payload to get the digest and path fields
 				var filePayload map[string]interface{}
 				if err := json.Unmarshal(rawPayloadJSON, &filePayload); err == nil {
 					if contentDigest, ok := filePayload["digest"].(string); ok {
 						contentDigestSet[contentDigest] = true
+						// Track path for fallback disk read if blob not in object store
+						if filePath, ok := filePayload["path"].(string); ok {
+							contentDigestPaths[contentDigest] = filePath
+						}
 					}
 				}
 			}
 		}
 
 		// Push content blobs for File nodes
-		// Content blobs are stored with digest = blake3(rawContent), no kind prefix
+		// Content blobs are stored with digest = blake3(rawContent), no kind prefix.
+		// For non-parseable files (svelte, json, yaml, etc.), the content blob
+		// is NOT in the object store — only the digest was computed. In that case,
+		// read the file from disk and push it.
 		for contentDigestHex := range contentDigestSet {
 			contentBytes, err := db.ReadObject(contentDigestHex)
 			if err != nil {
-				continue
+				// Blob not in object store — try reading from disk
+				if filePath, ok := contentDigestPaths[contentDigestHex]; ok {
+					contentBytes, err = os.ReadFile(filePath)
+					if err != nil {
+						debugf("push: cannot read file %s for blob %s: %v", filePath, contentDigestHex[:12], err)
+						continue
+					}
+					// Verify digest matches — file may have changed since capture
+					actualDigest := hex.EncodeToString(util.Blake3Hash(contentBytes))
+					if actualDigest != contentDigestHex {
+						debugf("push: file %s changed since capture (digest mismatch), skipping", filePath)
+						continue
+					}
+				} else {
+					continue
+				}
 			}
 			contentDigest, err := hex.DecodeString(contentDigestHex)
 			if err != nil {
