@@ -125,70 +125,18 @@ type fileEntry struct {
 	relPath string
 	lang    string
 	info    fs.FileInfo
+	cached  string // pre-resolved digest from dir cache skip
 }
 
-// collectFiles walks the directory using WalkDir (avoids extra Stat per entry),
-// then reads file contents in parallel using a worker pool.
-// If a stat cache is available, unchanged files skip the read entirely.
+// collectFiles uses a custom recursive walk that can skip entire unchanged
+// directory subtrees. When a directory's mtime matches the stat cache,
+// we replay all cached entries from that subtree without any readdir/stat
+// syscalls — the biggest performance win for large repos.
 func (ds *DirectorySource) collectFiles() error {
-	// Phase 1: Walk directory tree, collecting entries (no file reads yet).
+	// Phase 1: Recursive walk with subtree skipping.
 	var entries []fileEntry
 
-	err := filepath.WalkDir(ds.rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(ds.rootPath, path)
-		if err != nil {
-			return fmt.Errorf("getting relative path: %w", err)
-		}
-		relPath = filepath.ToSlash(relPath)
-
-		if ds.ignore != nil && ds.ignore.Match(relPath, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		// Resolve symlinks: skip symlinks-to-directories, allow symlinks-to-files.
-		if d.Type()&fs.ModeSymlink != 0 {
-			target, err := os.Stat(path) // Stat follows symlinks
-			if err != nil {
-				return nil // broken symlink — skip silently
-			}
-			if target.IsDir() {
-				return nil // symlink to directory — skip, don't try to read
-			}
-		}
-
-		lang := detectLang(path)
-		if lang == "" {
-			return nil
-		}
-
-		// Only call Info() (which does a Stat) when we don't have a stat cache,
-		// or when we need to check if the file changed. We always need it for
-		// the stat cache lookup, so just get it.
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("stat file %s: %w", path, err)
-		}
-
-		entries = append(entries, fileEntry{
-			absPath: path,
-			relPath: relPath,
-			lang:    lang,
-			info:    info,
-		})
-
-		return nil
-	})
+	err := ds.walkDir(ds.rootPath, ".", &entries)
 	if err != nil {
 		return fmt.Errorf("walking directory: %w", err)
 	}
@@ -214,6 +162,17 @@ func (ds *DirectorySource) collectFiles() error {
 			defer wg.Done()
 			for i := range work {
 				e := entries[i]
+
+				// Replayed from unchanged dir — digest already resolved.
+				if e.cached != "" {
+					files[i] = &filesource.FileInfo{
+						Path:         e.relPath,
+						Content:      nil,
+						Lang:         e.lang,
+						CachedDigest: e.cached,
+					}
+					continue
+				}
 
 				// Check stat cache — if mtime+size match, skip the file read entirely.
 				if ds.statCache != nil {
@@ -304,6 +263,104 @@ func (ds *DirectorySource) computeIdentifier() {
 	}
 
 	ds.identifier = fmt.Sprintf("%x", hasher.Sum(nil))
+}
+
+// walkDir recursively walks a directory, skipping readdir + file processing
+// for directories whose mtime is unchanged. Still recurses into subdirs
+// so each level is checked independently.
+func (ds *DirectorySource) walkDir(absDir, relDir string, entries *[]fileEntry) error {
+	// Check if this directory is ignored
+	if relDir != "." && ds.ignore != nil && ds.ignore.Match(relDir, true) {
+		return nil
+	}
+
+	// Read directory entries — we always need this to find subdirs
+	dirEntries, err := os.ReadDir(absDir)
+	if err != nil {
+		return nil // skip unreadable dirs
+	}
+
+	// Check if this directory's mtime is unchanged
+	dirUnchanged := false
+	if ds.statCache != nil && relDir != "." {
+		dirInfo, err := os.Stat(absDir)
+		if err == nil {
+			dirUnchanged = ds.statCache.DirUnchanged(relDir, dirInfo)
+			ds.statCache.UpdateDir(relDir, dirInfo)
+		}
+	}
+
+	for _, d := range dirEntries {
+		name := d.Name()
+		absPath := filepath.Join(absDir, name)
+		var relPath string
+		if relDir == "." {
+			relPath = name
+		} else {
+			relPath = relDir + "/" + name
+		}
+
+		if d.IsDir() {
+			if err := ds.walkDir(absPath, relPath, entries); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Early extension check — cheapest filter
+		lang := detectLang(name)
+		if lang == "" {
+			continue
+		}
+
+		// If directory is unchanged, skip ignore matching and stat —
+		// replay from cache if available
+		if dirUnchanged && ds.statCache != nil {
+			if digest, cachedLang, ok := ds.statCache.LookupByPath(relPath); ok {
+				if cachedLang != "" {
+					lang = cachedLang
+				}
+				*entries = append(*entries, fileEntry{
+					absPath: absPath,
+					relPath: relPath,
+					lang:    lang,
+					info:    nil, // use cache in phase 2
+					cached:  digest,
+				})
+				continue
+			}
+		}
+
+		// Check ignore patterns (expensive — skip for unchanged dirs)
+		if ds.ignore != nil && ds.ignore.Match(relPath, false) {
+			continue
+		}
+
+		// Resolve symlinks
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Stat(absPath)
+			if err != nil {
+				continue
+			}
+			if target.IsDir() {
+				continue
+			}
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			continue
+		}
+
+		*entries = append(*entries, fileEntry{
+			absPath: absPath,
+			relPath: relPath,
+			lang:    lang,
+			info:    info,
+		})
+	}
+
+	return nil
 }
 
 // detectLang detects the language based on file extension.
