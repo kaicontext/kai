@@ -922,49 +922,74 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		Line      int    `json:"line,omitempty"`
 	}
 
-	symSummaries := make([]symbolSummary, 0, len(symbols))
-	for _, sym := range symbols {
-		info := symbolSummary{}
-		if v, ok := sym.Payload["fqName"].(string); ok {
-			info.Name = v
-		}
-		if v, ok := sym.Payload["kind"].(string); ok {
-			info.Kind = v
-		}
-		if v, ok := sym.Payload["signature"].(string); ok {
-			info.Signature = v
-		}
-		if r, ok := sym.Payload["range"].(map[string]interface{}); ok {
-			if line, ok := r["startLine"].(float64); ok {
-				info.Line = int(line)
+	if symbolName != "" {
+		// Focused mode: return only the requested symbol + its callers/callees
+		result["focus_symbol"] = symbolName
+		result["total_symbols"] = len(symbols)
+
+		for _, sym := range symbols {
+			name, _ := sym.Payload["fqName"].(string)
+			parts := strings.Split(name, ".")
+			bare := name
+			if len(parts) > 0 {
+				bare = parts[len(parts)-1]
+			}
+			if name == symbolName || bare == symbolName {
+				info := symbolSummary{Name: name}
+				if v, ok := sym.Payload["kind"].(string); ok {
+					info.Kind = v
+				}
+				if v, ok := sym.Payload["signature"].(string); ok {
+					info.Signature = v
+				}
+				if r, ok := sym.Payload["range"].(map[string]interface{}); ok {
+					if line, ok := r["startLine"].(float64); ok {
+						info.Line = int(line)
+					}
+				}
+				result["symbol"] = info
+				break
 			}
 		}
-		symSummaries = append(symSummaries, info)
-	}
-	result["symbols"] = symSummaries
 
-	// If a specific symbol is requested, get its callers and callees
-	if symbolName != "" {
 		symNode, err := s.findSymbolByName(snapID, fileNode.ID, symbolName)
 		if err == nil {
-			// Callers
 			callerEdges, err := s.db.GetEdgesTo(symNode.ID, graph.EdgeCalls)
 			if err == nil {
 				callers, _ := s.edgesToSymbolLocations(callerEdges, true)
 				result["callers"] = callers
 			}
-
-			// Callees
 			calleeEdges, err := s.db.GetEdges(symNode.ID, graph.EdgeCalls)
 			if err == nil {
 				callees, _ := s.edgesToSymbolLocations(calleeEdges, false)
 				result["callees"] = callees
 			}
 		}
-		result["focus_symbol"] = symbolName
+	} else {
+		// Summary mode: cap symbols
+		const maxSymbols = 50
+		shown := len(symbols)
+		if shown > maxSymbols {
+			shown = maxSymbols
+		}
+		symSummaries := make([]symbolSummary, 0, shown)
+		for _, sym := range symbols[:shown] {
+			info := symbolSummary{}
+			if v, ok := sym.Payload["fqName"].(string); ok {
+				info.Name = v
+			}
+			if v, ok := sym.Payload["kind"].(string); ok {
+				info.Kind = v
+			}
+			symSummaries = append(symSummaries, info)
+		}
+		result["symbols"] = symSummaries
+		if len(symbols) > maxSymbols {
+			result["symbols_total"] = len(symbols)
+		}
 	}
 
-	const maxContextItems = 200
+	const maxContextItems = 50
 
 	// Dependencies (what this file imports)
 	importEdges, err := s.db.GetEdges(fileNode.ID, graph.EdgeImports)
@@ -1113,8 +1138,8 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		}
 	}
 
-	// Cap output to avoid overwhelming MCP clients with huge responses
-	const maxItems = 200
+	// Cap output to stay within MCP client token limits
+	const maxItems = 50
 	var b strings.Builder
 	fmt.Fprintf(&b, "impact of %s (depth %d): %d affected\n", filePath, maxDepth, len(results))
 	if len(sourceFiles) > 0 {
@@ -1443,9 +1468,9 @@ func textResult(text string) (*mcp.CallToolResult, error) {
 }
 
 // formatPathList renders a labeled list of file paths as compact text.
-// Caps output at 200 items to avoid overwhelming MCP clients.
+// Caps output at 50 items to stay within MCP client token limits.
 func formatPathList(label string, paths []string) string {
-	const maxItems = 200
+	const maxItems = 50
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s\n", len(paths), label)
 	shown := len(paths)
