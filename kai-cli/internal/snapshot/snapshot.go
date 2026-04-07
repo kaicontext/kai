@@ -1460,16 +1460,33 @@ func (c *Creator) GetSnapshotFiles(snapshotID []byte) ([]*graph.Node, error) {
 }
 
 // GetSymbolsInFile returns all symbols defined in a file for a given snapshot context.
+// Falls back to any snapshot's DEFINES_IN edges if the exact snapshot has none,
+// since symbols don't change when the file content is unchanged across captures.
 func (c *Creator) GetSymbolsInFile(fileID, snapshotID []byte) ([]*graph.Node, error) {
-	// Query edges where Symbol DEFINES_IN File with the given snapshot context
-	// Uses targeted query instead of scanning all edges for the context
+	// Try exact snapshot context first
 	edges, err := c.db.GetEdgesByContextAndDst(snapshotID, graph.EdgeDefinesIn, fileID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Fallback: if no DEFINES_IN edges for this snapshot, find edges from ANY snapshot.
+	// This handles the case where a file is unchanged across captures — the DEFINES_IN
+	// edges exist with the original snapshot ID, not the latest one.
+	if len(edges) == 0 {
+		edges, err = c.db.GetEdgesByDst(graph.EdgeDefinesIn, fileID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	symbols := make([]*graph.Node, 0, len(edges))
+	seen := make(map[string]bool)
 	for _, edge := range edges {
+		key := string(edge.Src)
+		if seen[key] {
+			continue // dedupe across snapshots
+		}
+		seen[key] = true
 		node, err := c.db.GetNode(edge.Src)
 		if err != nil {
 			return nil, err

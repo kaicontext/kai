@@ -606,6 +606,28 @@ func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, err
 	return edges, rows.Err()
 }
 
+// GetEdgesByDst returns all edges of a given type pointing to dst (any context).
+func (db *DB) GetEdgesByDst(edgeType EdgeType, dst []byte) ([]*Edge, error) {
+	rows, err := db.conn.Query(`
+		SELECT src, dst, at, created_at FROM edges WHERE type = ? AND dst = ?
+	`, string(edgeType), dst)
+	if err != nil {
+		return nil, fmt.Errorf("querying edges by dst: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var src, d, at []byte
+		var createdAt int64
+		if err := rows.Scan(&src, &d, &at, &createdAt); err != nil {
+			return nil, err
+		}
+		edges = append(edges, &Edge{Src: src, Type: edgeType, Dst: d, At: at, CreatedAt: createdAt})
+	}
+	return edges, rows.Err()
+}
+
 // BatchGetImportersOf finds all files that import any of the given file paths.
 // Returns a map: source file path -> true (the set of all importers).
 // Single SQL query instead of N queries — critical for BFS impact analysis.
