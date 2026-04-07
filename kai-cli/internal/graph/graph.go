@@ -105,8 +105,9 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 	// Auto-create schema if this is a fresh database (no nodes table)
 	db.ensureSchema()
 
-	// Auto-migrate: ensure authorship table exists on every open
+	// Auto-migrate
 	db.migrateAuthorship()
+	db.migratePathIndex()
 
 	return db, nil
 }
@@ -131,6 +132,7 @@ func (db *DB) ApplySchema(schemaPath string) error {
 	// Run migrations
 	db.migrateEdgesPK()
 	db.migrateAuthorship()
+	db.migratePathIndex()
 
 	return nil
 }
@@ -998,6 +1000,15 @@ CREATE TABLE IF NOT EXISTS ref_log (
 CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name);
 CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
 	`)
+}
+
+// migratePathIndex creates an index on json_extract(payload, '$.path') for File nodes.
+// This makes GetEdgesToByPath queries fast on large repos (64K+ nodes).
+func (db *DB) migratePathIndex() {
+	// Composite index on (type, dst) for edge lookups by type + destination
+	db.conn.Exec(`CREATE INDEX IF NOT EXISTS edges_type_dst ON edges(type, dst)`)
+	// Expression index on file path for fast path-based joins
+	db.conn.Exec(`CREATE INDEX IF NOT EXISTS nodes_file_path ON nodes(json_extract(payload, '$.path')) WHERE kind = 'File'`)
 }
 
 // --- Authorship ---
