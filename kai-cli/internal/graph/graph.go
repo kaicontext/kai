@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 
@@ -601,6 +602,51 @@ func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, err
 	}
 
 	return edges, rows.Err()
+}
+
+// BatchGetImportersOf finds all files that import any of the given file paths.
+// Returns a map: source file path -> true (the set of all importers).
+// Single SQL query instead of N queries — critical for BFS impact analysis.
+func (db *DB) BatchGetImportersOf(filePaths []string, edgeType EdgeType) (map[string]bool, error) {
+	if len(filePaths) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholders
+	placeholders := make([]string, len(filePaths))
+	args := make([]interface{}, 0, len(filePaths)+1)
+	args = append(args, string(edgeType))
+	for i, p := range filePaths {
+		placeholders[i] = "?"
+		args = append(args, p)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT json_extract(src_n.payload, '$.path')
+		FROM edges e
+		JOIN nodes dst_n ON e.dst = dst_n.id
+		JOIN nodes src_n ON e.src = src_n.id
+		WHERE e.type = ?
+		AND dst_n.kind = 'File'
+		AND src_n.kind = 'File'
+		AND json_extract(dst_n.payload, '$.path') IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch querying importers: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var srcPath string
+		if err := rows.Scan(&srcPath); err != nil {
+			continue
+		}
+		result[srcPath] = true
+	}
+	return result, rows.Err()
 }
 
 // UpdateNodePayload updates the payload of an existing node.

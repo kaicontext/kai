@@ -1045,54 +1045,37 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 	var results []impactEntry
 
 	for hop := 1; hop <= maxDepth && len(frontier) > 0; hop++ {
-		var nextFrontier []string
-		for _, current := range frontier {
-			// Find files that import the current file
-			edges, err := s.db.GetEdgesToByPath(current, graph.EdgeImports)
-			if err != nil {
-				continue
-			}
-			for _, edge := range edges {
-				node, err := s.db.GetNode(edge.Src)
-				if err != nil || node == nil {
-					continue
-				}
-				path, ok := node.Payload["path"].(string)
-				if !ok {
-					continue
-				}
-				if _, already := visited[path]; already {
-					continue
-				}
-				visited[path] = hop
-				entry := impactEntry{Path: path, Hop: hop, IsTest: isTestFile(path)}
-				results = append(results, entry)
-				nextFrontier = append(nextFrontier, path)
-			}
-
-			// Also follow CALLS edges at file level
-			callEdges, err := s.db.GetEdgesToByPath(current, graph.EdgeCalls)
-			if err != nil {
-				continue
-			}
-			for _, edge := range callEdges {
-				node, err := s.db.GetNode(edge.Src)
-				if err != nil || node == nil {
-					continue
-				}
-				path, ok := node.Payload["path"].(string)
-				if !ok {
-					continue
-				}
-				if _, already := visited[path]; already {
-					continue
-				}
-				visited[path] = hop
-				entry := impactEntry{Path: path, Hop: hop, IsTest: isTestFile(path)}
-				results = append(results, entry)
-				nextFrontier = append(nextFrontier, path)
-			}
+		// Batch query: find all files that import ANY file in the frontier
+		importers, err := s.db.BatchGetImportersOf(frontier, graph.EdgeImports)
+		if err != nil {
+			importers = make(map[string]bool)
 		}
+
+		// Also batch query CALLS edges
+		callers, err := s.db.BatchGetImportersOf(frontier, graph.EdgeCalls)
+		if err != nil {
+			callers = make(map[string]bool)
+		}
+
+		// Merge and dedupe
+		var nextFrontier []string
+		for path := range importers {
+			if _, already := visited[path]; already {
+				continue
+			}
+			visited[path] = hop
+			results = append(results, impactEntry{Path: path, Hop: hop, IsTest: isTestFile(path)})
+			nextFrontier = append(nextFrontier, path)
+		}
+		for path := range callers {
+			if _, already := visited[path]; already {
+				continue
+			}
+			visited[path] = hop
+			results = append(results, impactEntry{Path: path, Hop: hop, IsTest: isTestFile(path)})
+			nextFrontier = append(nextFrontier, path)
+		}
+
 		frontier = nextFrontier
 	}
 
@@ -1113,18 +1096,34 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 		}
 	}
 
+	// Cap output to avoid overwhelming MCP clients with huge responses
+	const maxItems = 200
 	var b strings.Builder
 	fmt.Fprintf(&b, "impact of %s (depth %d): %d affected\n", filePath, maxDepth, len(results))
 	if len(sourceFiles) > 0 {
+		shown := len(sourceFiles)
+		if shown > maxItems {
+			shown = maxItems
+		}
 		fmt.Fprintf(&b, "\naffected files (%d):\n", len(sourceFiles))
-		for _, f := range sourceFiles {
+		for _, f := range sourceFiles[:shown] {
 			fmt.Fprintf(&b, "  hop%d %s\n", f.Hop, f.Path)
+		}
+		if len(sourceFiles) > maxItems {
+			fmt.Fprintf(&b, "  ... and %d more\n", len(sourceFiles)-maxItems)
 		}
 	}
 	if len(testFiles) > 0 {
+		shown := len(testFiles)
+		if shown > maxItems {
+			shown = maxItems
+		}
 		fmt.Fprintf(&b, "\naffected tests (%d):\n", len(testFiles))
-		for _, f := range testFiles {
+		for _, f := range testFiles[:shown] {
 			fmt.Fprintf(&b, "  hop%d %s\n", f.Hop, f.Path)
+		}
+		if len(testFiles) > maxItems {
+			fmt.Fprintf(&b, "  ... and %d more\n", len(testFiles)-maxItems)
 		}
 	}
 	return textResult(b.String())
