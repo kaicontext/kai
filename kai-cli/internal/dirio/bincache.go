@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"unsafe"
 )
 
 // BinCache is a memory-mapped binary stat cache.
@@ -113,22 +112,22 @@ func (bc *BinCache) dirEntryOffset(i int) int {
 	return headerSize + bc.fileCount*fileEntrySize + i*dirEntrySize
 }
 
-// filePath returns the path string for file entry i without allocation.
+// filePath returns the path string for file entry i.
+// Returns a proper Go string (copied from mmap'd data) that's safe
+// to use after the mmap is closed.
 func (bc *BinCache) filePath(i int) string {
 	off := bc.fileEntryOffset(i)
 	pathOff := int(binary.LittleEndian.Uint32(bc.data[off : off+4]))
 	pathLen := int(binary.LittleEndian.Uint16(bc.data[off+4 : off+6]))
-	b := bc.data[bc.strTableOff+pathOff : bc.strTableOff+pathOff+pathLen]
-	return *(*string)(unsafe.Pointer(&b)) // zero-alloc string from byte slice
+	return string(bc.data[bc.strTableOff+pathOff : bc.strTableOff+pathOff+pathLen])
 }
 
-// dirPath returns the path string for dir entry i without allocation.
+// dirPath returns the path string for dir entry i.
 func (bc *BinCache) dirPath(i int) string {
 	off := bc.dirEntryOffset(i)
 	pathOff := int(binary.LittleEndian.Uint32(bc.data[off : off+4]))
 	pathLen := int(binary.LittleEndian.Uint16(bc.data[off+4 : off+6]))
-	b := bc.data[bc.strTableOff+pathOff : bc.strTableOff+pathOff+pathLen]
-	return *(*string)(unsafe.Pointer(&b))
+	return string(bc.data[bc.strTableOff+pathOff : bc.strTableOff+pathOff+pathLen])
 }
 
 // LookupFile binary-searches for a file path. Returns mtime, size, digest, lang, ok.
