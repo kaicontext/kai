@@ -964,6 +964,8 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		result["focus_symbol"] = symbolName
 	}
 
+	const maxContextItems = 200
+
 	// Dependencies (what this file imports)
 	importEdges, err := s.db.GetEdges(fileNode.ID, graph.EdgeImports)
 	if err == nil {
@@ -978,7 +980,12 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 			}
 		}
 		sort.Strings(deps)
-		result["dependencies"] = deps
+		if len(deps) > maxContextItems {
+			result["dependencies"] = deps[:maxContextItems]
+			result["dependencies_total"] = len(deps)
+		} else {
+			result["dependencies"] = deps
+		}
 	}
 
 	// Dependents (what imports this file)
@@ -997,7 +1004,12 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 			}
 		}
 		sort.Strings(dependents)
-		result["dependents"] = dependents
+		if len(dependents) > maxContextItems {
+			result["dependents"] = dependents[:maxContextItems]
+			result["dependents_total"] = len(dependents)
+		} else {
+			result["dependents"] = dependents
+		}
 	}
 
 	// Tests
@@ -1016,7 +1028,12 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 			}
 		}
 		sort.Strings(tests)
-		result["tests"] = tests
+		if len(tests) > maxContextItems {
+			result["tests"] = tests[:maxContextItems]
+			result["tests_total"] = len(tests)
+		} else {
+			result["tests"] = tests
+		}
 	}
 
 	return jsonResult(result)
@@ -1426,12 +1443,21 @@ func textResult(text string) (*mcp.CallToolResult, error) {
 }
 
 // formatPathList renders a labeled list of file paths as compact text.
+// Caps output at 200 items to avoid overwhelming MCP clients.
 func formatPathList(label string, paths []string) string {
+	const maxItems = 200
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d %s\n", len(paths), label)
-	for _, p := range paths {
+	shown := len(paths)
+	if shown > maxItems {
+		shown = maxItems
+	}
+	for _, p := range paths[:shown] {
 		b.WriteString(p)
 		b.WriteByte('\n')
+	}
+	if len(paths) > maxItems {
+		fmt.Fprintf(&b, "... and %d more\n", len(paths)-maxItems)
 	}
 	return b.String()
 }
