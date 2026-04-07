@@ -2,6 +2,7 @@
 package dirio
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"os"
@@ -16,6 +17,7 @@ type StatCache struct {
 	Entries  map[string]*StatEntry `json:"entries"`
 	DirTimes map[string]int64     `json:"dirTimes,omitempty"` // dir path -> mtime (UnixNano)
 	mu       sync.RWMutex
+	bin      *BinCache // mmap'd binary cache for fast reads
 }
 
 // StatEntry holds cached stat info and content digest for one file.
@@ -27,11 +29,19 @@ type StatEntry struct {
 }
 
 // LoadStatCache loads the stat cache from disk, or returns an empty cache.
-// Tries gob format first (fast), falls back to JSON (legacy).
+// Tries binary mmap first (fastest), then gob, then JSON (legacy).
 func LoadStatCache(kaiDir string) *StatCache {
 	sc := &StatCache{Entries: make(map[string]*StatEntry), DirTimes: make(map[string]int64)}
 
-	// Try gob format first
+	// Try binary mmap first — zero-allocation reads
+	if bc := LoadBinCache(kaiDir); bc != nil {
+		sc.bin = bc
+		// Don't load entries into maps — the binary cache handles reads.
+		// Maps will be populated lazily as entries are updated.
+		return sc
+	}
+
+	// Try gob format
 	gobPath := filepath.Join(kaiDir, "statcache.gob")
 	if f, err := os.Open(gobPath); err == nil {
 		defer f.Close()
@@ -60,31 +70,74 @@ func LoadStatCache(kaiDir string) *StatCache {
 	return sc
 }
 
-// Save writes the stat cache to disk in gob format.
-// Removes legacy JSON file if present.
+// Save writes the stat cache in binary format.
+// Merges any entries from the mmap'd binary cache into the maps first,
+// then writes the combined result. Removes legacy files.
 func (sc *StatCache) Save(kaiDir string) error {
-	sc.mu.RLock()
-	defer sc.mu.RUnlock()
+	// If we loaded from binary cache, merge its entries into maps
+	// so the write includes everything (existing + new/updated).
+	if sc.bin != nil {
+		for i := 0; i < sc.bin.fileCount; i++ {
+			path := sc.bin.filePath(i)
+			// Only add if not already overridden in the map
+			sc.mu.RLock()
+			_, exists := sc.Entries[path]
+			sc.mu.RUnlock()
+			if !exists {
+				off := sc.bin.fileEntryOffset(i)
+				mtime := int64(binary.LittleEndian.Uint64(sc.bin.data[off+6 : off+14]))
+				size := int64(binary.LittleEndian.Uint64(sc.bin.data[off+14 : off+22]))
+				digest := hexEncode(sc.bin.data[off+22 : off+54])
+				lang := langStrings[sc.bin.data[off+54]]
+				sc.mu.Lock()
+				sc.Entries[path] = &StatEntry{ModTime: mtime, Size: size, Digest: digest, Lang: lang}
+				sc.mu.Unlock()
+			}
+		}
+		for i := 0; i < sc.bin.dirCount; i++ {
+			path := sc.bin.dirPath(i)
+			sc.mu.RLock()
+			_, exists := sc.DirTimes[path]
+			sc.mu.RUnlock()
+			if !exists {
+				off := sc.bin.dirEntryOffset(i)
+				mtime := int64(binary.LittleEndian.Uint64(sc.bin.data[off+6 : off+14]))
+				sc.mu.Lock()
+				sc.DirTimes[path] = mtime
+				sc.mu.Unlock()
+			}
+		}
+		sc.bin.Close()
+		sc.bin = nil
+	}
 
-	gobPath := filepath.Join(kaiDir, "statcache.gob")
-	f, err := os.Create(gobPath)
+	err := WriteBinCache(kaiDir, sc)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	if err := gob.NewEncoder(f).Encode(sc); err != nil {
-		return err
-	}
-
-	// Clean up legacy JSON file
+	// Clean up legacy files
 	os.Remove(filepath.Join(kaiDir, "statcache.json"))
+	os.Remove(filepath.Join(kaiDir, "statcache.gob"))
 	return nil
 }
 
 // Lookup checks if a file's stat matches the cache. Returns the cached digest
 // and true if the file is unchanged, or ("", false) if it needs re-reading.
 func (sc *StatCache) Lookup(relPath string, info os.FileInfo) (string, string, bool) {
+	// Try binary cache first (zero allocation)
+	if sc.bin != nil {
+		mtime, size, digest, lang, ok := sc.bin.LookupFile(relPath)
+		if ok {
+			cachedTime := time.Unix(0, mtime).Truncate(time.Microsecond)
+			fileTime := info.ModTime().Truncate(time.Microsecond)
+			if cachedTime.Equal(fileTime) && size == info.Size() {
+				return digest, lang, true
+			}
+		}
+		return "", "", false
+	}
+
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	entry, ok := sc.Entries[relPath]
@@ -101,6 +154,14 @@ func (sc *StatCache) Lookup(relPath string, info os.FileInfo) (string, string, b
 
 // LookupByPath checks if a file exists in the cache by path only.
 func (sc *StatCache) LookupByPath(relPath string) (string, string, bool) {
+	if sc.bin != nil {
+		_, _, digest, lang, ok := sc.bin.LookupFile(relPath)
+		if ok {
+			return digest, lang, true
+		}
+		// Also check map (for newly added entries this session)
+	}
+
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	entry, ok := sc.Entries[relPath]
@@ -135,6 +196,16 @@ func (sc *StatCache) Prune(currentPaths map[string]bool) {
 
 // DirUnchanged checks if a directory's mtime matches the cache.
 func (sc *StatCache) DirUnchanged(relPath string, info os.FileInfo) bool {
+	if sc.bin != nil {
+		cached, ok := sc.bin.LookupDir(relPath)
+		if ok {
+			cachedTime := time.Unix(0, cached).Truncate(time.Microsecond)
+			dirTime := info.ModTime().Truncate(time.Microsecond)
+			return cachedTime.Equal(dirTime)
+		}
+		return false
+	}
+
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	cached, ok := sc.DirTimes[relPath]
