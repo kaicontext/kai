@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"lukechampine.com/blake3"
 
 	"kai/internal/dirio"
 	"kai/internal/graph"
@@ -35,6 +36,11 @@ type Watcher struct {
 	pending   map[string]fsnotify.Op
 	pendingMu sync.Mutex
 	timer     *time.Timer
+
+	// Cached file map from snapshot (lazy loaded)
+	fileMapOnce sync.Once
+	fileMap     map[string][]byte // path -> file node ID
+	exportMap   map[string]string // exported symbol name -> file path
 
 	// Callbacks
 	OnUpdate func(path string, op string) // called after each file is processed
@@ -212,21 +218,33 @@ func (w *Watcher) processPending() {
 
 // handleDelete removes a file's symbols and edges from the graph.
 func (w *Watcher) handleDelete(relPath string) {
-	// Find the file node by path
+	w.ensureFileMap()
+
 	fileNode := w.findFileByPath(relPath)
 	if fileNode == nil {
 		return
 	}
 
-	// Delete DEFINES_IN edges where this file is the destination
+	// Delete all edges involving this file
 	w.db.DeleteEdgesByDst(graph.EdgeDefinesIn, fileNode.ID)
-	// Delete IMPORTS edges where this file is the source
 	w.db.DeleteEdgesBySrc(graph.EdgeImports, fileNode.ID)
-	// Delete CALLS edges where this file is the source
+	w.db.DeleteEdgesByDst(graph.EdgeImports, fileNode.ID)
 	w.db.DeleteEdgesBySrc(graph.EdgeCalls, fileNode.ID)
-	// Delete TESTS edges involving this file
+	w.db.DeleteEdgesByDst(graph.EdgeCalls, fileNode.ID)
 	w.db.DeleteEdgesBySrc(graph.EdgeTests, fileNode.ID)
 	w.db.DeleteEdgesByDst(graph.EdgeTests, fileNode.ID)
+	// Delete HAS_FILE edge from snapshot
+	w.db.DeleteEdgesByDst(graph.EdgeHasFile, fileNode.ID)
+
+	// Remove from file map
+	delete(w.fileMap, relPath)
+
+	// Remove from export map
+	for name, path := range w.exportMap {
+		if path == relPath {
+			delete(w.exportMap, name)
+		}
+	}
 
 	if w.OnUpdate != nil {
 		w.OnUpdate(relPath, "delete")
@@ -259,15 +277,32 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 		return
 	}
 
-	// Find existing file node
+	// Find existing file node or create one for new files
 	fileNode := w.findFileByPath(relPath)
 	if fileNode == nil {
-		// New file — we can't create a proper file node without a snapshot context.
-		// The file will be picked up on the next kai capture.
-		if w.OnUpdate != nil {
-			w.OnUpdate(relPath, "new (pending capture)")
+		// New file — create a file node and add it to the file map
+		w.ensureFileMap()
+		snapID := w.getLatestSnapshotID()
+		if snapID == nil {
+			return
 		}
-		return
+
+		digest := fmt.Sprintf("%x", blake3.Sum256(content))
+		payload := map[string]interface{}{
+			"path":   relPath,
+			"lang":   lang,
+			"digest": digest,
+		}
+		fileID, err := w.db.InsertNode(nil, graph.KindFile, payload)
+		if err != nil || fileID == nil {
+			return
+		}
+
+		// Link to snapshot
+		w.db.InsertEdgeDirect(snapID, graph.EdgeHasFile, fileID, snapID)
+		w.fileMap[relPath] = fileID
+
+		fileNode = &graph.Node{ID: fileID, Kind: graph.KindFile, Payload: payload}
 	}
 
 	// Parse symbols
@@ -312,14 +347,107 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 		w.db.DeleteEdgesBySrc(graph.EdgeImports, fileNode.ID)
 		w.db.DeleteEdgesBySrc(graph.EdgeCalls, fileNode.ID)
 
-		// Re-resolve imports (simplified — full resolution needs all files)
-		// For now, just clear the old edges. Full re-resolution happens on next capture.
-		_ = callsParsed
+		// Resolve imports against the file map
+		w.ensureFileMap()
+		for _, imp := range callsParsed.Imports {
+			resolved := w.resolveImport(imp, relPath, lang)
+			for _, targetPath := range resolved {
+				if targetID, ok := w.fileMap[targetPath]; ok {
+					w.db.InsertEdgeDirect(fileNode.ID, graph.EdgeImports, targetID, snapID)
+				}
+			}
+		}
+
+		// Resolve calls against exports in imported files
+		importedPaths := make(map[string]bool)
+		importEdges, _ := w.db.GetEdges(fileNode.ID, graph.EdgeImports)
+		for _, e := range importEdges {
+			node, _ := w.db.GetNode(e.Dst)
+			if node != nil {
+				if p, ok := node.Payload["path"].(string); ok {
+					importedPaths[p] = true
+				}
+			}
+		}
+
+		for _, call := range callsParsed.Calls {
+			calleeName := call.CalleeName
+			// Strip scope prefix (Rust: Analyzer::analyze -> analyze)
+			if idx := strings.LastIndex(calleeName, "::"); idx >= 0 {
+				calleeName = calleeName[idx+2:]
+			}
+			// Strip receiver prefix (Go: pkg.Function -> Function)
+			if idx := strings.LastIndex(calleeName, "."); idx >= 0 {
+				calleeName = calleeName[idx+1:]
+			}
+
+			// Check exports in imported files
+			if targetPath, ok := w.exportMap[calleeName]; ok {
+				if importedPaths[targetPath] || targetPath != relPath {
+					if targetID, ok := w.fileMap[targetPath]; ok {
+						w.db.InsertEdgeDirect(fileNode.ID, graph.EdgeCalls, targetID, snapID)
+					}
+				}
+			}
+		}
+
+		// Update exports for this file
+		for _, exp := range callsParsed.Exports {
+			w.exportMap[exp] = relPath
+		}
 	}
 
 	if w.OnUpdate != nil {
 		w.OnUpdate(relPath, "updated")
 	}
+}
+
+// ensureFileMap lazily loads the file map from the latest snapshot.
+func (w *Watcher) ensureFileMap() {
+	w.fileMapOnce.Do(func() {
+		w.fileMap = make(map[string][]byte)
+		w.exportMap = make(map[string]string)
+
+		snapID := w.getLatestSnapshotID()
+		if snapID == nil {
+			return
+		}
+
+		// Get all files from snapshot
+		edges, err := w.db.GetEdges(snapID, graph.EdgeHasFile)
+		if err != nil {
+			return
+		}
+
+		for _, edge := range edges {
+			node, err := w.db.GetNode(edge.Dst)
+			if err != nil || node == nil {
+				continue
+			}
+			path, _ := node.Payload["path"].(string)
+			if path != "" {
+				w.fileMap[path] = edge.Dst
+			}
+		}
+
+		// Build export map from existing symbols
+		for path, fileID := range w.fileMap {
+			edges, err := w.db.GetEdgesByDst(graph.EdgeDefinesIn, fileID)
+			if err != nil {
+				continue
+			}
+			for _, edge := range edges {
+				symNode, err := w.db.GetNode(edge.Src)
+				if err != nil || symNode == nil {
+					continue
+				}
+				name, _ := symNode.Payload["fqName"].(string)
+				if name != "" {
+					w.exportMap[name] = path
+				}
+			}
+		}
+	})
 }
 
 // findFileByPath finds a file node by its path in the graph.
@@ -340,6 +468,67 @@ func (w *Watcher) getLatestSnapshotID() []byte {
 		return nil
 	}
 	return id
+}
+
+// resolveImport resolves an import to file paths using the cached file map.
+func (w *Watcher) resolveImport(imp *parse.Import, importingFile, lang string) []string {
+	w.ensureFileMap()
+	pathExists := func(p string) bool {
+		_, ok := w.fileMap[p]
+		return ok
+	}
+
+	switch lang {
+	case "go":
+		// Go: match package path suffix against known directories
+		if !strings.Contains(imp.Source, "/") {
+			return nil // stdlib
+		}
+		parts := strings.Split(imp.Source, "/")
+		for i := 0; i < len(parts); i++ {
+			suffix := strings.Join(parts[i:], "/")
+			for path := range w.fileMap {
+				dir := filepath.Dir(path)
+				if strings.HasSuffix(dir, suffix) && filepath.Dir(importingFile) != dir {
+					return []string{path}
+				}
+			}
+		}
+	case "rs":
+		// Rust: crate::, super::, self::, mod:
+		if strings.HasPrefix(imp.Source, "crate::") {
+			path := strings.TrimPrefix(imp.Source, "crate::")
+			segments := strings.Split(path, "::")
+			for i := len(segments); i > 0; i-- {
+				candidate := "src/" + filepath.Join(segments[:i]...) + ".rs"
+				if pathExists(candidate) {
+					return []string{candidate}
+				}
+				candidate = "src/" + filepath.Join(segments[:i]...) + "/mod.rs"
+				if pathExists(candidate) {
+					return []string{candidate}
+				}
+			}
+		}
+	default:
+		// JS/TS/Python/Ruby: relative imports
+		if imp.IsRelative {
+			dir := filepath.Dir(importingFile)
+			base := filepath.Join(dir, imp.Source)
+			for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".py", ".rb"} {
+				if pathExists(base + ext) {
+					return []string{base + ext}
+				}
+			}
+			// index files
+			for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx", "/index.jsx"} {
+				if pathExists(base + idx) {
+					return []string{base + idx}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // normalizeLang converts long language names to short forms.
