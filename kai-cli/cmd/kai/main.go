@@ -16244,9 +16244,26 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	downloadURL := fmt.Sprintf("https://github.com/kaicontext/kai/releases/latest/download/%s.gz", binaryName)
 
 	fmt.Printf("Current version: %s\n", Version)
-	fmt.Printf("Binary: %s\n", binaryName)
 
-	// Check if binary is available
+	// Check latest version from GitHub API
+	latestResp, err := http.Get("https://api.github.com/repos/kaicontext/kai/releases/latest")
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+	defer latestResp.Body.Close()
+	var releaseInfo struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(latestResp.Body).Decode(&releaseInfo); err == nil && releaseInfo.TagName != "" {
+		latestVersion := strings.TrimPrefix(releaseInfo.TagName, "v")
+		if latestVersion == Version {
+			fmt.Printf("Already on the latest version (%s)\n", Version)
+			return nil
+		}
+		fmt.Printf("Latest version:  %s\n", latestVersion)
+	}
+
+	// Check if binary is available (may not be uploaded yet if release just created)
 	resp, err := http.Head(downloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to check for updates: %w", err)
@@ -16254,8 +16271,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		fmt.Printf("No binary available for %s/%s\n", goos, goarch)
-		fmt.Println("Try: go install github.com/kaicontext/kai/kai-cli/cmd/kai@latest")
+		fmt.Println("Binary not available yet — the release build may still be in progress.")
+		fmt.Println("Try again in a minute, or install from source:")
+		fmt.Println("  go install github.com/kaicontext/kai/kai-cli/cmd/kai@latest")
 		return nil
 	}
 
@@ -16263,7 +16281,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unexpected status checking for updates: %d", resp.StatusCode)
 	}
 
-	fmt.Println("Update available!")
+	fmt.Println("Downloading update...")
 
 	if checkOnly {
 		fmt.Printf("Download URL: %s\n", downloadURL)
