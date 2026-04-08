@@ -25,6 +25,7 @@ import (
 	"kai/internal/graph"
 	"kai/internal/module"
 	"kai/internal/ref"
+	"kai/internal/remote"
 	"kai/internal/snapshot"
 	"kai/internal/watcher"
 )
@@ -156,6 +157,26 @@ func (s *Server) startWatcher(db *graph.DB) {
 
 	w.OnError = func(err error) {
 		// Silently ignore watcher errors — don't break MCP
+	}
+
+	// Wire activity heartbeats to the server (best-effort)
+	if client, err := remote.NewClientForRemote("origin"); err == nil {
+		agentName := s.agentName
+		if agentName == "" {
+			agentName = "mcp-client"
+		}
+		w.OnActivity = func(entries []watcher.ActivityEntry) {
+			var files []remote.ActivityFile
+			for _, e := range entries {
+				files = append(files, remote.ActivityFile{
+					Path:      e.Path,
+					Operation: e.Operation,
+					Timestamp: e.Timestamp.UnixMilli(),
+				})
+			}
+			// Fire-and-forget — don't block the watcher
+			go client.PushActivity(agentName, files)
+		}
 	}
 
 	if err := w.Start(); err != nil {
