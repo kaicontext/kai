@@ -26,6 +26,7 @@ import (
 	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/snapshot"
+	"kai/internal/watcher"
 )
 
 // --- Initialization State ---
@@ -68,6 +69,8 @@ type Server struct {
 	sessionID    string                       // unique per MCP process lifetime
 	agentName    string                       // detected from MCP client (e.g. "claude-code")
 	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
+	// Live graph watcher
+	fileWatcher  *watcher.Watcher
 }
 
 // NewServer creates a new MCP server for the given project directory.
@@ -142,6 +145,28 @@ func (s *Server) Serve(ctx context.Context) error {
 	return server.ServeStdio(srv)
 }
 
+// startWatcher starts the file watcher for live graph updates.
+// Runs in the background — file changes are automatically reflected in MCP queries.
+func (s *Server) startWatcher(db *graph.DB) {
+	w, err := watcher.New(s.workDir, db)
+	if err != nil {
+		// Non-fatal: watcher is a nice-to-have
+		return
+	}
+
+	w.OnError = func(err error) {
+		// Silently ignore watcher errors — don't break MCP
+	}
+
+	if err := w.Start(); err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.fileWatcher = w
+	s.mu.Unlock()
+}
+
 // writeSessionFile records that an MCP session is active.
 // kai capture reads this to auto-attribute changes to the AI agent.
 // Uses PID in filename to avoid conflicts when multiple Claude windows are open.
@@ -186,6 +211,10 @@ func (s *Server) removeSessionFile() {
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.fileWatcher != nil {
+		s.fileWatcher.Stop()
+		s.fileWatcher = nil
+	}
 	if s.db != nil {
 		return s.db.Close()
 	}
@@ -322,6 +351,9 @@ func (s *Server) runInit(job *initState) {
 		job.phase = phaseFinalizing
 		job.message = "Ready (existing snapshot found)"
 		s.mu.Unlock()
+
+		// Auto-start file watcher for live graph updates
+		s.startWatcher(db)
 		return
 	}
 
@@ -404,6 +436,9 @@ func (s *Server) runInit(job *initState) {
 	s.snap = snapshot.NewCreator(db, nil)
 	job.message = fmt.Sprintf("Kai index ready (%d files)", len(files))
 	s.mu.Unlock()
+
+	// Auto-start file watcher for live graph updates
+	s.startWatcher(db)
 }
 
 // initProgressLocked returns a structured "initializing" MCP response.
