@@ -119,9 +119,7 @@ func (p *Parser) Parse(content []byte, lang string) (*ParsedFile, error) {
 		parser = p.csParser
 		extractFn = extractCSharpSymbols
 	default:
-		// Default to JavaScript parser for unknown languages
-		parser = p.jsParser
-		extractFn = extractSymbols
+		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 
 	tree, err := parser.ParseCtx(context.Background(), nil, content)
