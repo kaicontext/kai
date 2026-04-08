@@ -4365,6 +4365,28 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		debugf("git metadata: sha=%s author=%s msg=%s", snapMeta["git.sha"], snapMeta["git.author"], snapMeta["git.message"])
 	}
 
+	// Add change summary to meta
+	if changeSummary != nil && changeSummary.hasChanges {
+		if snapMeta == nil {
+			snapMeta = make(map[string]string)
+		}
+		snapMeta["changes.files"] = fmt.Sprintf("%d", changeSummary.filesChanged)
+
+		// Count changes by type for a brief summary
+		if len(changeSummary.changeTypes) > 0 {
+			buckets := bucketChangeTypes(changeSummary.changeTypes)
+			var parts []string
+			for _, bucket := range []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract} {
+				if paths := buckets[bucket]; len(paths) > 0 {
+					parts = append(parts, fmt.Sprintf("%d %s", len(paths), strings.ToLower(string(bucket))))
+				}
+			}
+			if len(parts) > 0 {
+				snapMeta["changes.summary"] = strings.Join(parts, ", ")
+			}
+		}
+	}
+
 	// Always update snap.latest (like git commit updates HEAD)
 	if err := autoRefMgr.OnSnapshotCreatedWithMeta(snapshotID, snapMeta); err != nil {
 		debugf("warning: failed to update refs: %v", err)
@@ -9776,9 +9798,22 @@ func runLog(cmd *cobra.Command, args []string) error {
 		// Date
 		fmt.Printf("Date:    %s\n", timestamp)
 
-		// Files
+		// Files + changes
 		if fileCount != "" {
-			fmt.Printf("Files:   %s\n", fileCount)
+			changesFiles := ""
+			changesSummary := ""
+			if r.Meta != nil {
+				changesFiles = r.Meta["changes.files"]
+				changesSummary = r.Meta["changes.summary"]
+			}
+			if changesFiles != "" {
+				fmt.Printf("Files:   %s (%s modified)\n", fileCount, changesFiles)
+			} else {
+				fmt.Printf("Files:   %s\n", fileCount)
+			}
+			if changesSummary != "" {
+				fmt.Printf("Changes: %s\n", changesSummary)
+			}
 		}
 
 		// Message
