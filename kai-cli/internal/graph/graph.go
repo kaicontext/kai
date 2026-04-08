@@ -608,6 +608,49 @@ func (db *DB) GetEdgesToByPath(filePath string, edgeType EdgeType) ([]*Edge, err
 	return edges, rows.Err()
 }
 
+// DeleteEdgesBySrc deletes all edges of a given type from a source node.
+func (db *DB) DeleteEdgesBySrc(edgeType EdgeType, src []byte) error {
+	_, err := db.conn.Exec(`DELETE FROM edges WHERE type = ? AND src = ?`, string(edgeType), src)
+	return err
+}
+
+// DeleteEdgesByDst deletes all edges of a given type to a destination node.
+func (db *DB) DeleteEdgesByDst(edgeType EdgeType, dst []byte) error {
+	_, err := db.conn.Exec(`DELETE FROM edges WHERE type = ? AND dst = ?`, string(edgeType), dst)
+	return err
+}
+
+// DeleteEdgesByTypeAndDst deletes all edges of a given type pointing to dst.
+func (db *DB) DeleteEdgesByTypeAndDst(edgeType EdgeType, dst []byte) error {
+	return db.DeleteEdgesByDst(edgeType, dst)
+}
+
+// FindNodesByPayloadPath finds File nodes by their path field.
+func (db *DB) FindNodesByPayloadPath(kind string, path string) ([]*Node, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, kind, payload, created_at FROM nodes WHERE kind = ? AND json_extract(payload, '$.path') = ?`,
+		kind, path,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nodes []*Node
+	for rows.Next() {
+		var id []byte
+		var nodeKind, payloadJSON string
+		var createdAt int64
+		if err := rows.Scan(&id, &nodeKind, &payloadJSON, &createdAt); err != nil {
+			continue
+		}
+		var payload map[string]interface{}
+		json.Unmarshal([]byte(payloadJSON), &payload)
+		nodes = append(nodes, &Node{ID: id, Kind: NodeKind(nodeKind), Payload: payload, CreatedAt: createdAt})
+	}
+	return nodes, rows.Err()
+}
+
 // GetEdgesByDst returns all edges of a given type pointing to dst (any context).
 func (db *DB) GetEdgesByDst(edgeType EdgeType, dst []byte) ([]*Edge, error) {
 	rows, err := db.conn.Query(`

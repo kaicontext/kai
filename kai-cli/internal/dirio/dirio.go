@@ -364,6 +364,11 @@ func (ds *DirectorySource) walkDir(absDir, relDir string, entries *[]fileEntry) 
 }
 
 // detectLang detects the language based on file extension.
+// DetectLang detects the language based on file extension.
+func DetectLang(path string) string {
+	return detectLang(path)
+}
+
 func detectLang(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
