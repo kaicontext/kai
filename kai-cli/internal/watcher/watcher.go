@@ -47,8 +47,9 @@ type Watcher struct {
 	activity   []ActivityEntry
 
 	// Callbacks
-	OnUpdate func(path string, op string) // called after each file is processed
-	OnError  func(err error)
+	OnUpdate   func(path string, op string) // called after each file is processed
+	OnError    func(err error)
+	OnActivity func(entries []ActivityEntry) // called periodically with recent activity (for server push)
 
 	stop chan struct{}
 	done chan struct{}
@@ -134,6 +135,10 @@ func (w *Watcher) Stop() {
 func (w *Watcher) eventLoop() {
 	defer close(w.done)
 
+	// Periodically push activity to callbacks (every 30 seconds)
+	activityTicker := time.NewTicker(30 * time.Second)
+	defer activityTicker.Stop()
+
 	for {
 		select {
 		case <-w.stop:
@@ -151,6 +156,14 @@ func (w *Watcher) eventLoop() {
 			}
 			if w.OnError != nil {
 				w.OnError(err)
+			}
+
+		case <-activityTicker.C:
+			if w.OnActivity != nil {
+				entries := w.GetActivity()
+				if len(entries) > 0 {
+					w.OnActivity(entries)
+				}
 			}
 		}
 	}

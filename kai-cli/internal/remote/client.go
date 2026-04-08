@@ -1511,3 +1511,45 @@ func (c *ControlClient) ListCISecrets(org, repo string) ([]string, error) {
 	}
 	return names, nil
 }
+
+// ActivityFile represents a file in an activity heartbeat.
+type ActivityFile struct {
+	Path      string `json:"path"`
+	Operation string `json:"op"`
+	Timestamp int64  `json:"ts"`
+}
+
+// PushActivity sends an activity heartbeat to the server.
+func (c *Client) PushActivity(agent string, files []ActivityFile) error {
+	req := struct {
+		Agent string         `json:"agent"`
+		Actor string         `json:"actor"`
+		Files []ActivityFile `json:"files"`
+	}{Agent: agent, Actor: c.Actor, Files: files}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshaling activity: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/activity", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("sending activity: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("activity heartbeat failed: %d", resp.StatusCode)
+	}
+	return nil
+}
