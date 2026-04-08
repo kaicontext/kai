@@ -66,6 +66,7 @@ type Server struct {
 	initJob  *initState         // non-nil while background init is running
 	// Authorship tracking
 	sessionID    string                       // unique per MCP process lifetime
+	agentName    string                       // detected from MCP client (e.g. "claude-code")
 	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
 }
 
@@ -134,7 +135,46 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	s.registerTools(srv)
 
+	// Write MCP session file so kai capture can detect active AI sessions
+	s.writeSessionFile()
+	defer s.removeSessionFile()
+
 	return server.ServeStdio(srv)
+}
+
+// writeSessionFile records that an MCP session is active.
+// kai capture reads this to auto-attribute changes to the AI agent.
+func (s *Server) writeSessionFile() {
+	sessionData := map[string]interface{}{
+		"pid":       os.Getpid(),
+		"sessionId": s.sessionID,
+		"startedAt": time.Now().UnixMilli(),
+		"updatedAt": time.Now().UnixMilli(),
+		"agent":     "mcp-client", // default; could detect from clientInfo
+	}
+	data, _ := json.Marshal(sessionData)
+	os.MkdirAll(s.kaiDir, 0755)
+	os.WriteFile(filepath.Join(s.kaiDir, "mcp-session.json"), data, 0644)
+}
+
+// touchSessionFile updates the timestamp to show the session is still active.
+func (s *Server) touchSessionFile() {
+	path := filepath.Join(s.kaiDir, "mcp-session.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var session map[string]interface{}
+	if json.Unmarshal(data, &session) == nil {
+		session["updatedAt"] = time.Now().UnixMilli()
+		updated, _ := json.Marshal(session)
+		os.WriteFile(path, updated, 0644)
+	}
+}
+
+// removeSessionFile cleans up when the MCP server exits.
+func (s *Server) removeSessionFile() {
+	os.Remove(filepath.Join(s.kaiDir, "mcp-session.json"))
 }
 
 // Close cleans up resources.
@@ -197,6 +237,8 @@ func (s *Server) ensureReady() (*mcp.CallToolResult, bool) {
 
 	// Fast path: already initialized
 	if s.db != nil {
+		// Touch session file to show activity (non-blocking)
+		go s.touchSessionFile()
 		return nil, true
 	}
 

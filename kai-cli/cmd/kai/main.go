@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -3686,6 +3687,90 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 }
 
 // printInitFinish prints the final success message.
+// autoAttributeFromMCPSession checks if an MCP session was active when this
+// capture was triggered (e.g., AI agent made edits, then git commit hook ran).
+// If so, auto-creates authorship checkpoints for changed files.
+func autoAttributeFromMCPSession(kaiDir, workDir string) {
+	sessionPath := filepath.Join(kaiDir, "mcp-session.json")
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		return // no active session
+	}
+
+	var session map[string]interface{}
+	if err := json.Unmarshal(data, &session); err != nil {
+		return
+	}
+
+	// Check if session was updated recently (within 5 minutes)
+	updatedAt, ok := session["updatedAt"].(float64)
+	if !ok {
+		return
+	}
+	age := time.Since(time.UnixMilli(int64(updatedAt)))
+	if age > 5*time.Minute {
+		debugf("MCP session too old (%v), skipping auto-attribution", age)
+		return
+	}
+
+	// Check if the MCP process is still running
+	if pid, ok := session["pid"].(float64); ok {
+		process, err := os.FindProcess(int(pid))
+		if err != nil || process.Signal(syscall.Signal(0)) != nil {
+			debugf("MCP session process not running, skipping auto-attribution")
+			return
+		}
+	}
+
+	agentName, _ := session["agent"].(string)
+	if agentName == "" {
+		agentName = "ai-agent"
+	}
+	sessionID, _ := session["sessionId"].(string)
+
+	// Get changed files from git (staged changes about to be committed)
+	changedOutput, err := exec.Command("git", "-C", workDir, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		// Try unstaged changes
+		changedOutput, err = exec.Command("git", "-C", workDir, "diff", "--name-only", "HEAD").Output()
+		if err != nil {
+			return
+		}
+	}
+
+	changed := strings.TrimSpace(string(changedOutput))
+	if changed == "" {
+		return
+	}
+
+	files := strings.Split(changed, "\n")
+	debugf("Auto-attributing %d files to AI agent %s (session %s)", len(files), agentName, sessionID)
+
+	writer := authorship.NewCheckpointWriter(kaiDir, sessionID)
+	for _, file := range files {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			continue
+		}
+		// Count lines in the file for the range
+		content, err := os.ReadFile(filepath.Join(workDir, file))
+		if err != nil {
+			continue
+		}
+		lineCount := strings.Count(string(content), "\n") + 1
+		writer.Write(authorship.CheckpointRecord{
+			File:       file,
+			StartLine:  1,
+			EndLine:    lineCount,
+			Action:     "modify",
+			AuthorType: "ai",
+			Agent:      agentName,
+			SessionID:  sessionID,
+			Timestamp:  time.Now().UnixMilli(),
+		})
+	}
+}
+
 func printInitFinish(isGitRepo, hasClaude bool) {
 	fmt.Println()
 	fmt.Println("╭─────────────────────────────────────────────────────────────")
@@ -4201,6 +4286,12 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		if te != nil {
 			te.SetPhase("analyze", time.Since(phaseStart).Milliseconds())
 		}
+	}
+
+	// Auto-detect AI authorship: if an MCP session is active, attribute
+	// changed files to the AI agent without requiring kai_checkpoint calls.
+	if !skipAnalysis {
+		autoAttributeFromMCPSession(kaiDir, capturePath)
 	}
 
 	// Step 4: Consolidate authorship checkpoints (if any exist)
