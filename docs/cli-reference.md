@@ -7,18 +7,26 @@ Detailed documentation for all Kai commands, concepts, and workflows.
 ## Key Concepts
 
 ### Snapshots
-A **snapshot** is a semantic capture of your codebase at a specific Git ref (branch, tag, or commit). Unlike a Git commit which stores file diffs, a snapshot stores:
-- Supported source/config files with their content hashes (e.g., .go, .ts/.tsx, .js/.jsx, .json, .yaml/.yml, .sql, .proto, .graphql/.gql, .toml)
-- Parsed symbol information (functions, classes, variables)
+A **snapshot** is a semantic capture of your codebase at a specific point in time. Unlike a Git commit which stores file diffs, a snapshot stores:
+- Supported source/config files with their content hashes
+- Parsed symbol information (functions, classes, methods, structs, traits, interfaces)
+- Dependency edges (imports between files)
+- Call graph edges (function calls across files)
+- Test coverage edges (which test files cover which source files)
 - Module associations based on path patterns
 
-### Symbols
-**Symbols** are the semantic units extracted from your code:
-- **Functions**: Named functions, arrow functions, methods
-- **Classes**: Class declarations with their methods
-- **Variables**: Constants and variable declarations
+Snapshots are content-addressed: same files = same snapshot ID. Git metadata (commit SHA, message, author, branch) is auto-captured on the snapshot ref, not the payload, so content-addressing is preserved.
 
-Each symbol includes its name, kind, source range, and signature.
+### Symbols
+**Symbols** are the semantic units extracted from your code via tree-sitter:
+- **Functions**: Named functions, arrow functions, methods, impl methods
+- **Classes/Structs/Enums**: Class declarations, Go structs, Rust enums
+- **Interfaces/Traits**: Go interfaces, Rust traits
+- **Variables/Constants**: Constants, statics, variable declarations
+- **Modules**: Go packages, Rust modules, Ruby modules
+- **Macros**: Rust macro definitions
+
+Each symbol includes its name, kind, source range, and signature. Supported languages: Go, Rust, TypeScript, JavaScript, Python, Ruby, SQL, PHP, C#.
 
 ### ChangeSets
 A **changeset** represents the semantic difference between two snapshots:
@@ -1071,7 +1079,7 @@ Changes since last snapshot:
 
 ### `kai log`
 
-Show chronological log of snapshots and changesets.
+Show chronological log of snapshots, like `git log`. Each entry shows the git commit metadata (SHA, message, author, branch) that was active when the snapshot was captured.
 
 ```bash
 kai log [flags]
@@ -1079,11 +1087,36 @@ kai log [flags]
 
 **Flags:**
 - `-n, --limit <count>` - Number of entries to show (default: 10)
+- `--oneline` - Compact one-line format
+- `--author <name>` - Filter by author name or email
+- `--grep <text>` - Search commit messages
+- `--since <date>` - Show snapshots after date (e.g. `"2 weeks ago"`, `"2026-04-01"`)
+- `--until <date>` - Show snapshots before date (e.g. `"yesterday"`)
+- `--stat` - Show file changes per snapshot
 
-**Example:**
+**Examples:**
 ```bash
-kai log -n 5
+kai log                            # Last 10 snapshots
+kai log -n 20                      # Last 20
+kai log --oneline                  # Compact format
+kai log --author="Jacob"           # Filter by author
+kai log --grep="auth"              # Search messages
+kai log --since="2 weeks ago"      # Date range
+kai log --oneline --grep="fix"     # Combine flags
 ```
+
+**Output:**
+```
+snap db2b1d0b (git ed111dc, main)
+Author:  Jacob Schatz <jschatz@fastmail.com>
+Date:    2026-04-08 11:09:05
+Files:   211 files (3 modified)
+Changes: 1 structural, 3 behavioral
+
+    Bump version to 0.9.65
+```
+
+Git metadata is auto-captured on every `kai capture` — no configuration needed.
 
 ---
 
@@ -1300,6 +1333,7 @@ kai diff [base-ref] [head-ref] [flags]
 
 **Flags:**
 - `-p, --patch` - Show line-level diff (like git diff) with colors
+- `--stat` - Show diffstat summary (files changed, insertions, deletions)
 - `--semantic` - Show semantic diff (default)
 - `--json` - Output diff as JSON
 - `--name-only` - Output just paths with status prefixes (A/M/D)
@@ -1310,6 +1344,9 @@ kai diff [base-ref] [head-ref] [flags]
 ```bash
 # Semantic diff - last snapshot vs working directory (default)
 kai diff
+
+# Diffstat like git diff --stat
+kai diff --stat
 
 # Line-level diff like git (with colors)
 kai diff -p

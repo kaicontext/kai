@@ -144,7 +144,7 @@ Each language is validated with [end-to-end tests](kai-e2e/) against real open-s
 | **PHP** | functions, classes, methods | — | — | — | — | — |
 | **C#** | functions, classes, methods | — | — | — | — | — |
 
-67 E2E tests across Go and Rust, all passing. Run them with:
+92 E2E tests across Go, Rust, and push completeness, all passing. Run them with:
 
 ```bash
 cd kai-e2e && ./scripts/run-tests.sh

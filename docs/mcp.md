@@ -79,19 +79,34 @@ kai mcp serve
 
 ## Tools
 
+### Semantic Graph Tools
+
 | Tool | Description |
 |------|-------------|
-| `kai_symbols` | List symbols in a file (functions, classes, methods). Filter by kind or exported status. |
+| `kai_symbols` | List symbols in a file (functions, classes, structs, traits, methods, macros). Filter by `kind` or `exported`. |
 | `kai_callers` | Find all callers of a symbol. Walks CALLS edges — more accurate than grep. |
 | `kai_callees` | Find all symbols called by a symbol. |
 | `kai_dependents` | Find files that import/depend on a file. "What breaks if I change this?" |
 | `kai_dependencies` | Find files a file imports. "What does this file need?" |
-| `kai_tests` | Find test files covering a source file. Uses static analysis and coverage data. |
-| `kai_diff` | Semantic diff between two snapshots/refs. Symbol-level changes, not line diffs. |
-| `kai_context` | Bundled context for a file/symbol: callers, callees, tests, dependencies in one call. |
-| `kai_impact` | Transitive downstream impact analysis with hop distance. |
-| `kai_status` | Check graph freshness: last capture time, branch, stale files. |
-| `kai_refresh` | Re-capture the semantic graph. Supports full or staged-only scope. |
+| `kai_tests` | Find test files covering a source file. Uses import graph + filename patterns. |
+| `kai_context` | Bundled context for a file/symbol: callers, callees, tests, dependencies in one call. When a symbol is specified, returns only that symbol's info (not all symbols in the file). |
+| `kai_impact` | Transitive downstream impact analysis with hop distance. Uses batch SQL queries for performance on large repos. |
+
+### AI Authorship Tools
+
+| Tool | Description |
+|------|-------------|
+| `kai_checkpoint` | Record an AI edit event (file, line range, agent, model). Usually auto-detected — see below. |
+| `kai_blame` | Show AI vs human authorship for a file. Per-line ranges or summary percentages. |
+| `kai_stats` | Project-wide AI vs human authorship statistics with per-agent breakdowns. |
+
+### Auto AI Authorship Detection
+
+When an MCP session is active and `kai capture` runs (via the pre-commit hook), Kai automatically attributes changed files to the AI agent. No `kai_checkpoint` calls needed. The MCP server writes a session file that `kai capture` checks — if the session was active within the last 5 minutes, changed files are auto-attributed.
+
+### Output Limits
+
+All list outputs are capped at 50 items by default to stay within MCP client token limits. Total counts are always shown (e.g., `"dependents_total": 725`). `kai_context` in focused mode (with a `symbol` parameter) returns only the focused symbol's info instead of all symbols in the file.
 
 ## Lazy Initialization
 
