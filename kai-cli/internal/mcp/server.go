@@ -72,6 +72,9 @@ type Server struct {
 	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
 	// Live graph watcher
 	fileWatcher  *watcher.Watcher
+	// Overlap warnings from server
+	warningsMu   sync.RWMutex
+	warnings     []remote.OverlapWarning
 }
 
 // NewServer creates a new MCP server for the given project directory.
@@ -159,7 +162,7 @@ func (s *Server) startWatcher(db *graph.DB) {
 		// Silently ignore watcher errors — don't break MCP
 	}
 
-	// Wire activity heartbeats to the server (best-effort)
+	// Wire activity heartbeats and edge deltas to the server (best-effort)
 	if client, err := remote.NewClientForRemote("origin"); err == nil {
 		agentName := s.agentName
 		if agentName == "" {
@@ -167,15 +170,44 @@ func (s *Server) startWatcher(db *graph.DB) {
 		}
 		w.OnActivity = func(entries []watcher.ActivityEntry) {
 			var files []remote.ActivityFile
+			var editedPaths []string
 			for _, e := range entries {
 				files = append(files, remote.ActivityFile{
 					Path:      e.Path,
 					Operation: e.Operation,
 					Timestamp: e.Timestamp.UnixMilli(),
 				})
+				editedPaths = append(editedPaths, e.Path)
 			}
+			// Compute related files from local graph (1-hop)
+			relatedFiles := w.GetRelatedFiles(editedPaths)
 			// Fire-and-forget — don't block the watcher
-			go client.PushActivity(agentName, files)
+			go func() {
+				warnings, _ := client.PushActivity(agentName, files, relatedFiles)
+				if len(warnings) > 0 {
+					s.warningsMu.Lock()
+					s.warnings = warnings
+					s.warningsMu.Unlock()
+				}
+			}()
+		}
+		w.OnEdgeDeltas = func(updates []watcher.EdgeUpdate) {
+			var remoteUpdates []remote.IncrementalEdgeUpdate
+			for _, u := range updates {
+				ru := remote.IncrementalEdgeUpdate{File: u.File}
+				for _, e := range u.AddedEdges {
+					ru.AddedEdges = append(ru.AddedEdges, remote.EdgeDelta{
+						Src: e.Src, Type: e.Type, Dst: e.Dst,
+					})
+				}
+				for _, e := range u.RemovedEdges {
+					ru.RemovedEdges = append(ru.RemovedEdges, remote.EdgeDelta{
+						Src: e.Src, Type: e.Type, Dst: e.Dst,
+					})
+				}
+				remoteUpdates = append(remoteUpdates, ru)
+			}
+			go client.PushEdgesIncremental(remoteUpdates)
 		}
 	}
 
@@ -1818,9 +1850,20 @@ func (s *Server) handleActivity(ctx context.Context, req mcp.CallToolRequest) (*
 		files = append(files, fileActivity{Path: e.Path, Op: e.Operation, Ago: ago})
 	}
 
-	return jsonResult(map[string]interface{}{
+	result := map[string]interface{}{
 		"status":     "active",
 		"file_count": len(files),
 		"files":      files,
-	})
+	}
+
+	// Include overlap warnings from the server
+	s.warningsMu.RLock()
+	warnings := s.warnings
+	s.warningsMu.RUnlock()
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
+		result["warning_count"] = len(warnings)
+	}
+
+	return jsonResult(result)
 }

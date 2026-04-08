@@ -1519,22 +1519,33 @@ type ActivityFile struct {
 	Timestamp int64  `json:"ts"`
 }
 
+// OverlapWarning indicates another agent is editing files related to yours.
+type OverlapWarning struct {
+	Agent     string `json:"agent"`
+	Actor     string `json:"actor"`
+	File      string `json:"file"`
+	RelatedTo string `json:"relatedTo"`
+	Relation  string `json:"relation"`
+}
+
 // PushActivity sends an activity heartbeat to the server.
-func (c *Client) PushActivity(agent string, files []ActivityFile) error {
+// Returns any overlap warnings detected by the server.
+func (c *Client) PushActivity(agent string, files []ActivityFile, relatedFiles []string) ([]OverlapWarning, error) {
 	req := struct {
-		Agent string         `json:"agent"`
-		Actor string         `json:"actor"`
-		Files []ActivityFile `json:"files"`
-	}{Agent: agent, Actor: c.Actor, Files: files}
+		Agent        string         `json:"agent"`
+		Actor        string         `json:"actor"`
+		Files        []ActivityFile `json:"files"`
+		RelatedFiles []string       `json:"relatedFiles,omitempty"`
+	}{Agent: agent, Actor: c.Actor, Files: files, RelatedFiles: relatedFiles}
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshaling activity: %w", err)
+		return nil, fmt.Errorf("marshaling activity: %w", err)
 	}
 
 	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/activity", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
@@ -1544,12 +1555,69 @@ func (c *Client) PushActivity(agent string, files []ActivityFile) error {
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("sending activity: %w", err)
+		return nil, fmt.Errorf("sending activity: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("activity heartbeat failed: %d", resp.StatusCode)
+		return nil, fmt.Errorf("activity heartbeat failed: %d", resp.StatusCode)
 	}
-	return nil
+
+	var result struct {
+		OK       bool             `json:"ok"`
+		Warnings []OverlapWarning `json:"warnings,omitempty"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Warnings, nil
+}
+
+// EdgeDelta represents a single edge to add or remove.
+type EdgeDelta struct {
+	Src  string `json:"src"`  // hex node ID
+	Type string `json:"type"` // IMPORTS, CALLS, TESTS, DEFINES_IN
+	Dst  string `json:"dst"`  // hex node ID
+}
+
+// IncrementalEdgeUpdate represents edge changes for a single file.
+type IncrementalEdgeUpdate struct {
+	File         string      `json:"file"`
+	AddedEdges   []EdgeDelta `json:"added_edges,omitempty"`
+	RemovedEdges []EdgeDelta `json:"removed_edges,omitempty"`
+}
+
+// PushEdgesIncremental sends edge deltas to the server.
+func (c *Client) PushEdgesIncremental(updates []IncrementalEdgeUpdate) (int, error) {
+	req := struct {
+		Updates []IncrementalEdgeUpdate `json:"updates"`
+	}{Updates: updates}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling edge deltas: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/edges/incremental", bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return 0, fmt.Errorf("sending edge deltas: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("edge delta push failed: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Applied int `json:"applied"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Applied, nil
 }

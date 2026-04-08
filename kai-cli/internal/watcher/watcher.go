@@ -46,10 +46,15 @@ type Watcher struct {
 	activityMu sync.RWMutex
 	activity   []ActivityEntry
 
+	// Edge delta tracking — accumulated since last push
+	edgeDeltaMu sync.Mutex
+	edgeDeltas  map[string]*EdgeUpdate // file path -> accumulated deltas
+
 	// Callbacks
-	OnUpdate   func(path string, op string) // called after each file is processed
-	OnError    func(err error)
-	OnActivity func(entries []ActivityEntry) // called periodically with recent activity (for server push)
+	OnUpdate     func(path string, op string)     // called after each file is processed
+	OnError      func(err error)
+	OnActivity   func(entries []ActivityEntry)     // called periodically with recent activity (for server push)
+	OnEdgeDeltas func(updates []EdgeUpdate)        // called periodically with accumulated edge deltas
 
 	stop chan struct{}
 	done chan struct{}
@@ -165,6 +170,12 @@ func (w *Watcher) eventLoop() {
 					w.OnActivity(entries)
 				}
 			}
+			if w.OnEdgeDeltas != nil {
+				deltas := w.flushEdgeDeltas()
+				if len(deltas) > 0 {
+					w.OnEdgeDeltas(deltas)
+				}
+			}
 		}
 	}
 }
@@ -233,6 +244,33 @@ func (w *Watcher) processPending() {
 	}
 }
 
+// collectEdgesForFile gathers all edges involving a file node (for delta tracking).
+func (w *Watcher) collectEdgesForFile(fileID []byte) []EdgeDelta {
+	var deltas []EdgeDelta
+	hexID := fmt.Sprintf("%x", fileID)
+
+	for _, et := range []graph.EdgeType{graph.EdgeImports, graph.EdgeCalls, graph.EdgeTests} {
+		// Edges from this file
+		edges, _ := w.db.GetEdges(fileID, et)
+		for _, e := range edges {
+			deltas = append(deltas, EdgeDelta{Src: hexID, Type: string(et), Dst: fmt.Sprintf("%x", e.Dst)})
+		}
+		// Edges to this file
+		edges, _ = w.db.GetEdgesByDst(et, fileID)
+		for _, e := range edges {
+			deltas = append(deltas, EdgeDelta{Src: fmt.Sprintf("%x", e.Src), Type: string(et), Dst: hexID})
+		}
+	}
+
+	// DEFINES_IN edges pointing to this file
+	edges, _ := w.db.GetEdgesByDst(graph.EdgeDefinesIn, fileID)
+	for _, e := range edges {
+		deltas = append(deltas, EdgeDelta{Src: fmt.Sprintf("%x", e.Src), Type: string(graph.EdgeDefinesIn), Dst: hexID})
+	}
+
+	return deltas
+}
+
 // handleDelete removes a file's symbols and edges from the graph.
 func (w *Watcher) handleDelete(relPath string) {
 	w.ensureFileMap()
@@ -241,6 +279,9 @@ func (w *Watcher) handleDelete(relPath string) {
 	if fileNode == nil {
 		return
 	}
+
+	// Capture edges before deletion for delta tracking
+	removedEdges := w.collectEdgesForFile(fileNode.ID)
 
 	// Delete all edges involving this file
 	w.db.DeleteEdgesByDst(graph.EdgeDefinesIn, fileNode.ID)
@@ -252,6 +293,9 @@ func (w *Watcher) handleDelete(relPath string) {
 	w.db.DeleteEdgesByDst(graph.EdgeTests, fileNode.ID)
 	// Delete HAS_FILE edge from snapshot
 	w.db.DeleteEdgesByDst(graph.EdgeHasFile, fileNode.ID)
+
+	// Record edge deltas
+	w.recordEdgeDelta(relPath, nil, removedEdges)
 
 	// Remove from file map
 	delete(w.fileMap, relPath)
@@ -328,6 +372,9 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 	if err != nil {
 		return
 	}
+
+	// Capture old edges before deletion (for delta tracking)
+	oldEdges := w.collectEdgesForFile(fileNode.ID)
 
 	// Delete old DEFINES_IN edges for this file
 	w.db.DeleteEdgesByTypeAndDst(graph.EdgeDefinesIn, fileNode.ID)
@@ -414,6 +461,11 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 			w.exportMap[exp] = relPath
 		}
 	}
+
+	// Compute edge deltas: diff old vs new edges
+	newEdges := w.collectEdgesForFile(fileNode.ID)
+	added, removed := diffEdges(oldEdges, newEdges)
+	w.recordEdgeDelta(relPath, added, removed)
 
 	// Determine if this was a create or modify
 	op := "modified"
@@ -540,6 +592,125 @@ func (w *Watcher) recordActivity(path, op string) {
 		}
 	}
 	w.activity = w.activity[:i]
+}
+
+// EdgeDelta represents a single edge to add or remove.
+type EdgeDelta struct {
+	Src  string // hex node ID
+	Type string // IMPORTS, CALLS, TESTS, DEFINES_IN
+	Dst  string // hex node ID
+}
+
+// EdgeUpdate represents edge changes for a single file.
+type EdgeUpdate struct {
+	File         string
+	AddedEdges   []EdgeDelta
+	RemovedEdges []EdgeDelta
+}
+
+// recordEdgeDelta records an edge addition or removal for a file.
+func (w *Watcher) recordEdgeDelta(filePath string, added, removed []EdgeDelta) {
+	if len(added) == 0 && len(removed) == 0 {
+		return
+	}
+	w.edgeDeltaMu.Lock()
+	defer w.edgeDeltaMu.Unlock()
+
+	if w.edgeDeltas == nil {
+		w.edgeDeltas = make(map[string]*EdgeUpdate)
+	}
+
+	update, ok := w.edgeDeltas[filePath]
+	if !ok {
+		update = &EdgeUpdate{File: filePath}
+		w.edgeDeltas[filePath] = update
+	}
+	update.AddedEdges = append(update.AddedEdges, added...)
+	update.RemovedEdges = append(update.RemovedEdges, removed...)
+}
+
+// flushEdgeDeltas returns and clears accumulated edge deltas.
+func (w *Watcher) flushEdgeDeltas() []EdgeUpdate {
+	w.edgeDeltaMu.Lock()
+	defer w.edgeDeltaMu.Unlock()
+
+	if len(w.edgeDeltas) == 0 {
+		return nil
+	}
+
+	updates := make([]EdgeUpdate, 0, len(w.edgeDeltas))
+	for _, u := range w.edgeDeltas {
+		updates = append(updates, *u)
+	}
+	w.edgeDeltas = nil
+	return updates
+}
+
+// diffEdges computes added and removed edges between old and new sets.
+func diffEdges(old, new []EdgeDelta) (added, removed []EdgeDelta) {
+	type edgeKey struct{ src, typ, dst string }
+
+	oldSet := make(map[edgeKey]bool, len(old))
+	for _, e := range old {
+		oldSet[edgeKey{e.Src, e.Type, e.Dst}] = true
+	}
+
+	newSet := make(map[edgeKey]bool, len(new))
+	for _, e := range new {
+		k := edgeKey{e.Src, e.Type, e.Dst}
+		newSet[k] = true
+		if !oldSet[k] {
+			added = append(added, e)
+		}
+	}
+
+	for _, e := range old {
+		if !newSet[edgeKey{e.Src, e.Type, e.Dst}] {
+			removed = append(removed, e)
+		}
+	}
+	return
+}
+
+// GetRelatedFiles returns file paths connected to the given files via edges (1-hop).
+func (w *Watcher) GetRelatedFiles(editedPaths []string) []string {
+	w.ensureFileMap()
+
+	related := make(map[string]bool)
+	for _, path := range editedPaths {
+		fileID, ok := w.fileMap[path]
+		if !ok {
+			continue
+		}
+		// Get files this file imports/calls/tests
+		for _, et := range []graph.EdgeType{graph.EdgeImports, graph.EdgeCalls, graph.EdgeTests} {
+			edges, _ := w.db.GetEdges(fileID, et)
+			for _, e := range edges {
+				node, _ := w.db.GetNode(e.Dst)
+				if node != nil {
+					if p, ok := node.Payload["path"].(string); ok && p != path {
+						related[p] = true
+					}
+				}
+			}
+			// Get files that import/call/test this file
+			edges, _ = w.db.GetEdgesByDst(et, fileID)
+			for _, e := range edges {
+				node, _ := w.db.GetNode(e.Src)
+				if node != nil {
+					if p, ok := node.Payload["path"].(string); ok && p != path {
+						related[p] = true
+					}
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0, len(related))
+	for p := range related {
+		result = append(result, p)
+	}
+	return result
 }
 
 // resolveImport resolves an import to file paths using the cached file map.
