@@ -4316,8 +4316,33 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	existingLatestRef, _ := ref.NewRefManager(db).Get("snap.latest")
 	skipAnalysis := existingLatestRef != nil && bytes.Equal(snapshotID, existingLatestRef.TargetID)
 
+	// Also skip analysis if the MCP file watcher is active — it already
+	// updated symbols and edges incrementally. This makes kai capture a
+	// fast checkpoint (~500ms) instead of a full re-analyze.
+	if !skipAnalysis {
+		entries, _ := os.ReadDir(kaiDir)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "mcp-session-") && strings.HasSuffix(e.Name(), ".json") {
+				data, err := os.ReadFile(filepath.Join(kaiDir, e.Name()))
+				if err == nil {
+					var session map[string]interface{}
+					if json.Unmarshal(data, &session) == nil {
+						if updatedAt, ok := session["updatedAt"].(float64); ok {
+							age := time.Since(time.UnixMilli(int64(updatedAt)))
+							if age < 2*time.Minute {
+								debugf("MCP watcher active (session %s, %v ago), skipping analysis", e.Name(), age.Round(time.Second))
+								skipAnalysis = true
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if skipAnalysis {
-		debugf("Snapshot unchanged, skipping analysis")
+		debugf("Snapshot unchanged or watcher active, skipping analysis")
 	} else {
 		// Step 2: Analyze symbols + build call graph (single pass)
 		debugf("Step 2/2: Analyzing...")
