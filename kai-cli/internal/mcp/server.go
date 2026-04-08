@@ -640,6 +640,15 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		),
 		log("kai_stats", s.handleStats),
 	)
+
+	// kai_activity — show recent file changes (live graph activity)
+	srv.AddTool(
+		mcp.NewTool("kai_activity",
+			readOnly(),
+			mcp.WithDescription("Show recent file changes detected by the live graph watcher. Returns files modified, created, or deleted in the last 5 minutes. Use this to see what's actively being worked on."),
+		),
+		log("kai_activity", s.handleActivity),
+	)
 }
 
 // --- Snapshot Resolution ---
@@ -1746,4 +1755,51 @@ func (s *Server) handleStats(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	return jsonResult(stats)
+}
+
+func (s *Server) handleActivity(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.mu.Lock()
+	w := s.fileWatcher
+	s.mu.Unlock()
+
+	if w == nil {
+		return jsonResult(map[string]interface{}{
+			"status":  "inactive",
+			"message": "File watcher is not running. The graph updates on kai capture.",
+		})
+	}
+
+	entries := w.GetActivity()
+	if len(entries) == 0 {
+		return jsonResult(map[string]interface{}{
+			"status":     "watching",
+			"message":    "Watcher active, no recent file changes.",
+			"file_count": 0,
+		})
+	}
+
+	// Group by file, show latest op
+	type fileActivity struct {
+		Path string `json:"path"`
+		Op   string `json:"op"`
+		Ago  string `json:"ago"`
+	}
+
+	seen := make(map[string]bool)
+	var files []fileActivity
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if seen[e.Path] {
+			continue
+		}
+		seen[e.Path] = true
+		ago := time.Since(e.Timestamp).Round(time.Second).String()
+		files = append(files, fileActivity{Path: e.Path, Op: e.Operation, Ago: ago})
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":     "active",
+		"file_count": len(files),
+		"files":      files,
+	})
 }

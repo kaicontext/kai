@@ -42,6 +42,10 @@ type Watcher struct {
 	fileMap     map[string][]byte // path -> file node ID
 	exportMap   map[string]string // exported symbol name -> file path
 
+	// Activity tracking — recent file changes for kai_activity
+	activityMu sync.RWMutex
+	activity   []ActivityEntry
+
 	// Callbacks
 	OnUpdate func(path string, op string) // called after each file is processed
 	OnError  func(err error)
@@ -246,6 +250,7 @@ func (w *Watcher) handleDelete(relPath string) {
 		}
 	}
 
+	w.recordActivity(relPath, "deleted")
 	if w.OnUpdate != nil {
 		w.OnUpdate(relPath, "delete")
 	}
@@ -397,6 +402,15 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 		}
 	}
 
+	// Determine if this was a create or modify
+	op := "modified"
+	if fileNode != nil && fileNode.Payload != nil {
+		if _, existed := w.fileMap[relPath]; !existed {
+			op = "created"
+		}
+	}
+	w.recordActivity(relPath, op)
+
 	if w.OnUpdate != nil {
 		w.OnUpdate(relPath, "updated")
 	}
@@ -468,6 +482,51 @@ func (w *Watcher) getLatestSnapshotID() []byte {
 		return nil
 	}
 	return id
+}
+
+// ActivityEntry records a file change event.
+type ActivityEntry struct {
+	Path      string    `json:"path"`
+	Operation string    `json:"op"`   // "modified", "created", "deleted"
+	Timestamp time.Time `json:"time"`
+}
+
+// GetActivity returns recent file change activity (last 5 minutes).
+func (w *Watcher) GetActivity() []ActivityEntry {
+	w.activityMu.RLock()
+	defer w.activityMu.RUnlock()
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	var recent []ActivityEntry
+	for _, a := range w.activity {
+		if a.Timestamp.After(cutoff) {
+			recent = append(recent, a)
+		}
+	}
+	return recent
+}
+
+// recordActivity adds an entry and prunes old ones.
+func (w *Watcher) recordActivity(path, op string) {
+	w.activityMu.Lock()
+	defer w.activityMu.Unlock()
+
+	w.activity = append(w.activity, ActivityEntry{
+		Path:      path,
+		Operation: op,
+		Timestamp: time.Now(),
+	})
+
+	// Prune entries older than 10 minutes
+	cutoff := time.Now().Add(-10 * time.Minute)
+	i := 0
+	for _, a := range w.activity {
+		if a.Timestamp.After(cutoff) {
+			w.activity[i] = a
+			i++
+		}
+	}
+	w.activity = w.activity[:i]
 }
 
 // resolveImport resolves an import to file paths using the cached file map.
