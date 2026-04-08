@@ -3492,11 +3492,11 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	fmt.Println("  Sync your semantic graph to kaicontext.com (free) for shared")
 	fmt.Println("  reviews, team code intelligence, and history across machines.")
 	fmt.Println()
-	fmt.Print("  Would you like to set that up? [Y/n]: ")
+	fmt.Print("  Would you like to set that up? [y/N]: ")
 	{
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "n" || input == "no" {
+		if input != "y" && input != "yes" {
 			fmt.Println("  No problem! You can set up later with: kai auth login")
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
