@@ -798,7 +798,17 @@ Example:
 var logCmd = &cobra.Command{
 	Use:   "log",
 	Short: "Show chronological log of snapshots and changesets",
-	RunE:  runLog,
+	Long: `Show chronological log of snapshots, like git log.
+
+Examples:
+  kai log                          # Last 10 snapshots
+  kai log -n 20                    # Last 20
+  kai log --oneline                # Compact one-line format
+  kai log --author="Jacob"         # Filter by author
+  kai log --grep="auth"            # Search commit messages
+  kai log --since="2 weeks ago"    # Date range
+  kai log --stat                   # Show file changes per snapshot`,
+	RunE: runLog,
 }
 
 var statusCmd = &cobra.Command{
@@ -1762,6 +1772,12 @@ var (
 	statusSemantic   bool
 	statusExplain    bool
 	logLimit         int
+	logOneline       bool
+	logAuthor        string
+	logGrep          string
+	logSince         string
+	logUntil         string
+	logStat          bool
 	repoPath         string
 	dirPath          string
 	editText         string
@@ -2360,6 +2376,12 @@ func init() {
 	intentRenderCmd.Flags().BoolVar(&explainIntent, "explain-intent", false, "Show reasoning behind intent choice")
 	dumpCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	logCmd.Flags().IntVarP(&logLimit, "limit", "n", 10, "Number of entries to show")
+	logCmd.Flags().BoolVar(&logOneline, "oneline", false, "Show each snapshot on one line")
+	logCmd.Flags().StringVar(&logAuthor, "author", "", "Filter by author name or email")
+	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter by commit message substring")
+	logCmd.Flags().StringVar(&logSince, "since", "", "Show snapshots after date (e.g. '2 weeks ago', '2026-04-01')")
+	logCmd.Flags().StringVar(&logUntil, "until", "", "Show snapshots before date (e.g. 'yesterday', '2026-04-07')")
+	logCmd.Flags().BoolVar(&logStat, "stat", false, "Show diffstat for each snapshot")
 	statusCmd.Flags().StringVar(&statusDir, "dir", ".", "Directory to check for changes")
 	statusCmd.Flags().StringVar(&statusAgainst, "against", "", "Baseline ref/selector to compare against (default: @snap:last)")
 	statusCmd.Flags().BoolVar(&statusNameOnly, "name-only", false, "Output just paths with status prefixes (A/M/D)")
@@ -9744,31 +9766,63 @@ func runLog(cmd *cobra.Command, args []string) error {
 		unique = append(unique, r)
 	}
 
-	if logLimit > 0 && len(unique) > logLimit {
-		unique = unique[:logLimit]
+	// Parse --since/--until dates
+	var sinceTime, untilTime time.Time
+	if logSince != "" {
+		sinceTime = parseRelativeDate(logSince)
+	}
+	if logUntil != "" {
+		untilTime = parseRelativeDate(logUntil)
 	}
 
-	if len(unique) == 0 {
-		fmt.Println("No snapshots found. Run 'kai capture' to create one.")
+	// Apply filters
+	var filtered []*ref.Ref
+	for _, r := range unique {
+		t := time.UnixMilli(r.UpdatedAt)
+
+		// --since filter
+		if !sinceTime.IsZero() && t.Before(sinceTime) {
+			continue
+		}
+		// --until filter
+		if !untilTime.IsZero() && t.After(untilTime) {
+			continue
+		}
+		// --author filter
+		if logAuthor != "" {
+			if r.Meta == nil {
+				continue
+			}
+			author := r.Meta["git.author"]
+			if !strings.Contains(strings.ToLower(author), strings.ToLower(logAuthor)) {
+				continue
+			}
+		}
+		// --grep filter
+		if logGrep != "" {
+			if r.Meta == nil {
+				continue
+			}
+			msg := r.Meta["git.message"]
+			if !strings.Contains(strings.ToLower(msg), strings.ToLower(logGrep)) {
+				continue
+			}
+		}
+
+		filtered = append(filtered, r)
+	}
+
+	if logLimit > 0 && len(filtered) > logLimit {
+		filtered = filtered[:logLimit]
+	}
+
+	if len(filtered) == 0 {
+		fmt.Println("No snapshots found.")
 		return nil
 	}
 
-	for i, r := range unique {
-		if i > 0 {
-			fmt.Println()
-		}
-
+	for i, r := range filtered {
 		snapID := shortID(util.BytesToHex(r.TargetID))
-		timestamp := time.UnixMilli(r.UpdatedAt).Format("2006-01-02 15:04:05")
-
-		// Get file count from snapshot node
-		fileCount := ""
-		node, err := db.GetNode(r.TargetID)
-		if err == nil && node != nil {
-			if fc, ok := node.Payload["fileCount"].(float64); ok {
-				fileCount = fmt.Sprintf("%d files", int(fc))
-			}
-		}
 
 		// Build display from git metadata
 		gitSHA := ""
@@ -9781,6 +9835,25 @@ func runLog(cmd *cobra.Command, args []string) error {
 			gitAuthor = r.Meta["git.author"]
 			gitBranch = r.Meta["git.branch"]
 		}
+
+		// --oneline mode
+		if logOneline {
+			line := fmt.Sprintf("\033[33m%s\033[0m", snapID)
+			if gitSHA != "" {
+				line += fmt.Sprintf(" (%s)", gitSHA)
+			}
+			if gitMsg != "" {
+				line += " " + gitMsg
+			}
+			fmt.Println(line)
+			continue
+		}
+
+		if i > 0 {
+			fmt.Println()
+		}
+
+		timestamp := time.UnixMilli(r.UpdatedAt).Format("2006-01-02 15:04:05")
 
 		// Header line: yellow commit-style
 		if gitSHA != "" {
@@ -9802,6 +9875,13 @@ func runLog(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Date:    %s\n", timestamp)
 
 		// Files + changes
+		node, err := db.GetNode(r.TargetID)
+		fileCount := ""
+		if err == nil && node != nil {
+			if fc, ok := node.Payload["fileCount"].(float64); ok {
+				fileCount = fmt.Sprintf("%d files", int(fc))
+			}
+		}
 		if fileCount != "" {
 			changesFiles := ""
 			changesSummary := ""
@@ -9826,6 +9906,57 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// parseRelativeDate parses dates like "2 weeks ago", "yesterday", "2026-04-01".
+func parseRelativeDate(s string) time.Time {
+	s = strings.TrimSpace(strings.ToLower(s))
+	now := time.Now()
+
+	// Try absolute date formats
+	for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05", "Jan 2 2006"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+
+	// Relative dates
+	switch s {
+	case "yesterday":
+		return now.AddDate(0, 0, -1)
+	case "today":
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	case "last week":
+		return now.AddDate(0, 0, -7)
+	case "last month":
+		return now.AddDate(0, -1, 0)
+	}
+
+	// "N <unit> ago" pattern
+	s = strings.TrimSuffix(s, " ago")
+	parts := strings.Fields(s)
+	if len(parts) == 2 {
+		n, err := strconv.Atoi(parts[0])
+		if err == nil {
+			unit := strings.TrimSuffix(parts[1], "s") // "weeks" -> "week"
+			switch unit {
+			case "minute", "min":
+				return now.Add(-time.Duration(n) * time.Minute)
+			case "hour", "hr":
+				return now.Add(-time.Duration(n) * time.Hour)
+			case "day":
+				return now.AddDate(0, 0, -n)
+			case "week":
+				return now.AddDate(0, 0, -n*7)
+			case "month":
+				return now.AddDate(0, -n, 0)
+			case "year":
+				return now.AddDate(-n, 0, 0)
+			}
+		}
+	}
+
+	return time.Time{} // zero value = no filter
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
