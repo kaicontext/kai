@@ -144,22 +144,27 @@ func (s *Server) Serve(ctx context.Context) error {
 
 // writeSessionFile records that an MCP session is active.
 // kai capture reads this to auto-attribute changes to the AI agent.
+// Uses PID in filename to avoid conflicts when multiple Claude windows are open.
 func (s *Server) writeSessionFile() {
 	sessionData := map[string]interface{}{
 		"pid":       os.Getpid(),
 		"sessionId": s.sessionID,
 		"startedAt": time.Now().UnixMilli(),
 		"updatedAt": time.Now().UnixMilli(),
-		"agent":     "mcp-client", // default; could detect from clientInfo
+		"agent":     "mcp-client",
 	}
 	data, _ := json.Marshal(sessionData)
 	os.MkdirAll(s.kaiDir, 0755)
-	os.WriteFile(filepath.Join(s.kaiDir, "mcp-session.json"), data, 0644)
+	os.WriteFile(s.sessionFilePath(), data, 0644)
+}
+
+func (s *Server) sessionFilePath() string {
+	return filepath.Join(s.kaiDir, fmt.Sprintf("mcp-session-%d.json", os.Getpid()))
 }
 
 // touchSessionFile updates the timestamp to show the session is still active.
 func (s *Server) touchSessionFile() {
-	path := filepath.Join(s.kaiDir, "mcp-session.json")
+	path := s.sessionFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -174,7 +179,7 @@ func (s *Server) touchSessionFile() {
 
 // removeSessionFile cleans up when the MCP server exits.
 func (s *Server) removeSessionFile() {
-	os.Remove(filepath.Join(s.kaiDir, "mcp-session.json"))
+	os.Remove(s.sessionFilePath())
 }
 
 // Close cleans up resources.
@@ -301,6 +306,21 @@ func (s *Server) runInit(job *initState) {
 	if err != nil {
 		s.mu.Lock()
 		job.err = fmt.Errorf("opening database: %w", err)
+		s.mu.Unlock()
+		return
+	}
+
+	// Fast path: if a snapshot already exists, skip the full scan + capture.
+	// This handles the case where multiple MCP instances open the same DB —
+	// only the first needs to init, the rest just read.
+	refMgr := ref.NewRefManager(db)
+	if existing, _ := refMgr.Get("snap.latest"); existing != nil {
+		s.mu.Lock()
+		s.db = db
+		s.resolver = ref.NewResolver(db)
+		s.snap = snapshot.NewCreator(db, nil)
+		job.phase = phaseFinalizing
+		job.message = "Ready (existing snapshot found)"
 		s.mu.Unlock()
 		return
 	}

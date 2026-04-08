@@ -3716,14 +3716,47 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 // capture was triggered (e.g., AI agent made edits, then git commit hook ran).
 // If so, auto-creates authorship checkpoints for changed files.
 func autoAttributeFromMCPSession(kaiDir, workDir string) {
-	sessionPath := filepath.Join(kaiDir, "mcp-session.json")
-	data, err := os.ReadFile(sessionPath)
+	// Check all MCP session files (one per PID, supports multiple Claude windows)
+	entries, err := os.ReadDir(kaiDir)
 	if err != nil {
-		return // no active session
+		return
 	}
 
 	var session map[string]interface{}
-	if err := json.Unmarshal(data, &session); err != nil {
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "mcp-session-") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(kaiDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var s map[string]interface{}
+		if json.Unmarshal(data, &s) != nil {
+			continue
+		}
+		// Use the most recently updated session
+		if session == nil {
+			session = s
+		} else {
+			sUpdated, _ := s["updatedAt"].(float64)
+			curUpdated, _ := session["updatedAt"].(float64)
+			if sUpdated > curUpdated {
+				session = s
+			}
+		}
+	}
+	// Also check legacy single-file format
+	if session == nil {
+		data, err := os.ReadFile(filepath.Join(kaiDir, "mcp-session.json"))
+		if err != nil {
+			return
+		}
+		if json.Unmarshal(data, &session) != nil {
+			return
+		}
+	}
+	if session == nil {
 		return
 	}
 
