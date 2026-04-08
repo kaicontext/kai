@@ -4,6 +4,7 @@ package ref
 import (
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -34,6 +35,7 @@ type Ref struct {
 	TargetKind Kind
 	CreatedAt  int64
 	UpdatedAt  int64
+	Meta       map[string]string // optional metadata (git commit, message, author, etc.)
 }
 
 // Slug represents a human-readable identifier for a node.
@@ -448,26 +450,40 @@ func (m *RefManager) ensureTables() {
 
 // Set creates or updates a ref.
 func (m *RefManager) Set(name string, targetID []byte, targetKind Kind) error {
-	return m.SetWithActor(name, targetID, targetKind, "")
+	return m.SetWithMeta(name, targetID, targetKind, "", nil)
 }
 
 // SetWithActor creates or updates a ref with actor attribution.
 func (m *RefManager) SetWithActor(name string, targetID []byte, targetKind Kind, actor string) error {
+	return m.SetWithMeta(name, targetID, targetKind, actor, nil)
+}
+
+// SetWithMeta creates or updates a ref with actor and metadata.
+// Meta is stored as JSON in the refs table for git commit info, messages, etc.
+func (m *RefManager) SetWithMeta(name string, targetID []byte, targetKind Kind, actor string, meta map[string]string) error {
 	now := util.NowMs()
 
 	// Get old target for logging (may be nil for new refs)
 	var oldTarget []byte
 	m.db.QueryRow(`SELECT target_id FROM refs WHERE name = ?`, name).Scan(&oldTarget)
 
+	var metaJSON *string
+	if len(meta) > 0 {
+		b, _ := json.Marshal(meta)
+		s := string(b)
+		metaJSON = &s
+	}
+
 	query := `
-		INSERT INTO refs (name, target_id, target_kind, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO refs (name, target_id, target_kind, created_at, updated_at, meta)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			target_id = excluded.target_id,
 			target_kind = excluded.target_kind,
-			updated_at = excluded.updated_at
+			updated_at = excluded.updated_at,
+			meta = excluded.meta
 	`
-	_, err := m.db.Exec(query, name, targetID, string(targetKind), now, now)
+	_, err := m.db.Exec(query, name, targetID, string(targetKind), now, now, metaJSON)
 	if err != nil {
 		return err
 	}
@@ -482,18 +498,33 @@ func (m *RefManager) SetWithActor(name string, targetID []byte, targetKind Kind,
 
 // Get retrieves a ref by name.
 func (m *RefManager) Get(name string) (*Ref, error) {
-	query := `SELECT name, target_id, target_kind, created_at, updated_at FROM refs WHERE name = ?`
-	var ref Ref
+	query := `SELECT name, target_id, target_kind, created_at, updated_at, meta FROM refs WHERE name = ?`
+	var r Ref
 	var kind string
-	err := m.db.QueryRow(query, name).Scan(&ref.Name, &ref.TargetID, &kind, &ref.CreatedAt, &ref.UpdatedAt)
+	var metaJSON sql.NullString
+	err := m.db.QueryRow(query, name).Scan(&r.Name, &r.TargetID, &kind, &r.CreatedAt, &r.UpdatedAt, &metaJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		// Fallback for DBs without meta column
+		query2 := `SELECT name, target_id, target_kind, created_at, updated_at FROM refs WHERE name = ?`
+		err2 := m.db.QueryRow(query2, name).Scan(&r.Name, &r.TargetID, &kind, &r.CreatedAt, &r.UpdatedAt)
+		if err2 == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err2 != nil {
+			return nil, err2
+		}
+		r.TargetKind = Kind(kind)
+		return &r, nil
 	}
-	ref.TargetKind = Kind(kind)
-	return &ref, nil
+	r.TargetKind = Kind(kind)
+	if metaJSON.Valid && metaJSON.String != "" {
+		r.Meta = make(map[string]string)
+		json.Unmarshal([]byte(metaJSON.String), &r.Meta)
+	}
+	return &r, nil
 }
 
 // Delete removes a ref.
@@ -721,8 +752,13 @@ func NewAutoRefManager(db *graph.DB) *AutoRefManager {
 // OnSnapshotCreated updates refs after a snapshot is created (committed snapshot).
 // This adds the snapshot to the log, making it resolvable via @snap:last.
 func (m *AutoRefManager) OnSnapshotCreated(id []byte) error {
-	// Update snap.latest
-	if err := m.refMgr.Set("snap.latest", id, KindSnapshot); err != nil {
+	return m.OnSnapshotCreatedWithMeta(id, nil)
+}
+
+// OnSnapshotCreatedWithMeta updates refs with optional metadata (git commit, message, author).
+func (m *AutoRefManager) OnSnapshotCreatedWithMeta(id []byte, meta map[string]string) error {
+	// Update snap.latest with metadata
+	if err := m.refMgr.SetWithMeta("snap.latest", id, KindSnapshot, "", meta); err != nil {
 		return err
 	}
 	// Append to log (this makes it @snap:last)

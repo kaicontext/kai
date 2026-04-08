@@ -4252,8 +4252,25 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	debugf("updating refs: snap.latest -> %s", shortID(util.BytesToHex(snapshotID)))
 	autoRefMgr := ref.NewAutoRefManager(db)
 
+	// Auto-capture git commit metadata (message, author, SHA) if in a git repo
+	var snapMeta map[string]string
+	if gitSHA, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
+		snapMeta = make(map[string]string)
+		snapMeta["git.sha"] = strings.TrimSpace(string(gitSHA))
+		if msg, err := exec.Command("git", "log", "-1", "--format=%s").Output(); err == nil {
+			snapMeta["git.message"] = strings.TrimSpace(string(msg))
+		}
+		if author, err := exec.Command("git", "log", "-1", "--format=%an <%ae>").Output(); err == nil {
+			snapMeta["git.author"] = strings.TrimSpace(string(author))
+		}
+		if branch, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			snapMeta["git.branch"] = strings.TrimSpace(string(branch))
+		}
+		debugf("git metadata: sha=%s author=%s msg=%s", snapMeta["git.sha"], snapMeta["git.author"], snapMeta["git.message"])
+	}
+
 	// Always update snap.latest (like git commit updates HEAD)
-	if err := autoRefMgr.OnSnapshotCreated(snapshotID); err != nil {
+	if err := autoRefMgr.OnSnapshotCreatedWithMeta(snapshotID, snapMeta); err != nil {
 		debugf("warning: failed to update refs: %v", err)
 	} else {
 		debugf("refs updated successfully")

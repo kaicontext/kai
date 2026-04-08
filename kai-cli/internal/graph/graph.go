@@ -108,6 +108,7 @@ func Open(dbPath, objectsDir string) (*DB, error) {
 	// Auto-migrate
 	db.migrateAuthorship()
 	db.migratePathIndex()
+	db.migrateRefMeta()
 
 	return db, nil
 }
@@ -133,6 +134,7 @@ func (db *DB) ApplySchema(schemaPath string) error {
 	db.migrateEdgesPK()
 	db.migrateAuthorship()
 	db.migratePathIndex()
+	db.migrateRefMeta()
 
 	return nil
 }
@@ -1022,6 +1024,11 @@ CREATE TABLE IF NOT EXISTS ref_log (
 CREATE INDEX IF NOT EXISTS ref_log_name ON ref_log(name);
 CREATE INDEX IF NOT EXISTS ref_log_moved_at ON ref_log(moved_at);
 	`)
+}
+
+// migrateRefMeta adds a meta column to the refs table for storing git commit info.
+func (db *DB) migrateRefMeta() {
+	db.conn.Exec(`ALTER TABLE refs ADD COLUMN meta TEXT`)
 }
 
 // migratePathIndex creates an index on json_extract(payload, '$.path') for File nodes.
