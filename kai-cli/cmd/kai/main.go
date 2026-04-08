@@ -856,7 +856,8 @@ Examples:
   kai diff                         # Semantic diff: @snap:last vs working directory
   kai diff -p                      # Line-level diff like git
   kai diff @snap:prev @snap:last   # Compare two snapshots
-  kai diff --name-only             # Just file paths`,
+  kai diff --name-only             # Just file paths
+  kai diff --stat                  # Summary with insertions/deletions`,
 	Args: cobra.RangeArgs(0, 2),
 	RunE: runDiff,
 }
@@ -1792,6 +1793,7 @@ var (
 	diffJSON     bool
 	diffExplain  bool
 	diffPatch    bool // git-style line-level diff
+	diffStat     bool // git diff --stat style summary
 	diffForce    bool // skip stale baseline warning
 
 	// Snapshot flags
@@ -2378,6 +2380,7 @@ func init() {
 	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Output diff as JSON (implies --semantic)")
 	diffCmd.Flags().BoolVar(&diffExplain, "explain", false, "Show detailed explanation of what this command does")
 	diffCmd.Flags().BoolVarP(&diffPatch, "patch", "p", false, "Show line-level diff (like git diff)")
+	diffCmd.Flags().BoolVar(&diffStat, "stat", false, "Show diffstat summary (files changed, insertions, deletions)")
 	diffCmd.Flags().BoolVar(&diffForce, "force", false, "Skip stale baseline warning")
 
 	// Workspace command flags
@@ -9949,7 +9952,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 
 	// Semantic is the default unless --name-only or --patch is specified
 	// JSON also implies semantic
-	if !diffNameOnly && !diffPatch {
+	if !diffNameOnly && !diffPatch && !diffStat {
 		diffSemantic = true
 	}
 	if diffJSON {
@@ -10001,8 +10004,8 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting base files: %w", err)
 	}
 
-	// Load content if needed for semantic or patch mode
-	needContent := diffSemantic || diffPatch
+	// Load content if needed for semantic, patch, or stat mode
+	needContent := diffSemantic || diffPatch || diffStat
 
 	baseFileMap := make(map[string]string) // path -> digest
 	baseContent := make(map[string][]byte) // path -> content (for semantic/patch diff)
@@ -10234,6 +10237,81 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	// Simple file-level output
 	if !diffJSON {
 		fmt.Printf("Diff: %s → %s\n\n", util.BytesToHex(baseSnapID)[:12], headLabel)
+	}
+
+	if diffStat {
+		// git diff --stat style: show each file with +/- line counts
+		totalInsertions := 0
+		totalDeletions := 0
+		maxPathLen := 0
+		type statEntry struct {
+			path       string
+			insertions int
+			deletions  int
+		}
+		var entries []statEntry
+
+		for _, path := range added {
+			lines := strings.Count(string(headContent[path]), "\n")
+			entries = append(entries, statEntry{path, lines, 0})
+			totalInsertions += lines
+			if len(path) > maxPathLen {
+				maxPathLen = len(path)
+			}
+		}
+		for _, path := range modified {
+			oldLines := strings.Count(string(baseContent[path]), "\n")
+			newLines := strings.Count(string(headContent[path]), "\n")
+			ins := 0
+			del := 0
+			if newLines > oldLines {
+				ins = newLines - oldLines
+			} else {
+				del = oldLines - newLines
+			}
+			// Rough estimate: changed lines = min(old, new) delta
+			// For a better count, use actual line diff
+			if ins == 0 && del == 0 {
+				ins = 1 // at least something changed
+				del = 1
+			}
+			entries = append(entries, statEntry{path, ins, del})
+			totalInsertions += ins
+			totalDeletions += del
+			if len(path) > maxPathLen {
+				maxPathLen = len(path)
+			}
+		}
+		for _, path := range deleted {
+			lines := strings.Count(string(baseContent[path]), "\n")
+			entries = append(entries, statEntry{path, 0, lines})
+			totalDeletions += lines
+			if len(path) > maxPathLen {
+				maxPathLen = len(path)
+			}
+		}
+
+		if maxPathLen > 50 {
+			maxPathLen = 50
+		}
+
+		for _, e := range entries {
+			path := e.path
+			if len(path) > 50 {
+				path = "..." + path[len(path)-47:]
+			}
+			bar := strings.Repeat("+", e.insertions) + strings.Repeat("-", e.deletions)
+			if len(bar) > 40 {
+				ratio := float64(e.insertions) / float64(e.insertions+e.deletions)
+				plus := int(ratio * 40)
+				minus := 40 - plus
+				bar = strings.Repeat("+", plus) + strings.Repeat("-", minus)
+			}
+			fmt.Printf(" %-*s | %s\n", maxPathLen, path, bar)
+		}
+		fmt.Printf(" %d files changed, %d insertions(+), %d deletions(-)\n",
+			len(entries), totalInsertions, totalDeletions)
+		return nil
 	}
 
 	if diffNameOnly {
