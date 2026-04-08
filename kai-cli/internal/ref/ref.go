@@ -545,7 +545,7 @@ func (m *RefManager) Delete(name string) error {
 
 // List returns all refs, optionally filtered by kind.
 func (m *RefManager) List(filterKind *Kind) ([]*Ref, error) {
-	query := `SELECT name, target_id, target_kind, created_at, updated_at FROM refs`
+	query := `SELECT name, target_id, target_kind, created_at, updated_at, meta FROM refs`
 	args := []interface{}{}
 	if filterKind != nil {
 		query += ` WHERE target_kind = ?`
@@ -555,19 +555,51 @@ func (m *RefManager) List(filterKind *Kind) ([]*Ref, error) {
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		// Fallback for DBs without meta column
+		return m.listWithoutMeta(filterKind)
 	}
 	defer rows.Close()
 
 	var refs []*Ref
 	for rows.Next() {
-		var ref Ref
+		var r Ref
 		var kind string
-		if err := rows.Scan(&ref.Name, &ref.TargetID, &kind, &ref.CreatedAt, &ref.UpdatedAt); err != nil {
+		var metaJSON sql.NullString
+		if err := rows.Scan(&r.Name, &r.TargetID, &kind, &r.CreatedAt, &r.UpdatedAt, &metaJSON); err != nil {
 			return nil, err
 		}
-		ref.TargetKind = Kind(kind)
-		refs = append(refs, &ref)
+		r.TargetKind = Kind(kind)
+		if metaJSON.Valid && metaJSON.String != "" {
+			r.Meta = make(map[string]string)
+			json.Unmarshal([]byte(metaJSON.String), &r.Meta)
+		}
+		refs = append(refs, &r)
+	}
+	return refs, rows.Err()
+}
+
+func (m *RefManager) listWithoutMeta(filterKind *Kind) ([]*Ref, error) {
+	query := `SELECT name, target_id, target_kind, created_at, updated_at FROM refs`
+	args := []interface{}{}
+	if filterKind != nil {
+		query += ` WHERE target_kind = ?`
+		args = append(args, string(*filterKind))
+	}
+	query += ` ORDER BY name`
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []*Ref
+	for rows.Next() {
+		var r Ref
+		var kind string
+		if err := rows.Scan(&r.Name, &r.TargetID, &kind, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		r.TargetKind = Kind(kind)
+		refs = append(refs, &r)
 	}
 	return refs, rows.Err()
 }

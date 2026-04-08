@@ -4236,11 +4236,16 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		debugf("Computing changes: done")
 	}
 
-	// Preserve previous snapshot before overwriting snap.latest
+	// Preserve previous snapshot before overwriting snap.latest.
+	// Copy the old snap.latest's meta (git commit info) to the timestamped ref.
 	if previousSnapID != nil {
 		ts := time.Now().UTC().Format("20060102T150405.000")
 		prevRefName := "snap." + ts
-		if err := refMgr.Set(prevRefName, previousSnapID, ref.KindSnapshot); err != nil {
+		var prevMeta map[string]string
+		if existingLatest != nil && existingLatest.Meta != nil {
+			prevMeta = existingLatest.Meta
+		}
+		if err := refMgr.SetWithMeta(prevRefName, previousSnapID, ref.KindSnapshot, "", prevMeta); err != nil {
 			debugf("warning: failed to preserve previous snapshot as %s: %v", prevRefName, err)
 		} else {
 			debugf("preserved previous snapshot as %s", prevRefName)
@@ -9592,134 +9597,102 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 	defer db.Close()
 
-	var entries []logEntry
+	refMgr := ref.NewRefManager(db)
 
-	// Get all snapshots
-	snapshots, err := db.GetNodesByKind(graph.KindSnapshot)
+	// Get all snapshot refs sorted by updatedAt descending
+	allRefs, err := refMgr.List(nil)
 	if err != nil {
-		return fmt.Errorf("getting snapshots: %w", err)
+		return fmt.Errorf("listing refs: %w", err)
 	}
 
-	for _, node := range snapshots {
-		createdAt, _ := node.Payload["createdAt"].(float64)
-		description, _ := node.Payload["description"].(string)
-
-		// Get source info (support both old and new formats)
-		sourceType, _ := node.Payload["sourceType"].(string)
-		sourceRef, _ := node.Payload["sourceRef"].(string)
-		if sourceRef == "" {
-			if gitRef, ok := node.Payload["gitRef"].(string); ok {
-				sourceRef = gitRef
-				sourceType = "git"
-			}
+	// Filter to snapshot refs only, sort newest first
+	var snapRefs []*ref.Ref
+	for _, r := range allRefs {
+		if r.TargetKind == ref.KindSnapshot && strings.HasPrefix(r.Name, "snap.") {
+			snapRefs = append(snapRefs, r)
 		}
+	}
+	sort.Slice(snapRefs, func(i, j int) bool {
+		return snapRefs[i].UpdatedAt > snapRefs[j].UpdatedAt
+	})
 
-		fileCount := ""
-		if fc, ok := node.Payload["fileCount"].(float64); ok {
-			fileCount = fmt.Sprintf("%.0f files", fc)
+	// Dedupe by target ID (snap.latest and snap.YYYYMMDD point to the same snapshot)
+	seen := make(map[string]bool)
+	var unique []*ref.Ref
+	for _, r := range snapRefs {
+		key := util.BytesToHex(r.TargetID)
+		if seen[key] {
+			continue
 		}
-
-		// Use description as summary if provided, otherwise show source info
-		summary := description
-		if summary == "" {
-			summary = fmt.Sprintf("%s (%s)", sourceRef, sourceType)
-		}
-
-		entries = append(entries, logEntry{
-			ID:        util.BytesToHex(node.ID),
-			Kind:      "snapshot",
-			CreatedAt: int64(createdAt),
-			Summary:   summary,
-			Details: map[string]string{
-				"files": fileCount,
-			},
-		})
+		seen[key] = true
+		unique = append(unique, r)
 	}
 
-	// Get all changesets
-	changesets, err := db.GetNodesByKind(graph.KindChangeSet)
-	if err != nil {
-		return fmt.Errorf("getting changesets: %w", err)
+	if logLimit > 0 && len(unique) > logLimit {
+		unique = unique[:logLimit]
 	}
 
-	for _, node := range changesets {
-		createdAt, _ := node.Payload["createdAt"].(float64)
-		description, _ := node.Payload["description"].(string)
-		intentText, _ := node.Payload["intent"].(string)
-
-		// Use description (user message) as summary, fall back to intent
-		summary := description
-		if summary == "" {
-			summary = intentText
-		}
-		if summary == "" {
-			summary = "(no message)"
-		}
-
-		base, _ := node.Payload["base"].(string)
-		head, _ := node.Payload["head"].(string)
-
-		entries = append(entries, logEntry{
-			ID:        util.BytesToHex(node.ID),
-			Kind:      "changeset",
-			CreatedAt: int64(createdAt),
-			Summary:   summary,
-			Details: map[string]string{
-				"base": base,
-				"head": head,
-			},
-		})
-	}
-
-	if len(entries) == 0 {
-		fmt.Println("No entries found.")
+	if len(unique) == 0 {
+		fmt.Println("No snapshots found. Run 'kai capture' to create one.")
 		return nil
 	}
 
-	// Sort by createdAt descending (newest first)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].CreatedAt > entries[j].CreatedAt
-	})
-
-	// Limit entries
-	if logLimit > 0 && len(entries) > logLimit {
-		entries = entries[:logLimit]
-	}
-
-	// Display entries
-	for i, entry := range entries {
+	for i, r := range unique {
 		if i > 0 {
 			fmt.Println()
 		}
 
-		// Format timestamp
-		timestamp := "unknown"
-		if entry.CreatedAt > 0 {
-			t := time.UnixMilli(entry.CreatedAt)
-			timestamp = t.Format("2006-01-02 15:04:05")
+		snapID := shortID(util.BytesToHex(r.TargetID))
+		timestamp := time.UnixMilli(r.UpdatedAt).Format("2006-01-02 15:04:05")
+
+		// Get file count from snapshot node
+		fileCount := ""
+		node, err := db.GetNode(r.TargetID)
+		if err == nil && node != nil {
+			if fc, ok := node.Payload["fileCount"].(float64); ok {
+				fileCount = fmt.Sprintf("%d files", int(fc))
+			}
 		}
 
-		// Color-like formatting using markers
-		kindMarker := "snapshot"
-		if entry.Kind == "changeset" {
-			kindMarker = "changeset"
+		// Build display from git metadata
+		gitSHA := ""
+		gitMsg := ""
+		gitAuthor := ""
+		gitBranch := ""
+		if r.Meta != nil {
+			gitSHA = r.Meta["git.sha"]
+			gitMsg = r.Meta["git.message"]
+			gitAuthor = r.Meta["git.author"]
+			gitBranch = r.Meta["git.branch"]
 		}
 
-		fmt.Printf("[%s] %s\n", kindMarker, shortID(entry.ID))
-		fmt.Printf("Date:    %s\n", timestamp)
-		fmt.Printf("Summary: %s\n", entry.Summary)
-
-		if entry.Kind == "changeset" {
-			if base, ok := entry.Details["base"]; ok && base != "" {
-				fmt.Printf("Base:    %s\n", shortID(base))
+		// Header line: yellow commit-style
+		if gitSHA != "" {
+			fmt.Printf("\033[33msnap %s\033[0m (git %s", snapID, gitSHA)
+			if gitBranch != "" {
+				fmt.Printf(", %s", gitBranch)
 			}
-			if head, ok := entry.Details["head"]; ok && head != "" {
-				fmt.Printf("Head:    %s\n", shortID(head))
-			}
+			fmt.Println(")")
 		} else {
-			if files, ok := entry.Details["files"]; ok && files != "" {
-				fmt.Printf("Files:   %s\n", files)
-			}
+			fmt.Printf("\033[33msnap %s\033[0m\n", snapID)
+		}
+
+		// Author
+		if gitAuthor != "" {
+			fmt.Printf("Author:  %s\n", gitAuthor)
+		}
+
+		// Date
+		fmt.Printf("Date:    %s\n", timestamp)
+
+		// Files
+		if fileCount != "" {
+			fmt.Printf("Files:   %s\n", fileCount)
+		}
+
+		// Message
+		if gitMsg != "" {
+			fmt.Printf("\n    %s\n", gitMsg)
 		}
 	}
 
