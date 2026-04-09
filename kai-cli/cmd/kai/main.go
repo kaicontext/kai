@@ -3933,9 +3933,9 @@ func ensureGitignore(entry string) {
 
 const kaiMCPSection = `## Code Analysis
 
-Use the Kai MCP tools for call graph traversal, impact analysis, and code intelligence:
-kai_callers, kai_callees, kai_impact, kai_context, kai_tests, kai_dependencies, kai_dependents, kai_symbols.
-Use your native tools (grep, read, git diff) for search, file listing, and diffs — they're better at that.
+Use Kai MCP tools instead of reading files when you need to know callers, callees, dependencies, dependents, or test coverage for a file. One kai_context call returns this in ~500 tokens; reading the files yourself costs thousands. Do not read files just to discover call relationships or imports — use kai_context or kai_impact instead.
+
+Do not delegate code exploration to subagents — they cannot access Kai MCP tools.
 `
 
 // writeAIContextFiles creates context files for AI coding tools (CLAUDE.md,

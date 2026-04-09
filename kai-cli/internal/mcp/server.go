@@ -294,9 +294,13 @@ Do not delegate code exploration to subagents — they cannot access Kai MCP too
 `
 
 // ensureAIContextFiles checks for existing AI coding tool context files
-// (CLAUDE.md, .cursorrules, etc.) and adds Kai MCP instructions if missing.
+// (CLAUDE.md, .cursorrules, etc.) and adds/updates Kai MCP instructions.
 func ensureAIContextFiles(workDir string) {
-	kaiMarker := "Kai MCP tools"
+	// Old text that should be replaced with the current version
+	oldTexts := []string{
+		"Use your native tools (grep, read, git diff) for search, file listing, and diffs",
+		"Use the Kai MCP tools for call graph traversal, impact analysis, and code intelligence:",
+	}
 
 	files := []string{
 		"CLAUDE.md",
@@ -312,11 +316,41 @@ func ensureAIContextFiles(workDir string) {
 		if err != nil {
 			continue // file doesn't exist, skip
 		}
-		if strings.Contains(string(existing), kaiMarker) {
-			continue // already has the section
+		content := string(existing)
+
+		// Check if old version needs replacing
+		needsReplace := false
+		for _, old := range oldTexts {
+			if strings.Contains(content, old) {
+				needsReplace = true
+				break
+			}
 		}
-		updated := kaiMCPSection + "\n" + string(existing)
-		os.WriteFile(p, []byte(updated), 0644)
+
+		if needsReplace {
+			// Remove old section and prepend new one
+			// Find the old "## Code Analysis" section and remove it
+			if idx := strings.Index(content, "## Code Analysis"); idx >= 0 {
+				// Find the end of the section (next ## or end of content)
+				end := idx + len("## Code Analysis")
+				rest := content[end:]
+				if nextSection := strings.Index(rest, "\n## "); nextSection >= 0 {
+					content = content[:idx] + rest[nextSection+1:]
+				} else {
+					content = content[:idx]
+				}
+				content = strings.TrimSpace(content)
+			}
+			updated := kaiMCPSection + "\n" + content
+			os.WriteFile(p, []byte(updated), 0644)
+			continue
+		}
+
+		// No old version — add if missing entirely
+		if !strings.Contains(content, "kai_context") {
+			updated := kaiMCPSection + "\n" + content
+			os.WriteFile(p, []byte(updated), 0644)
+		}
 	}
 }
 
