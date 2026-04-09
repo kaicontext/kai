@@ -1224,6 +1224,83 @@ func TestClient_SyncEdges(t *testing.T) {
 	}
 }
 
+func TestClient_SyncEdges_MultipleEntries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"entries": []map[string]interface{}{
+				{"seq": 101, "agent": "agent-a", "actor": "alice", "time": 1000, "file": "src/auth.go", "action": "add", "src": "aaa", "edge_type": "IMPORTS", "dst": "bbb"},
+				{"seq": 102, "agent": "agent-a", "actor": "alice", "time": 1001, "file": "src/auth.go", "action": "add", "src": "ccc", "edge_type": "CALLS", "dst": "ddd"},
+				{"seq": 103, "agent": "agent-b", "actor": "bob", "time": 1002, "file": "src/handler.go", "action": "remove", "src": "eee", "edge_type": "IMPORTS", "dst": "fff"},
+			},
+			"latest_seq": 103,
+			"has_more":   false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncEdges(100, "my-agent")
+	if err != nil {
+		t.Fatalf("SyncEdges failed: %v", err)
+	}
+	if len(resp.Entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(resp.Entries))
+	}
+	// Check agent attribution
+	if resp.Entries[0].Agent != "agent-a" {
+		t.Errorf("entry 0: expected agent-a, got %s", resp.Entries[0].Agent)
+	}
+	if resp.Entries[2].Agent != "agent-b" {
+		t.Errorf("entry 2: expected agent-b, got %s", resp.Entries[2].Agent)
+	}
+	if resp.Entries[2].Action != "remove" {
+		t.Errorf("entry 2: expected remove, got %s", resp.Entries[2].Action)
+	}
+	if resp.LatestSeq != 103 {
+		t.Errorf("expected latest_seq=103, got %d", resp.LatestSeq)
+	}
+}
+
+func TestClient_SyncEdges_HasMore(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"entries": []map[string]interface{}{
+				{"seq": 101, "agent": "agent-a", "actor": "alice", "time": 1000, "file": "src/a.go", "action": "add", "src": "aaa", "edge_type": "IMPORTS", "dst": "bbb"},
+			},
+			"latest_seq": 500,
+			"has_more":   true,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncEdges(100, "my-agent")
+	if err != nil {
+		t.Fatalf("SyncEdges failed: %v", err)
+	}
+	if !resp.HasMore {
+		t.Error("expected has_more=true")
+	}
+	if resp.LatestSeq != 500 {
+		t.Errorf("expected latest_seq=500, got %d", resp.LatestSeq)
+	}
+}
+
+func TestClient_SyncEdges_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	_, err := client.SyncEdges(0, "my-agent")
+	if err == nil {
+		t.Error("expected error for 500 response")
+	}
+}
+
 func TestClient_SyncEdges_Empty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
