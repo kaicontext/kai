@@ -106,17 +106,14 @@ func (w *Watcher) Start() error {
 		relPath, _ := filepath.Rel(w.workDir, path)
 		relPath = filepath.ToSlash(relPath)
 
-		// Skip ignored directories
-		if relPath != "." && w.matcher != nil && w.matcher.Match(relPath, true) {
+		// Skip ignored directories: both @exclude and @semantic-ignore patterns.
+		// No point watching build outputs, caches, or vendored dependencies.
+		if relPath != "." && w.matcher != nil && w.matcher.MatchSemantic(relPath, true) {
 			return filepath.SkipDir
 		}
-		// Always skip .kai, .git, node_modules, and other heavy directories
+		// Always skip .kai and .git (not in gitignore but never watchable)
 		base := filepath.Base(path)
-		if base == ".kai" || base == ".git" || base == "node_modules" ||
-			base == "vendor" || base == ".repo-cache" || base == "__pycache__" ||
-			base == ".venv" || base == "target" || base == "dist" || base == "build" ||
-			base == ".next" || base == ".vercel" || base == ".nuxt" || base == ".svelte-kit" ||
-			base == ".pytest_cache" || base == ".mypy_cache" || base == ".ruff_cache" {
+		if base == ".kai" || base == ".git" {
 			return filepath.SkipDir
 		}
 
