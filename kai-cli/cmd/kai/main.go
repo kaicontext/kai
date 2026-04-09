@@ -69,7 +69,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.75"
+var Version = "0.9.76"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2147,7 +2147,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 // If withKai is false, it disables all MCP servers via --strict-mcp-config with an empty config.
 // If withKai is true, it runs normally (Kai MCP available via user's config).
 func runClaude(cwd, task, model string, withKai bool) (claudeResult, error) {
-	args := []string{"-p", task, "--output-format", "json", "--max-turns", "1"}
+	args := []string{"-p", task, "--output-format", "json"}
 
 	if model != "" {
 		args = append(args, "--model", model)

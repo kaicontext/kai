@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -72,9 +73,15 @@ type Server struct {
 	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
 	// Live graph watcher
 	fileWatcher  *watcher.Watcher
-	// Overlap warnings from server
+	// Overlap warnings and advisory locks from server
 	warningsMu   sync.RWMutex
 	warnings     []remote.OverlapWarning
+	locksMu      sync.RWMutex
+	locks        []remote.FileLock
+	// Remote client for lock/unlock (cached from watcher setup)
+	remoteClient *remote.Client
+	// Rate limiting: cap read-only tool calls to avoid context bloat
+	readCallCount int32
 }
 
 // NewServer creates a new MCP server for the given project directory.
@@ -165,6 +172,7 @@ func (s *Server) startWatcher(db *graph.DB) {
 
 	// Wire activity heartbeats and edge deltas to the server (best-effort)
 	if client, err := remote.NewClientForRemote("origin"); err == nil {
+		s.remoteClient = client
 		agentName := s.agentName
 		if agentName == "" {
 			agentName = "mcp-client"
@@ -277,7 +285,7 @@ func (s *Server) Close() error {
 
 const kaiMCPSection = `## Code Analysis
 
-Prefer Kai MCP tools (kai_context, kai_callers, kai_callees, kai_impact, kai_tests) when exploring unfamiliar code or analyzing the impact of changes. They provide semantic graph data (call graphs, dependency chains) that grep cannot. For simple lookups or when you already have enough context, use built-in tools directly.
+Use Kai MCP tools instead of reading files when you need to know callers, callees, dependencies, dependents, or test coverage for a file. One kai_context call returns this in ~500 tokens; reading the files yourself costs thousands. Do not read files just to discover call relationships or imports — use kai_context or kai_impact instead.
 
 Do not delegate code exploration to subagents — they cannot access Kai MCP tools.
 `
@@ -581,11 +589,29 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		return h
 	}
 
+	// maxReadCalls caps how many read-only tool calls we serve per session.
+	// Each call triggers a full API round-trip that re-reads the conversation context,
+	// so excessive calls cost more than they save.
+	const maxReadCalls = 3
+
 	// add registers a tool only if it passes the KAI_TOOLS filter.
-	add := func(tool mcp.Tool, handler server.ToolHandlerFunc) {
-		if toolEnabled(tool.Name) {
-			srv.AddTool(tool, handler)
+	// Read-only tools are wrapped with a call counter that returns a short
+	// message after maxReadCalls, nudging the model to use results it already has.
+	add := func(tool mcp.Tool, handler server.ToolHandlerFunc, readOnly bool) {
+		if !toolEnabled(tool.Name) {
+			return
 		}
+		if readOnly {
+			inner := handler
+			handler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				n := atomic.AddInt32(&s.readCallCount, 1)
+				if int(n) > maxReadCalls {
+					return mcp.NewToolResultText("Rate limit: you have already queried the semantic graph — use the results above instead of making more calls."), nil
+				}
+				return inner(ctx, req)
+			}
+		}
+		srv.AddTool(tool, handler)
 	}
 
 	// kai_symbols — list all symbols in a file
@@ -598,7 +624,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithBoolean("exported", mcp.Description("If true, only return exported/public symbols (Go: uppercase-first)")),
 			mcp.WithBoolean("signatures", mcp.Description("If true, include full signatures in output (default: false to save tokens)")),
 		),
-		log("kai_symbols", s.handleSymbols),
+		log("kai_symbols", s.handleSymbols), true,
 	)
 
 	// kai_context — bundled context for a location (the high-leverage tool)
@@ -612,7 +638,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("symbol", mcp.Description("Symbol name to focus on (optional, returns all symbols in file if omitted)")),
 			mcp.WithNumber("depth", mcp.Description("How many hops to traverse in the graph (default: 1)")),
 		),
-		log("kai_context", s.handleContext),
+		log("kai_context", s.handleContext), true,
 	)
 
 	// kai_impact — transitive downstream impact analysis
@@ -623,12 +649,12 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path to analyze impact for")),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum graph traversal depth (default: 3)")),
 		),
-		log("kai_impact", s.handleImpact),
+		log("kai_impact", s.handleImpact), true,
 	)
 
 	// --- Authorship / AI Attribution Tools ---
 
-	// kai_checkpoint — record an AI edit event
+	// kai_checkpoint — record an AI edit event (not rate-limited)
 	add(
 		mcp.NewTool("kai_checkpoint",
 			mcp.WithToolAnnotation(mcp.ToolAnnotation{
@@ -645,7 +671,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("agent", mcp.Description("Agent name (default: auto-detected from MCP session)")),
 			mcp.WithString("model", mcp.Description("Model name (e.g. claude-opus-4-6)")),
 		),
-		log("kai_checkpoint", s.handleCheckpoint),
+		log("kai_checkpoint", s.handleCheckpoint), false,
 	)
 
 	// kai_blame — show AI vs human authorship for a file
@@ -656,11 +682,91 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
 			mcp.WithString("format", mcp.Description("Output format: 'lines' (per-line ranges) or 'summary' (percentages). Default: summary")),
 		),
-		log("kai_blame", s.handleBlame),
+		log("kai_blame", s.handleBlame), true,
 	)
 
-	// kai_stats and kai_activity removed — low-value for code exploration,
-	// each tool definition adds ~100 tokens to every API request.
+	// --- Individual graph traversal tools ---
+	// Not registered by default (subsumed by kai_context).
+	// Enable via KAI_TOOLS=kai_callers,kai_callees,... for e2e tests or power users.
+
+	add(
+		mcp.NewTool("kai_callers",
+			readOnly(),
+			mcp.WithDescription("Find which files/functions call a given symbol."),
+			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callers of")),
+			mcp.WithString("file", mcp.Description("File path to narrow the search")),
+		),
+		log("kai_callers", s.handleCallers), true,
+	)
+
+	add(
+		mcp.NewTool("kai_callees",
+			readOnly(),
+			mcp.WithDescription("Find which symbols/files are called from a given symbol."),
+			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callees of")),
+			mcp.WithString("file", mcp.Description("File containing the symbol")),
+		),
+		log("kai_callees", s.handleCallees), true,
+	)
+
+	add(
+		mcp.NewTool("kai_dependents",
+			readOnly(),
+			mcp.WithDescription("Find files that import/depend on a given file."),
+			mcp.WithString("file", mcp.Required(), mcp.Description("File path to find dependents of")),
+		),
+		log("kai_dependents", s.handleDependents), true,
+	)
+
+	add(
+		mcp.NewTool("kai_dependencies",
+			readOnly(),
+			mcp.WithDescription("Find files that a given file imports/depends on."),
+			mcp.WithString("file", mcp.Required(), mcp.Description("File path to find dependencies of")),
+		),
+		log("kai_dependencies", s.handleDependencies), true,
+	)
+
+	add(
+		mcp.NewTool("kai_tests",
+			readOnly(),
+			mcp.WithDescription("Find test files that cover a given source file."),
+			mcp.WithString("file", mcp.Required(), mcp.Description("Source file to find tests for")),
+		),
+		log("kai_tests", s.handleTests), true,
+	)
+
+	add(
+		mcp.NewTool("kai_activity",
+			readOnly(),
+			mcp.WithDescription("Show recent file changes detected by the live graph watcher."),
+		),
+		log("kai_activity", s.handleActivity), true,
+	)
+
+	add(
+		mcp.NewTool("kai_stats",
+			readOnly(),
+			mcp.WithDescription("Return project-wide authorship statistics."),
+		),
+		log("kai_stats", s.handleStats), true,
+	)
+
+	add(
+		mcp.NewTool("kai_lock",
+			mcp.WithDescription("Acquire advisory locks on files. Other agents will see the lock but can still edit (soft lock). Locks auto-expire after 5 minutes of inactivity."),
+			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to lock (e.g. 'src/main.go,src/lib.go')")),
+		),
+		log("kai_lock", s.handleLock), true,
+	)
+
+	add(
+		mcp.NewTool("kai_unlock",
+			mcp.WithDescription("Release advisory locks on files."),
+			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to unlock")),
+		),
+		log("kai_unlock", s.handleUnlock), true,
+	)
 }
 
 // --- Snapshot Resolution ---
@@ -1085,7 +1191,7 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		}
 	} else {
 		// Summary mode: cap symbols
-		const maxSymbols = 50
+		const maxSymbols = 20
 		shown := len(symbols)
 		if shown > maxSymbols {
 			shown = maxSymbols
@@ -1107,7 +1213,7 @@ func (s *Server) handleContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		}
 	}
 
-	const maxContextItems = 50
+	const maxContextItems = 15
 
 	// Dependencies (what this file imports)
 	importEdges, err := s.db.GetEdges(fileNode.ID, graph.EdgeImports)
@@ -1257,7 +1363,7 @@ func (s *Server) handleImpact(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	// Cap output to stay within MCP client token limits
-	const maxItems = 50
+	const maxItems = 20
 	var b strings.Builder
 	fmt.Fprintf(&b, "impact of %s (depth %d): %d affected\n", filePath, maxDepth, len(results))
 	if len(sourceFiles) > 0 {
@@ -1579,7 +1685,7 @@ func isTestFile(path string) bool {
 // jsonResult marshals data to a JSON text result.
 // maxResultBytes is the soft cap on MCP tool response size.
 // Responses larger than this are truncated to save tokens.
-const maxResultBytes = 4096
+const maxResultBytes = 2048
 
 func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(data)
@@ -1840,5 +1946,84 @@ func (s *Server) handleActivity(ctx context.Context, req mcp.CallToolRequest) (*
 		result["warning_count"] = len(warnings)
 	}
 
+	// Include advisory locks from the server
+	s.locksMu.RLock()
+	locks := s.locks
+	s.locksMu.RUnlock()
+	if len(locks) > 0 {
+		result["locks"] = locks
+		result["lock_count"] = len(locks)
+	}
+
 	return jsonResult(result)
+}
+
+func (s *Server) handleLock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	filesStr, err := req.RequireString("files")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter 'files'"), nil
+	}
+
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	var files []string
+	for _, f := range strings.Split(filesStr, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+
+	acquired, denied, err := s.remoteClient.AcquireLocks(agentName, files)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("lock request failed: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"acquired": acquired,
+	}
+	if len(denied) > 0 {
+		result["denied"] = denied
+	}
+	return jsonResult(result)
+}
+
+func (s *Server) handleUnlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	filesStr, err := req.RequireString("files")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter 'files'"), nil
+	}
+
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	var files []string
+	for _, f := range strings.Split(filesStr, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+
+	err = s.remoteClient.ReleaseLocks(agentName, files)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("unlock failed: %v", err)), nil
+	}
+
+	return jsonResult(map[string]interface{}{
+		"released": files,
+	})
 }
