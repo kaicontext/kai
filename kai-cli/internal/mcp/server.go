@@ -24,6 +24,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"kai-core/merge"
 	"kai-core/parse"
 	"kai/internal/authorship"
 	"kai/internal/dirio"
@@ -88,6 +89,9 @@ type Server struct {
 	lastEdgeSeq    int64
 	syncChannelID  string   // live sync channel ID (empty if not subscribed)
 	syncStopSSE    chan struct{} // signals SSE reader goroutine to stop
+	// Last-synced file content for 3-way merge on receive
+	syncBaseMu     sync.RWMutex
+	syncBase       map[string][]byte // path -> content at last sync point
 	// Rate limiting: cap read-only tool calls to avoid context bloat
 	readCallCount int32
 }
@@ -216,6 +220,12 @@ func (s *Server) startWatcher(db *graph.DB) {
 						}
 						encoded := base64.StdEncoding.EncodeToString(content)
 						client.SyncPushFile(agentName, s.syncChannelID, path, "", encoded)
+						// Update base so we can 3-way merge incoming changes
+						s.syncBaseMu.Lock()
+						if s.syncBase != nil {
+							s.syncBase[path] = content
+						}
+						s.syncBaseMu.Unlock()
 					}
 				}
 			}()
@@ -2321,6 +2331,9 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 
 		s.syncChannelID = resp.ChannelID
 		s.syncStopSSE = make(chan struct{})
+		s.syncBaseMu.Lock()
+		s.syncBase = make(map[string][]byte)
+		s.syncBaseMu.Unlock()
 
 		// Start background SSE reader to receive and apply file changes
 		go s.readSSEEvents(resp.ChannelID)
@@ -2424,8 +2437,7 @@ func (s *Server) readSSEEvents(channelID string) {
 }
 
 // handleSyncFileChange applies a received file change to disk.
-// Skips the write if the local file was modified more recently than the event,
-// preventing clobber of local edits.
+// Uses 3-way merge when the local file has diverged from the base.
 func (s *Server) handleSyncFileChange(data string) {
 	var event struct {
 		Agent   string `json:"agent"`
@@ -2440,7 +2452,7 @@ func (s *Server) handleSyncFileChange(data string) {
 		return
 	}
 
-	content, err := base64.StdEncoding.DecodeString(event.Content)
+	incoming, err := base64.StdEncoding.DecodeString(event.Content)
 	if err != nil {
 		return
 	}
@@ -2452,18 +2464,48 @@ func (s *Server) handleSyncFileChange(data string) {
 		return
 	}
 
-	// Skip if local file was modified after the incoming event.
-	// This prevents overwriting local edits with stale remote content.
-	if info, err := os.Stat(absPath); err == nil {
-		localModTime := info.ModTime().UnixMilli()
-		if event.Time > 0 && localModTime > event.Time {
-			fmt.Fprintf(os.Stderr, "[kai-sync] skipping %s: local is newer (local=%d event=%d)\n",
-				event.File, localModTime, event.Time)
-			return
+	// Read current local content
+	local, localErr := os.ReadFile(absPath)
+
+	// Skip if identical
+	if localErr == nil && bytes.Equal(local, incoming) {
+		return
+	}
+
+	// Get the base version (last synced content)
+	s.syncBaseMu.RLock()
+	base := s.syncBase[event.File]
+	s.syncBaseMu.RUnlock()
+
+	var toWrite []byte
+
+	if localErr != nil || base == nil {
+		// No local file or no base — just write incoming (new file or first sync)
+		toWrite = incoming
+	} else if bytes.Equal(local, base) {
+		// Local unchanged since last sync — safe to overwrite with incoming
+		toWrite = incoming
+	} else {
+		// Local diverged from base — attempt semantic 3-way merge
+		lang := detectSyncLang(event.File)
+		if lang != "" {
+			mergeResult, mergeErr := merge.Merge3Way(base, local, incoming, lang)
+			if mergeErr == nil && mergeResult.Success {
+				if merged, ok := mergeResult.Files["file"]; ok {
+					toWrite = merged
+					fmt.Fprintf(os.Stderr, "[kai-sync] merged %s (auto-resolved)\n", event.File)
+				}
+			}
 		}
-		// Also skip if incoming content is identical to what's on disk
-		existing, err := os.ReadFile(absPath)
-		if err == nil && bytes.Equal(existing, content) {
+
+		if toWrite == nil {
+			// Merge failed or unsupported language — skip write, don't clobber
+			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n",
+				event.File, event.Agent)
+			// Still update base so next incoming change can merge against the latest remote
+			s.syncBaseMu.Lock()
+			s.syncBase[event.File] = incoming
+			s.syncBaseMu.Unlock()
 			return
 		}
 	}
@@ -2471,7 +2513,31 @@ func (s *Server) handleSyncFileChange(data string) {
 	// Ensure parent directory exists
 	os.MkdirAll(filepath.Dir(absPath), 0755)
 
-	if err := os.WriteFile(absPath, content, 0644); err != nil {
+	if err := os.WriteFile(absPath, toWrite, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "[kai-sync] failed to write %s: %v\n", event.File, err)
+		return
 	}
+
+	// Update base to the incoming content (the shared state)
+	s.syncBaseMu.Lock()
+	s.syncBase[event.File] = incoming
+	s.syncBaseMu.Unlock()
+}
+
+// detectSyncLang maps file path to a language the merge engine supports.
+func detectSyncLang(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "js"
+	case ".ts", ".tsx":
+		return "ts"
+	case ".py":
+		return "python"
+	case ".rb":
+		return "ruby"
+	case ".rs":
+		return "rust"
+	}
+	return ""
 }
