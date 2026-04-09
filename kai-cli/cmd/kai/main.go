@@ -69,7 +69,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.74"
+var Version = "0.9.75"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -1978,6 +1978,7 @@ type claudeResult struct {
 	} `json:"usage"`
 	DurationMS    int    `json:"duration_ms"`
 	DurationAPIMS int    `json:"duration_api_ms"`
+	NumTurns      int    `json:"num_turns"`
 	Result        string `json:"result"`
 	IsError       bool   `json:"is_error"`
 }
@@ -2120,6 +2121,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 			"cache_read_input_tokens":     withoutResult.Usage.CacheReadInputTokens,
 			"cost_usd":                   costWithout,
 			"duration_ms":                withoutResult.DurationMS,
+			"num_turns":                  withoutResult.NumTurns,
 		},
 		"with_kai": map[string]interface{}{
 			"total_tokens":               withTokens,
@@ -2129,6 +2131,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 			"cache_read_input_tokens":     withResult.Usage.CacheReadInputTokens,
 			"cost_usd":                   costWith,
 			"duration_ms":                withResult.DurationMS,
+			"num_turns":                  withResult.NumTurns,
 		},
 		"savings": map[string]interface{}{
 			"cost_saved":        costSaved,
@@ -2144,7 +2147,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 // If withKai is false, it disables all MCP servers via --strict-mcp-config with an empty config.
 // If withKai is true, it runs normally (Kai MCP available via user's config).
 func runClaude(cwd, task, model string, withKai bool) (claudeResult, error) {
-	args := []string{"-p", task, "--output-format", "json"}
+	args := []string{"-p", task, "--output-format", "json", "--max-turns", "1"}
 
 	if model != "" {
 		args = append(args, "--model", model)

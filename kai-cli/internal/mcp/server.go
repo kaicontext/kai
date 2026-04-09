@@ -99,6 +99,8 @@ func NewServer(workDir, version string) *Server {
 			s.db = db
 			s.resolver = ref.NewResolver(db)
 			s.snap = snapshot.NewCreator(db, nil)
+			// Start file watcher if a snapshot exists
+			go s.startWatcher(db)
 		}
 	}
 
@@ -154,12 +156,11 @@ func (s *Server) Serve(ctx context.Context) error {
 func (s *Server) startWatcher(db *graph.DB) {
 	w, err := watcher.New(s.workDir, db)
 	if err != nil {
-		// Non-fatal: watcher is a nice-to-have
 		return
 	}
 
 	w.OnError = func(err error) {
-		// Silently ignore watcher errors — don't break MCP
+		fmt.Fprintf(os.Stderr, "[kai-watcher] error: %v\n", err)
 	}
 
 	// Wire activity heartbeats and edge deltas to the server (best-effort)
@@ -274,11 +275,11 @@ func (s *Server) Close() error {
 	return nil
 }
 
-const kaiMCPSection = `## Code Analysis — MANDATORY
+const kaiMCPSection = `## Code Analysis
 
-**You MUST use Kai MCP tools** (kai_diff, kai_grep, kai_context, kai_callers, kai_callees, kai_impact, etc.) for ALL code exploration, searching, diffing, and analysis. Do NOT use raw Grep, Read, git-diff, or the Explore agent for these tasks. Only fall back to raw tools when the Kai MCP server is unavailable or the specific query is not covered by any Kai tool.
+Prefer Kai MCP tools (kai_context, kai_callers, kai_callees, kai_impact, kai_tests) when exploring unfamiliar code or analyzing the impact of changes. They provide semantic graph data (call graphs, dependency chains) that grep cannot. For simple lookups or when you already have enough context, use built-in tools directly.
 
-**Do NOT delegate code exploration to subagents (e.g., Explore agents).** Subagents cannot use Kai MCP tools. Instead, call the Kai MCP tools directly from the main conversation.
+Do not delegate code exploration to subagents — they cannot access Kai MCP tools.
 `
 
 // ensureAIContextFiles checks for existing AI coding tool context files
@@ -550,6 +551,22 @@ func readOnly() mcp.ToolOption {
 	})
 }
 
+// toolEnabled checks whether a tool should be registered.
+// If KAI_TOOLS is set, only tools in the comma-separated list are enabled.
+// If KAI_TOOLS is unset, all tools are enabled.
+func toolEnabled(name string) bool {
+	env := os.Getenv("KAI_TOOLS")
+	if env == "" {
+		return true
+	}
+	for _, t := range strings.Split(env, ",") {
+		if strings.TrimSpace(t) == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) registerTools(srv *server.MCPServer) {
 	// Initialize MCP call logging if enabled (KAI_MCP_LOG=1)
 	if mcpLogEnabled() {
@@ -564,11 +581,18 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		return h
 	}
 
+	// add registers a tool only if it passes the KAI_TOOLS filter.
+	add := func(tool mcp.Tool, handler server.ToolHandlerFunc) {
+		if toolEnabled(tool.Name) {
+			srv.AddTool(tool, handler)
+		}
+	}
+
 	// kai_symbols — list all symbols in a file
-	srv.AddTool(
+	add(
 		mcp.NewTool("kai_symbols",
 			readOnly(),
-			mcp.WithDescription("List symbols defined in a file. Returns names, kinds, and line numbers. For large files, prefer kai_impact/kai_callers/kai_tests over listing all symbols. Use 'kind' to filter (e.g. only functions). Use 'exported=true' for Go to see only public symbols."),
+			mcp.WithDescription("List symbols defined in a file with names, kinds, and line numbers. Use 'kind' to filter (e.g. only functions). Use 'exported=true' for Go public symbols only."),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root (e.g. src/auth.go)")),
 			mcp.WithString("kind", mcp.Description("Filter by symbol kind: function, method, class, variable, interface, struct, type, constant")),
 			mcp.WithBoolean("exported", mcp.Description("If true, only return exported/public symbols (Go: uppercase-first)")),
@@ -577,63 +601,13 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		log("kai_symbols", s.handleSymbols),
 	)
 
-	// kai_callers — find all callers of a symbol
-	srv.AddTool(
-		mcp.NewTool("kai_callers",
-			readOnly(),
-			mcp.WithDescription("Find all functions/files that call a given symbol. Walks the CALLS edge in the semantic graph. More accurate than grep — finds indirect callers through imports."),
-			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callers of (e.g. validateToken, Resolve). Use bare function name — receiver prefixes like *Type. are stripped automatically.")),
-			mcp.WithString("file", mcp.Description("File where the symbol is defined, to disambiguate (e.g. auth/token.go)")),
-		),
-		log("kai_callers", s.handleCallers),
-	)
-
-	// kai_callees — find all symbols called by a symbol
-	srv.AddTool(
-		mcp.NewTool("kai_callees",
-			readOnly(),
-			mcp.WithDescription("Find all functions/symbols that a given symbol calls. Walks the CALLS edge outward from the symbol."),
-			mcp.WithString("symbol", mcp.Required(), mcp.Description("Symbol name to find callees of")),
-			mcp.WithString("file", mcp.Description("File where the symbol is defined, to disambiguate")),
-		),
-		log("kai_callees", s.handleCallees),
-	)
-
-	// kai_dependents — find files that import/depend on a file
-	srv.AddTool(
-		mcp.NewTool("kai_dependents",
-			readOnly(),
-			mcp.WithDescription("Find all files that import or depend on the given file. Answers: 'what breaks if I change this file?'"),
-			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
-		),
-		log("kai_dependents", s.handleDependents),
-	)
-
-	// kai_dependencies — find files that a file imports
-	srv.AddTool(
-		mcp.NewTool("kai_dependencies",
-			readOnly(),
-			mcp.WithDescription("Find all files that the given file imports or depends on. Answers: 'what does this file need?'"),
-			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
-		),
-		log("kai_dependencies", s.handleDependencies),
-	)
-
-	// kai_tests — find tests that cover a file or symbol
-	srv.AddTool(
-		mcp.NewTool("kai_tests",
-			readOnly(),
-			mcp.WithDescription("Find test files that cover the given source file. Uses both static analysis (TESTS edges) and coverage data if available."),
-			mcp.WithString("file", mcp.Required(), mcp.Description("Source file path to find tests for")),
-		),
-		log("kai_tests", s.handleTests),
-	)
-
 	// kai_context — bundled context for a location (the high-leverage tool)
-	srv.AddTool(
+	// Subsumes kai_callers, kai_callees, kai_dependents, kai_dependencies, kai_tests
+	// into a single tool to reduce tool count and token overhead from definitions.
+	add(
 		mcp.NewTool("kai_context",
 			readOnly(),
-			mcp.WithDescription("Get everything relevant to a file location: the enclosing symbol, its callers, callees, related tests, and file dependencies. One call instead of multiple. Use this when editing code to understand the impact of changes."),
+			mcp.WithDescription("Get callers, callees, tests, and dependencies for a specific file. Use only when you need to understand call relationships before editing — not for general exploration or architecture questions."),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path relative to repo root")),
 			mcp.WithString("symbol", mcp.Description("Symbol name to focus on (optional, returns all symbols in file if omitted)")),
 			mcp.WithNumber("depth", mcp.Description("How many hops to traverse in the graph (default: 1)")),
@@ -642,10 +616,10 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 	)
 
 	// kai_impact — transitive downstream impact analysis
-	srv.AddTool(
+	add(
 		mcp.NewTool("kai_impact",
 			readOnly(),
-			mcp.WithDescription("Analyze the transitive downstream impact of changing a file. Walks the dependency graph to find all files and tests that could be affected, with hop distance."),
+			mcp.WithDescription("Find all files and tests affected by changing a file, with hop distance. Use before making edits to assess blast radius — not for read-only exploration."),
 			mcp.WithString("file", mcp.Required(), mcp.Description("File path to analyze impact for")),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum graph traversal depth (default: 3)")),
 		),
@@ -655,7 +629,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 	// --- Authorship / AI Attribution Tools ---
 
 	// kai_checkpoint — record an AI edit event
-	srv.AddTool(
+	add(
 		mcp.NewTool("kai_checkpoint",
 			mcp.WithToolAnnotation(mcp.ToolAnnotation{
 				ReadOnlyHint:    mcp.ToBoolPtr(false),
@@ -675,7 +649,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 	)
 
 	// kai_blame — show AI vs human authorship for a file
-	srv.AddTool(
+	add(
 		mcp.NewTool("kai_blame",
 			readOnly(),
 			mcp.WithDescription("Show AI vs human authorship for a file. Returns per-line attribution or a summary showing which agent/model authored each section."),
@@ -685,23 +659,8 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		log("kai_blame", s.handleBlame),
 	)
 
-	// kai_stats — project-wide AI authorship statistics
-	srv.AddTool(
-		mcp.NewTool("kai_stats",
-			readOnly(),
-			mcp.WithDescription("Show AI vs human code authorship statistics for the project. Returns overall percentages and per-agent breakdowns."),
-		),
-		log("kai_stats", s.handleStats),
-	)
-
-	// kai_activity — show recent file changes (live graph activity)
-	srv.AddTool(
-		mcp.NewTool("kai_activity",
-			readOnly(),
-			mcp.WithDescription("Show recent file changes detected by the live graph watcher. Returns files modified, created, or deleted in the last 5 minutes. Use this to see what's actively being worked on."),
-		),
-		log("kai_activity", s.handleActivity),
-	)
+	// kai_stats and kai_activity removed — low-value for code exploration,
+	// each tool definition adds ~100 tokens to every API request.
 }
 
 // --- Snapshot Resolution ---
@@ -1432,17 +1391,22 @@ func (s *Server) findCallersViaFileEdges(snapID []byte, symbolName, filePath str
 // findCalleesViaFileEdges finds symbols called from a file containing the given symbol.
 func (s *Server) findCalleesViaFileEdges(snapID []byte, symbolName, filePath string) ([]callInfo, error) {
 	if filePath == "" {
-		// Need a file to find outgoing calls from
+		// Need a file to find outgoing calls from.
+		// Find the symbol, then follow its DEFINES_IN edge to get the file.
 		node, err := s.findSymbolInGraph(snapID, symbolName, "")
 		if err != nil {
 			return nil, err
 		}
-		if fileIDStr, ok := node.Payload["fileId"].(string); ok {
-			fileID, err := hex.DecodeString(fileIDStr)
-			if err == nil {
-				fileNode, err := s.db.GetNode(fileID)
+		// Symbol nodes are linked to files via DEFINES_IN edges (symbol → file)
+		defEdges, err := s.db.GetEdges(node.ID, graph.EdgeDefinesIn)
+		if err == nil {
+			for _, e := range defEdges {
+				fileNode, err := s.db.GetNode(e.Dst)
 				if err == nil && fileNode != nil {
 					filePath, _ = fileNode.Payload["path"].(string)
+					if filePath != "" {
+						break
+					}
 				}
 			}
 		}
@@ -1613,16 +1577,27 @@ func isTestFile(path string) bool {
 }
 
 // jsonResult marshals data to a JSON text result.
+// maxResultBytes is the soft cap on MCP tool response size.
+// Responses larger than this are truncated to save tokens.
+const maxResultBytes = 4096
+
 func jsonResult(data interface{}) (*mcp.CallToolResult, error) {
-	b, err := json.MarshalIndent(data, "", "  ")
+	b, err := json.Marshal(data)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("error marshaling result: %v", err)), nil
 	}
-	return mcp.NewToolResultText(string(b)), nil
+	s := string(b)
+	if len(s) > maxResultBytes {
+		s = s[:maxResultBytes] + "\n... truncated — use focused queries (symbol filter, kai_callers, kai_tests) for full details"
+	}
+	return mcp.NewToolResultText(s), nil
 }
 
 // textResult returns a plain-text MCP result (no JSON overhead).
 func textResult(text string) (*mcp.CallToolResult, error) {
+	if len(text) > maxResultBytes {
+		text = text[:maxResultBytes] + "\n... truncated — use focused queries for full details"
+	}
 	return mcp.NewToolResultText(text), nil
 }
 
