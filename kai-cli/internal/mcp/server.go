@@ -78,8 +78,10 @@ type Server struct {
 	warnings     []remote.OverlapWarning
 	locksMu      sync.RWMutex
 	locks        []remote.FileLock
-	// Remote client for lock/unlock (cached from watcher setup)
+	// Remote client for lock/unlock/sync (cached from watcher setup)
 	remoteClient *remote.Client
+	// Edge sync state
+	lastEdgeSeq  int64
 	// Rate limiting: cap read-only tool calls to avoid context bloat
 	readCallCount int32
 }
@@ -766,6 +768,23 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to unlock")),
 		),
 		log("kai_unlock", s.handleUnlock), false,
+	)
+
+	add(
+		mcp.NewTool("kai_sync",
+			readOnly(),
+			mcp.WithDescription("Fetch edge changes other agents have made since your last sync. Shows what files and relationships changed, who changed them, and when."),
+		),
+		log("kai_sync", s.handleSync), false,
+	)
+
+	add(
+		mcp.NewTool("kai_merge_check",
+			readOnly(),
+			mcp.WithDescription("Check if your current changes can merge cleanly with other agents' work. Call before finalizing edits to catch conflicts early."),
+			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths you've modified")),
+		),
+		log("kai_merge_check", s.handleMergeCheck), false,
 	)
 }
 
@@ -2026,4 +2045,175 @@ func (s *Server) handleUnlock(ctx context.Context, req mcp.CallToolRequest) (*mc
 	return jsonResult(map[string]interface{}{
 		"released": files,
 	})
+}
+
+func (s *Server) handleSync(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+
+	resp, err := s.remoteClient.SyncEdges(s.lastEdgeSeq, agentName)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("sync failed: %v", err)), nil
+	}
+
+	// Update our sync position
+	if resp.LatestSeq > s.lastEdgeSeq {
+		s.lastEdgeSeq = resp.LatestSeq
+	}
+
+	if len(resp.Entries) == 0 {
+		return jsonResult(map[string]interface{}{
+			"status":     "up_to_date",
+			"latest_seq": resp.LatestSeq,
+			"message":    "No changes from other agents since last sync.",
+		})
+	}
+
+	// Group by agent and file for readable output
+	type fileChange struct {
+		File    string `json:"file"`
+		Added   int    `json:"added,omitempty"`
+		Removed int    `json:"removed,omitempty"`
+	}
+	type agentChanges struct {
+		Agent   string       `json:"agent"`
+		Actor   string       `json:"actor"`
+		Files   []fileChange `json:"files"`
+	}
+
+	agentMap := make(map[string]*agentChanges)
+	fileMap := make(map[string]map[string]*fileChange) // agent -> file -> change
+
+	for _, e := range resp.Entries {
+		ac, ok := agentMap[e.Agent]
+		if !ok {
+			ac = &agentChanges{Agent: e.Agent, Actor: e.Actor}
+			agentMap[e.Agent] = ac
+			fileMap[e.Agent] = make(map[string]*fileChange)
+		}
+		fc, ok := fileMap[e.Agent][e.File]
+		if !ok {
+			fc = &fileChange{File: e.File}
+			fileMap[e.Agent][e.File] = fc
+		}
+		if e.Action == "add" {
+			fc.Added++
+		} else {
+			fc.Removed++
+		}
+	}
+
+	var agents []agentChanges
+	for _, ac := range agentMap {
+		for _, fc := range fileMap[ac.Agent] {
+			ac.Files = append(ac.Files, *fc)
+		}
+		agents = append(agents, *ac)
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":      "changes_found",
+		"entry_count": len(resp.Entries),
+		"latest_seq":  resp.LatestSeq,
+		"has_more":    resp.HasMore,
+		"agents":      agents,
+	})
+}
+
+func (s *Server) handleMergeCheck(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	filesStr, err := req.RequireString("files")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter 'files'"), nil
+	}
+
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	var files []string
+	for _, f := range strings.Split(filesStr, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+
+	// Sync to get latest state
+	syncResp, err := s.remoteClient.SyncEdges(s.lastEdgeSeq, agentName)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("sync failed: %v", err)), nil
+	}
+	if syncResp.LatestSeq > s.lastEdgeSeq {
+		s.lastEdgeSeq = syncResp.LatestSeq
+	}
+
+	// Check: did any other agent modify the same files?
+	myFiles := make(map[string]bool, len(files))
+	for _, f := range files {
+		myFiles[f] = true
+	}
+
+	type conflictInfo struct {
+		File  string `json:"file"`
+		Agent string `json:"agent"`
+		Actor string `json:"actor"`
+		Edges int    `json:"edges_changed"`
+	}
+
+	var conflicts []conflictInfo
+	var warnings []conflictInfo
+	otherFiles := make(map[string]string) // file -> agent
+
+	for _, e := range syncResp.Entries {
+		if myFiles[e.File] {
+			// Another agent changed the same file
+			conflicts = append(conflicts, conflictInfo{
+				File: e.File, Agent: e.Agent, Actor: e.Actor, Edges: 1,
+			})
+		} else {
+			otherFiles[e.File] = e.Agent
+		}
+	}
+
+	// Check 1-hop: did other agents change files that our files depend on?
+	s.mu.Lock()
+	w := s.fileWatcher
+	s.mu.Unlock()
+	if w != nil {
+		related := w.GetRelatedFiles(files)
+		for _, r := range related {
+			if agent, ok := otherFiles[r]; ok {
+				warnings = append(warnings, conflictInfo{
+					File: r, Agent: agent, Edges: 1,
+				})
+			}
+		}
+	}
+
+	mergeable := len(conflicts) == 0
+	result := map[string]interface{}{
+		"mergeable": mergeable,
+	}
+	if mergeable {
+		result["message"] = "No conflicts detected. Safe to merge."
+	} else {
+		result["message"] = "Conflicts detected — other agents modified the same files."
+		result["conflicts"] = conflicts
+	}
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
+		result["warning_message"] = "Other agents changed files related to yours (dependencies/dependents)."
+	}
+	return jsonResult(result)
 }

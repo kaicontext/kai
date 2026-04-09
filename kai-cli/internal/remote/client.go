@@ -1661,6 +1661,54 @@ func (c *Client) ReleaseLocks(agent string, files []string) error {
 	return nil
 }
 
+// EdgeSyncEntry represents a single edge change from another agent.
+type EdgeSyncEntry struct {
+	Seq      int64  `json:"seq"`
+	Agent    string `json:"agent"`
+	Actor    string `json:"actor"`
+	Time     int64  `json:"time"`
+	File     string `json:"file"`
+	Action   string `json:"action"`
+	Src      string `json:"src"`
+	EdgeType string `json:"edge_type"`
+	Dst      string `json:"dst"`
+}
+
+// EdgeSyncResponse contains edge changes since a sequence number.
+type EdgeSyncResponse struct {
+	Entries   []EdgeSyncEntry `json:"entries"`
+	LatestSeq int64           `json:"latest_seq"`
+	HasMore   bool            `json:"has_more"`
+}
+
+// SyncEdges fetches edge changes from other agents since the given sequence number.
+func (c *Client) SyncEdges(sinceSeq int64, agent string) (*EdgeSyncResponse, error) {
+	url := fmt.Sprintf("%s%s/v1/edges/sync?since=%d&agent=%s&limit=200",
+		c.BaseURL, c.repoPath(), sinceSeq, agent)
+
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating sync request: %w", err)
+	}
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("syncing edges: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("edge sync failed: %d", resp.StatusCode)
+	}
+
+	var result EdgeSyncResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	return &result, nil
+}
+
 // EdgeDelta represents a single edge to add or remove.
 type EdgeDelta struct {
 	Src  string `json:"src"`  // hex node ID

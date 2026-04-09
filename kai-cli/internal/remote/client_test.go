@@ -1176,3 +1176,71 @@ func TestClient_ReleaseLocks(t *testing.T) {
 		t.Fatalf("ReleaseLocks failed: %v", err)
 	}
 }
+
+func TestClient_SyncEdges(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/test/repo/v1/edges/sync" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		since := r.URL.Query().Get("since")
+		if since != "100" {
+			t.Errorf("expected since=100, got %s", since)
+		}
+		agent := r.URL.Query().Get("agent")
+		if agent != "my-agent" {
+			t.Errorf("expected agent=my-agent, got %s", agent)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"entries": []map[string]interface{}{
+				{
+					"seq": 101, "agent": "other-agent", "actor": "bob",
+					"time": 1000, "file": "src/util.go",
+					"action": "add", "src": "aaa", "edge_type": "IMPORTS", "dst": "bbb",
+				},
+			},
+			"latest_seq": 101,
+			"has_more":   false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncEdges(100, "my-agent")
+	if err != nil {
+		t.Fatalf("SyncEdges failed: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(resp.Entries))
+	}
+	if resp.Entries[0].Agent != "other-agent" {
+		t.Errorf("expected other-agent, got %s", resp.Entries[0].Agent)
+	}
+	if resp.Entries[0].File != "src/util.go" {
+		t.Errorf("expected src/util.go, got %s", resp.Entries[0].File)
+	}
+	if resp.LatestSeq != 101 {
+		t.Errorf("expected latest_seq=101, got %d", resp.LatestSeq)
+	}
+}
+
+func TestClient_SyncEdges_Empty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"entries":    []interface{}{},
+			"latest_seq": 50,
+			"has_more":   false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncEdges(50, "my-agent")
+	if err != nil {
+		t.Fatalf("SyncEdges failed: %v", err)
+	}
+	if len(resp.Entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(resp.Entries))
+	}
+}
