@@ -114,7 +114,9 @@ func (w *Watcher) Start() error {
 		base := filepath.Base(path)
 		if base == ".kai" || base == ".git" || base == "node_modules" ||
 			base == "vendor" || base == ".repo-cache" || base == "__pycache__" ||
-			base == ".venv" || base == "target" || base == "dist" || base == "build" {
+			base == ".venv" || base == "target" || base == "dist" || base == "build" ||
+			base == ".next" || base == ".vercel" || base == ".nuxt" || base == ".svelte-kit" ||
+			base == ".pytest_cache" || base == ".mypy_cache" || base == ".ruff_cache" {
 			return filepath.SkipDir
 		}
 
