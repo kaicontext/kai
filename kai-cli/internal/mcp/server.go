@@ -741,7 +741,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			readOnly(),
 			mcp.WithDescription("Show recent file changes detected by the live graph watcher."),
 		),
-		log("kai_activity", s.handleActivity), true,
+		log("kai_activity", s.handleActivity), false,
 	)
 
 	add(
@@ -757,7 +757,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Acquire advisory locks on files. Other agents will see the lock but can still edit (soft lock). Locks auto-expire after 5 minutes of inactivity."),
 			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to lock (e.g. 'src/main.go,src/lib.go')")),
 		),
-		log("kai_lock", s.handleLock), true,
+		log("kai_lock", s.handleLock), false,
 	)
 
 	add(
@@ -765,7 +765,7 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithDescription("Release advisory locks on files."),
 			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to unlock")),
 		),
-		log("kai_unlock", s.handleUnlock), true,
+		log("kai_unlock", s.handleUnlock), false,
 	)
 }
 
