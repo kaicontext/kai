@@ -4,6 +4,8 @@ package workspace
 import (
 	"fmt"
 
+	"kai-core/merge"
+
 	"kai/internal/graph"
 	"kai/internal/util"
 )
@@ -110,17 +112,89 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 		}
 	}
 
-	// Check for conflicts: files modified in both
+	// Attempt semantic merge for files modified on both sides
 	var conflicts []Conflict
+	merger := merge.NewMerger()
+	semanticMerged := make(map[string][]byte)
+
 	for path := range wsModified {
-		if targetModified[path] {
+		if !targetModified[path] {
+			continue
+		}
+
+		baseDigest := baseFiles[path]
+		headDigest := headFiles[path]
+		targetDigest := targetFiles[path]
+
+		if baseDigest == "" || headDigest == "" || targetDigest == "" {
 			conflicts = append(conflicts, Conflict{
 				Path:        path,
 				Description: "File modified in both workspace and target",
-				BaseDigest:  baseFiles[path],
-				HeadDigest:  headFiles[path],
-				NewDigest:   targetFiles[path],
+				BaseDigest:  baseDigest,
+				HeadDigest:  headDigest,
+				NewDigest:   targetDigest,
 			})
+			continue
+		}
+
+		baseContent, err := m.db.ReadObject(baseDigest)
+		headContent, err2 := m.db.ReadObject(headDigest)
+		targetContent, err3 := m.db.ReadObject(targetDigest)
+		if err != nil || err2 != nil || err3 != nil {
+			conflicts = append(conflicts, Conflict{
+				Path:        path,
+				Description: "File modified in both workspace and target (content not available for semantic merge)",
+				BaseDigest:  baseDigest,
+				HeadDigest:  headDigest,
+				NewDigest:   targetDigest,
+			})
+			continue
+		}
+
+		lang := normalizeMergeLang(path)
+		if lang == "" {
+			conflicts = append(conflicts, Conflict{
+				Path:        path,
+				Description: "File modified in both workspace and target (unsupported language for semantic merge)",
+				BaseDigest:  baseDigest,
+				HeadDigest:  headDigest,
+				NewDigest:   targetDigest,
+			})
+			continue
+		}
+
+		mergeResult, mergeErr := merger.MergeFiles(
+			map[string][]byte{path: baseContent},
+			map[string][]byte{path: headContent},
+			map[string][]byte{path: targetContent},
+			lang,
+		)
+		if mergeErr != nil {
+			conflicts = append(conflicts, Conflict{
+				Path:        path,
+				Description: fmt.Sprintf("Semantic merge failed: %v", mergeErr),
+				BaseDigest:  baseDigest,
+				HeadDigest:  headDigest,
+				NewDigest:   targetDigest,
+			})
+			continue
+		}
+
+		if !mergeResult.Success {
+			for _, mc := range mergeResult.Conflicts {
+				conflicts = append(conflicts, Conflict{
+					Path:        path,
+					Description: fmt.Sprintf("[%s] %s", mc.Kind, mc.Message),
+					BaseDigest:  baseDigest,
+					HeadDigest:  headDigest,
+					NewDigest:   targetDigest,
+				})
+			}
+			continue
+		}
+
+		if content, ok := mergeResult.Files[path]; ok {
+			semanticMerged[path] = content
 		}
 	}
 
@@ -130,21 +204,16 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 		}, nil
 	}
 
-	// No conflicts: create merged snapshot
-	// Start with target files, apply workspace changes
+	// Build merged file set: start with target, apply workspace changes
 	mergedFiles := make(map[string]string)
 	for path, digest := range targetFiles {
 		mergedFiles[path] = digest
 	}
-
-	// Apply workspace changes (additions and modifications)
 	for path, digest := range headFiles {
 		if wsModified[path] {
 			mergedFiles[path] = digest
 		}
 	}
-
-	// Apply workspace deletions
 	for path := range baseFiles {
 		if _, existsInHead := headFiles[path]; !existsInHead {
 			delete(mergedFiles, path)
@@ -158,6 +227,29 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 	}
 	defer tx.Rollback()
 
+	// Write semantically merged files
+	semanticMergedNodes := make(map[string]*graph.Node)
+	for path, content := range semanticMerged {
+		digest, err := m.db.WriteObject(content)
+		if err != nil {
+			return nil, fmt.Errorf("writing merged content for %s: %w", path, err)
+		}
+		lang := normalizeMergeLang(path)
+		filePayload := map[string]interface{}{
+			"path":   path,
+			"lang":   lang,
+			"digest": digest,
+		}
+		fileID, err := m.db.InsertNode(tx, graph.KindFile, filePayload)
+		if err != nil {
+			return nil, fmt.Errorf("inserting merged file node for %s: %w", path, err)
+		}
+		semanticMergedNodes[path] = &graph.Node{ID: fileID, Kind: graph.KindFile, Payload: filePayload}
+		mergedFiles[path] = digest
+	}
+
+	autoResolved := len(semanticMerged)
+
 	mergedSnapPayload := map[string]interface{}{
 		"sourceType":     "merged",
 		"sourceRef":      fmt.Sprintf("integrate:%s->%s", util.BytesToHex(ws.ID)[:12], targetHex[:12]),
@@ -166,13 +258,15 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 		"integratedFrom": util.BytesToHex(ws.ID),
 		"targetSnapshot": targetHex,
 	}
+	if autoResolved > 0 {
+		mergedSnapPayload["autoResolved"] = autoResolved
+	}
 
 	mergedSnapID, err := m.db.InsertNode(tx, graph.KindSnapshot, mergedSnapPayload)
 	if err != nil {
 		return nil, fmt.Errorf("inserting merged snapshot: %w", err)
 	}
 
-	// Get file nodes from head and target to reuse
 	headFileNodes, err := m.getSnapshotFileNodes(ws.HeadSnapshot)
 	if err != nil {
 		return nil, err
@@ -182,10 +276,11 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 		return nil, err
 	}
 
-	// Create HAS_FILE edges for merged snapshot
 	for path := range mergedFiles {
 		var fileNode *graph.Node
-		if wsModified[path] {
+		if semanticMergedNodes[path] != nil {
+			fileNode = semanticMergedNodes[path]
+		} else if wsModified[path] {
 			fileNode = headFileNodes[path]
 		} else {
 			fileNode = targetFileNodes[path]
@@ -204,7 +299,7 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 	return &IntegrateResult{
 		ResultSnapshot:    mergedSnapID,
 		AppliedChangeSets: ws.OpenChangeSets,
-		AutoResolved:      len(wsModified) + len(targetModified) - len(conflicts),
+		AutoResolved:      autoResolved,
 	}, nil
 }
 
