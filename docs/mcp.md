@@ -92,6 +92,17 @@ kai mcp serve
 | `kai_context` | Bundled context for a file/symbol: callers, callees, tests, dependencies in one call. When a symbol is specified, returns only that symbol's info (not all symbols in the file). |
 | `kai_impact` | Transitive downstream impact analysis with hop distance. Uses batch SQL queries for performance on large repos. |
 
+### Multi-Agent Collaboration Tools
+
+| Tool | Description |
+|------|-------------|
+| `kai_activity` | Show recent file changes detected by the live graph watcher. Includes overlap warnings and advisory locks from other agents. |
+| `kai_lock` | Acquire advisory locks on files. Other agents see the lock but can still edit (soft lock). Auto-expires after 5 minutes of inactivity. |
+| `kai_unlock` | Release advisory locks on files. |
+| `kai_sync` | Fetch edge changes other agents have made since your last sync. Shows what files and relationships changed, who changed them, and when. |
+| `kai_merge_check` | Check if your current changes can merge cleanly with other agents' work. Uses edge sync + 1-hop overlap detection. |
+| `kai_live_sync` | Enable/disable real-time sync with other agents via SSE. When on, you see other agents' changes as they happen. Use `action: "on"` or `"off"`. |
+
 ### AI Authorship Tools
 
 | Tool | Description |
