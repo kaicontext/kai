@@ -81,7 +81,8 @@ type Server struct {
 	// Remote client for lock/unlock/sync (cached from watcher setup)
 	remoteClient *remote.Client
 	// Edge sync state
-	lastEdgeSeq  int64
+	lastEdgeSeq    int64
+	syncChannelID  string // live sync channel ID (empty if not subscribed)
 	// Rate limiting: cap read-only tool calls to avoid context bloat
 	readCallCount int32
 }
@@ -785,6 +786,15 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 			mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths you've modified")),
 		),
 		log("kai_merge_check", s.handleMergeCheck), false,
+	)
+
+	add(
+		mcp.NewTool("kai_live_sync",
+			mcp.WithDescription("Enable or disable real-time sync with other agents. When on, you'll see other agents' changes as they happen via SSE."),
+			mcp.WithString("action", mcp.Required(), mcp.Description("'on' to enable, 'off' to disable")),
+			mcp.WithString("files", mcp.Description("Comma-separated file paths to watch (default: all)")),
+		),
+		log("kai_live_sync", s.handleLiveSync), false,
 	)
 }
 
@@ -2216,4 +2226,79 @@ func (s *Server) handleMergeCheck(ctx context.Context, req mcp.CallToolRequest) 
 		result["warning_message"] = "Other agents changed files related to yours (dependencies/dependents)."
 	}
 	return jsonResult(result)
+}
+
+func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action, err := req.RequireString("action")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter 'action' (use 'on' or 'off')"), nil
+	}
+
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+
+	switch action {
+	case "on":
+		// Already subscribed?
+		if s.syncChannelID != "" {
+			return jsonResult(map[string]interface{}{
+				"status":  "already_subscribed",
+				"channel": s.syncChannelID,
+			})
+		}
+
+		var files []string
+		if filesStr := optString(req, "files"); filesStr != "" {
+			for _, f := range strings.Split(filesStr, ",") {
+				f = strings.TrimSpace(f)
+				if f != "" {
+					files = append(files, f)
+				}
+			}
+		}
+
+		resp, err := s.remoteClient.SubscribeSync(agentName, s.remoteClient.Actor, files)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("subscribe failed: %v", err)), nil
+		}
+
+		s.syncChannelID = resp.ChannelID
+
+		result := map[string]interface{}{
+			"status":  "subscribed",
+			"channel": resp.ChannelID,
+			"message": "Live sync active. Other agents' changes will appear in kai_activity.",
+		}
+		if len(files) > 0 {
+			result["watching"] = files
+		} else {
+			result["watching"] = "all files"
+		}
+		return jsonResult(result)
+
+	case "off":
+		if s.syncChannelID == "" {
+			return jsonResult(map[string]interface{}{
+				"status":  "not_subscribed",
+				"message": "Live sync is not active.",
+			})
+		}
+
+		s.remoteClient.UnsubscribeSync(s.syncChannelID)
+		s.syncChannelID = ""
+
+		return jsonResult(map[string]interface{}{
+			"status":  "unsubscribed",
+			"message": "Live sync disabled.",
+		})
+
+	default:
+		return mcp.NewToolResultError("action must be 'on' or 'off'"), nil
+	}
 }

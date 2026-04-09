@@ -1709,6 +1709,74 @@ func (c *Client) SyncEdges(sinceSeq int64, agent string) (*EdgeSyncResponse, err
 	return &result, nil
 }
 
+// SyncSubscribeResponse confirms a live sync subscription.
+type SyncSubscribeResponse struct {
+	ChannelID string `json:"channel_id"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// SubscribeSync registers for live sync events.
+func (c *Client) SubscribeSync(agent, actor string, files []string) (*SyncSubscribeResponse, error) {
+	filter := map[string]interface{}{}
+	if len(files) > 0 {
+		filter["files"] = files
+	} else {
+		filter["all"] = true
+	}
+	req := map[string]interface{}{
+		"agent":  agent,
+		"actor":  actor,
+		"filter": filter,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/sync/subscribe", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("subscribing to sync: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sync subscribe failed: %d", resp.StatusCode)
+	}
+
+	var result SyncSubscribeResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	return &result, nil
+}
+
+// UnsubscribeSync removes a live sync subscription.
+func (c *Client) UnsubscribeSync(channelID string) error {
+	httpReq, err := http.NewRequest("DELETE", c.BaseURL+c.repoPath()+"/v1/sync/subscribe/"+channelID, nil)
+	if err != nil {
+		return err
+	}
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("unsubscribing from sync: %w", err)
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
 // EdgeDelta represents a single edge to add or remove.
 type EdgeDelta struct {
 	Src  string `json:"src"`  // hex node ID
