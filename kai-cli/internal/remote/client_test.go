@@ -901,3 +901,278 @@ func TestPackObjectVerification(t *testing.T) {
 
 	t.Logf("Pack size: %d bytes, objects: %d", len(pack), len(packObjects))
 }
+
+func TestClient_PushActivity(t *testing.T) {
+	var gotAgent, gotActor string
+	var gotFiles []ActivityFile
+	var gotRelated []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/test/repo/v1/activity" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("X-Kailab-Actor") != "test-user" {
+			t.Errorf("expected actor header test-user, got %s", r.Header.Get("X-Kailab-Actor"))
+		}
+
+		var req struct {
+			Agent        string         `json:"agent"`
+			Actor        string         `json:"actor"`
+			Files        []ActivityFile `json:"files"`
+			RelatedFiles []string       `json:"relatedFiles"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		gotAgent = req.Agent
+		gotActor = req.Actor
+		gotFiles = req.Files
+		gotRelated = req.RelatedFiles
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":       true,
+			"warnings": []interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	client.Actor = "test-user"
+
+	files := []ActivityFile{
+		{Path: "src/main.go", Operation: "modified", Timestamp: 1000},
+		{Path: "src/lib.go", Operation: "created", Timestamp: 2000},
+	}
+	related := []string{"src/util.go", "src/config.go"}
+
+	warnings, err := client.PushActivity("mcp-client", files, related)
+	if err != nil {
+		t.Fatalf("PushActivity failed: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("expected 0 warnings, got %d", len(warnings))
+	}
+	if gotAgent != "mcp-client" {
+		t.Errorf("expected agent mcp-client, got %s", gotAgent)
+	}
+	if gotActor != "test-user" {
+		t.Errorf("expected actor test-user, got %s", gotActor)
+	}
+	if len(gotFiles) != 2 {
+		t.Errorf("expected 2 files, got %d", len(gotFiles))
+	}
+	if len(gotRelated) != 2 {
+		t.Errorf("expected 2 related files, got %d", len(gotRelated))
+	}
+}
+
+func TestClient_PushActivity_WithWarnings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok": true,
+			"warnings": []map[string]string{
+				{
+					"agent":     "other-agent",
+					"actor":     "alice",
+					"file":      "src/shared.go",
+					"relatedTo": "src/main.go",
+					"relation":  "dependency",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	client.Actor = "test-user"
+
+	warnings, err := client.PushActivity("mcp-client",
+		[]ActivityFile{{Path: "src/main.go", Operation: "modified", Timestamp: 1000}},
+		[]string{"src/shared.go"})
+	if err != nil {
+		t.Fatalf("PushActivity failed: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(warnings))
+	}
+	if warnings[0].Agent != "other-agent" {
+		t.Errorf("expected agent other-agent, got %s", warnings[0].Agent)
+	}
+	if warnings[0].File != "src/shared.go" {
+		t.Errorf("expected file src/shared.go, got %s", warnings[0].File)
+	}
+	if warnings[0].Relation != "dependency" {
+		t.Errorf("expected relation dependency, got %s", warnings[0].Relation)
+	}
+}
+
+func TestClient_PushActivity_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	_, err := client.PushActivity("agent", nil, nil)
+	if err == nil {
+		t.Error("expected error for 500 response")
+	}
+}
+
+func TestClient_PushEdgesIncremental(t *testing.T) {
+	var gotUpdates []IncrementalEdgeUpdate
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/test/repo/v1/edges/incremental" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+
+		var req struct {
+			Updates []IncrementalEdgeUpdate `json:"updates"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		gotUpdates = req.Updates
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"applied": len(req.Updates),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+
+	updates := []IncrementalEdgeUpdate{
+		{
+			File: "src/main.go",
+			AddedEdges: []EdgeDelta{
+				{Src: "aaa", Type: "IMPORTS", Dst: "bbb"},
+			},
+			RemovedEdges: []EdgeDelta{
+				{Src: "ccc", Type: "CALLS", Dst: "ddd"},
+			},
+		},
+	}
+
+	applied, err := client.PushEdgesIncremental(updates)
+	if err != nil {
+		t.Fatalf("PushEdgesIncremental failed: %v", err)
+	}
+	if applied != 1 {
+		t.Errorf("expected 1 applied, got %d", applied)
+	}
+	if len(gotUpdates) != 1 {
+		t.Fatalf("expected 1 update sent, got %d", len(gotUpdates))
+	}
+	if gotUpdates[0].File != "src/main.go" {
+		t.Errorf("expected file src/main.go, got %s", gotUpdates[0].File)
+	}
+	if len(gotUpdates[0].AddedEdges) != 1 {
+		t.Errorf("expected 1 added edge, got %d", len(gotUpdates[0].AddedEdges))
+	}
+	if len(gotUpdates[0].RemovedEdges) != 1 {
+		t.Errorf("expected 1 removed edge, got %d", len(gotUpdates[0].RemovedEdges))
+	}
+}
+
+func TestClient_PushEdgesIncremental_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	_, err := client.PushEdgesIncremental([]IncrementalEdgeUpdate{
+		{File: "test.go"},
+	})
+	if err == nil {
+		t.Error("expected error for 400 response")
+	}
+}
+
+func TestClient_AcquireLocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/test/repo/v1/locks" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+
+		var req struct {
+			Agent string   `json:"agent"`
+			Actor string   `json:"actor"`
+			Files []string `json:"files"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"acquired": req.Files,
+			"denied":   []interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	client.Actor = "alice"
+
+	acquired, denied, err := client.AcquireLocks("mcp-client", []string{"src/main.go"})
+	if err != nil {
+		t.Fatalf("AcquireLocks failed: %v", err)
+	}
+	if len(acquired) != 1 || acquired[0] != "src/main.go" {
+		t.Errorf("expected [src/main.go] acquired, got %v", acquired)
+	}
+	if len(denied) != 0 {
+		t.Errorf("expected 0 denied, got %d", len(denied))
+	}
+}
+
+func TestClient_AcquireLocks_Denied(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"acquired": []string{},
+			"denied": []map[string]string{
+				{"path": "src/main.go", "agent": "other-agent", "actor": "bob"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	acquired, denied, err := client.AcquireLocks("mcp-client", []string{"src/main.go"})
+	if err != nil {
+		t.Fatalf("AcquireLocks failed: %v", err)
+	}
+	if len(acquired) != 0 {
+		t.Errorf("expected 0 acquired, got %d", len(acquired))
+	}
+	if len(denied) != 1 {
+		t.Fatalf("expected 1 denied, got %d", len(denied))
+	}
+	if denied[0].Agent != "other-agent" {
+		t.Errorf("expected other-agent, got %s", denied[0].Agent)
+	}
+}
+
+func TestClient_ReleaseLocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/test/repo/v1/locks" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"released": 1})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	err := client.ReleaseLocks("mcp-client", []string{"src/main.go"})
+	if err != nil {
+		t.Fatalf("ReleaseLocks failed: %v", err)
+	}
+}

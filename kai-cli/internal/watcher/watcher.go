@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -109,9 +110,11 @@ func (w *Watcher) Start() error {
 		if relPath != "." && w.matcher != nil && w.matcher.Match(relPath, true) {
 			return filepath.SkipDir
 		}
-		// Always skip .kai and .git
+		// Always skip .kai, .git, node_modules, and other heavy directories
 		base := filepath.Base(path)
-		if base == ".kai" || base == ".git" || base == "node_modules" {
+		if base == ".kai" || base == ".git" || base == "node_modules" ||
+			base == "vendor" || base == ".repo-cache" || base == "__pycache__" ||
+			base == ".venv" || base == "target" || base == "dist" || base == "build" {
 			return filepath.SkipDir
 		}
 
@@ -236,11 +239,23 @@ func (w *Watcher) processPending() {
 	for relPath, op := range batch {
 		absPath := filepath.Join(w.workDir, filepath.FromSlash(relPath))
 
-		if op&fsnotify.Remove != 0 || op&fsnotify.Rename != 0 {
-			w.handleDelete(relPath)
-		} else if op&fsnotify.Create != 0 || op&fsnotify.Write != 0 {
-			w.handleCreateOrModify(relPath, absPath)
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Capture stack trace for debugging
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					if w.OnError != nil {
+						w.OnError(fmt.Errorf("panic processing %s: %v\n%s", relPath, r, buf[:n]))
+					}
+				}
+			}()
+			if op&fsnotify.Remove != 0 || op&fsnotify.Rename != 0 {
+				w.handleDelete(relPath)
+			} else if op&fsnotify.Create != 0 || op&fsnotify.Write != 0 {
+				w.handleCreateOrModify(relPath, absPath)
+			}
+		}()
 	}
 }
 
@@ -355,7 +370,7 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 			"lang":   lang,
 			"digest": digest,
 		}
-		fileID, err := w.db.InsertNode(nil, graph.KindFile, payload)
+		fileID, err := w.db.InsertNodeDirect(graph.KindFile, payload)
 		if err != nil || fileID == nil {
 			return
 		}
@@ -398,7 +413,7 @@ func (w *Watcher) handleCreateOrModify(relPath, absPath string) {
 				"endCol":    sym.Range.End[1],
 			},
 		}
-		symID, err := w.db.InsertNode(nil, graph.KindSymbol, payload)
+		symID, err := w.db.InsertNodeDirect(graph.KindSymbol, payload)
 		if err != nil || symID == nil {
 			continue
 		}

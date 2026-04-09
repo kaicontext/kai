@@ -1571,6 +1571,96 @@ func (c *Client) PushActivity(agent string, files []ActivityFile, relatedFiles [
 	return result.Warnings, nil
 }
 
+// FileLock represents an active advisory lock visible to clients.
+type FileLock struct {
+	Path  string `json:"path"`
+	Agent string `json:"agent"`
+	Actor string `json:"actor"`
+	Since int64  `json:"since"`
+	Ago   string `json:"ago,omitempty"`
+}
+
+// LockDenied indicates a file is already locked by another agent.
+type LockDenied struct {
+	Path  string `json:"path"`
+	Agent string `json:"agent"`
+	Actor string `json:"actor"`
+}
+
+// AcquireLocks requests advisory locks on files.
+func (c *Client) AcquireLocks(agent string, files []string) (acquired []string, denied []LockDenied, err error) {
+	req := struct {
+		Agent string   `json:"agent"`
+		Actor string   `json:"actor"`
+		Files []string `json:"files"`
+	}{Agent: agent, Actor: c.Actor, Files: files}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshaling lock request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/locks", bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Kailab-Actor", c.Actor)
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sending lock request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("lock request failed: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Acquired []string     `json:"acquired"`
+		Denied   []LockDenied `json:"denied"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Acquired, result.Denied, nil
+}
+
+// ReleaseLocks releases advisory locks on files.
+func (c *Client) ReleaseLocks(agent string, files []string) error {
+	req := struct {
+		Agent string   `json:"agent"`
+		Files []string `json:"files"`
+	}{Agent: agent, Files: files}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshaling unlock request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("DELETE", c.BaseURL+c.repoPath()+"/v1/locks", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("sending unlock request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unlock request failed: %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // EdgeDelta represents a single edge to add or remove.
 type EdgeDelta struct {
 	Src  string `json:"src"`  // hex node ID
