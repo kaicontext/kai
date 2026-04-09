@@ -4,6 +4,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -2423,11 +2424,14 @@ func (s *Server) readSSEEvents(channelID string) {
 }
 
 // handleSyncFileChange applies a received file change to disk.
+// Skips the write if the local file was modified more recently than the event,
+// preventing clobber of local edits.
 func (s *Server) handleSyncFileChange(data string) {
 	var event struct {
 		Agent   string `json:"agent"`
 		File    string `json:"file"`
 		Content string `json:"content"` // base64
+		Time    int64  `json:"time"`    // unix ms
 	}
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return
@@ -2441,12 +2445,27 @@ func (s *Server) handleSyncFileChange(data string) {
 		return
 	}
 
-	// Write to disk
 	absPath := filepath.Join(s.workDir, event.File)
 
 	// Safety: don't write outside workDir
 	if !strings.HasPrefix(absPath, s.workDir) {
 		return
+	}
+
+	// Skip if local file was modified after the incoming event.
+	// This prevents overwriting local edits with stale remote content.
+	if info, err := os.Stat(absPath); err == nil {
+		localModTime := info.ModTime().UnixMilli()
+		if event.Time > 0 && localModTime > event.Time {
+			fmt.Fprintf(os.Stderr, "[kai-sync] skipping %s: local is newer (local=%d event=%d)\n",
+				event.File, localModTime, event.Time)
+			return
+		}
+		// Also skip if incoming content is identical to what's on disk
+		existing, err := os.ReadFile(absPath)
+		if err == nil && bytes.Equal(existing, content) {
+			return
+		}
 	}
 
 	// Ensure parent directory exists
