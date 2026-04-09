@@ -59,6 +59,11 @@ func (c *Client) repoPath() string {
 	return "/" + c.Tenant + "/" + c.Repo
 }
 
+// RepoPath returns the /{tenant}/{repo} path prefix.
+func (c *Client) RepoPath() string {
+	return c.repoPath()
+}
+
 // --- Wire types (matching kailab/proto/wire.go) ---
 
 // NegotiateRequest is sent to negotiate which objects need pushing.
@@ -1713,6 +1718,37 @@ func (c *Client) SyncEdges(sinceSeq int64, agent string) (*EdgeSyncResponse, err
 type SyncSubscribeResponse struct {
 	ChannelID string `json:"channel_id"`
 	ExpiresAt int64  `json:"expires_at"`
+}
+
+// SyncPushFile pushes a file change with content to the live sync channel.
+func (c *Client) SyncPushFile(agent, channelID, filePath, digest, contentBase64 string) error {
+	req := map[string]interface{}{
+		"agent":   agent,
+		"channel": channelID,
+		"file":    filePath,
+		"digest":  digest,
+		"content": contentBase64,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/sync/push", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }
 
 // SubscribeSync registers for live sync events.

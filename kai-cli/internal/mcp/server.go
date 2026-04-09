@@ -3,10 +3,13 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,7 +85,8 @@ type Server struct {
 	remoteClient *remote.Client
 	// Edge sync state
 	lastEdgeSeq    int64
-	syncChannelID  string // live sync channel ID (empty if not subscribed)
+	syncChannelID  string   // live sync channel ID (empty if not subscribed)
+	syncStopSSE    chan struct{} // signals SSE reader goroutine to stop
 	// Rate limiting: cap read-only tool calls to avoid context bloat
 	readCallCount int32
 }
@@ -200,6 +204,18 @@ func (s *Server) startWatcher(db *graph.DB) {
 					s.warningsMu.Lock()
 					s.warnings = warnings
 					s.warningsMu.Unlock()
+				}
+				// Push file content if live sync is active
+				if s.syncChannelID != "" {
+					for _, path := range editedPaths {
+						absPath := filepath.Join(s.workDir, path)
+						content, err := os.ReadFile(absPath)
+						if err != nil || len(content) > 512*1024 { // skip files > 512KB
+							continue
+						}
+						encoded := base64.StdEncoding.EncodeToString(content)
+						client.SyncPushFile(agentName, s.syncChannelID, path, "", encoded)
+					}
 				}
 			}()
 		}
@@ -2303,11 +2319,15 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 
 		s.syncChannelID = resp.ChannelID
+		s.syncStopSSE = make(chan struct{})
+
+		// Start background SSE reader to receive and apply file changes
+		go s.readSSEEvents(resp.ChannelID)
 
 		result := map[string]interface{}{
 			"status":  "subscribed",
 			"channel": resp.ChannelID,
-			"message": "Live sync active. Other agents' changes will appear in kai_activity.",
+			"message": "Live sync active. File changes from other agents will be applied automatically.",
 		}
 		if len(files) > 0 {
 			result["watching"] = files
@@ -2315,6 +2335,12 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 			result["watching"] = "all files"
 		}
 		return jsonResult(result)
+
+	case "status":
+		if s.syncChannelID == "" {
+			return jsonResult(map[string]interface{}{"status": "off"})
+		}
+		return jsonResult(map[string]interface{}{"status": "on", "channel": s.syncChannelID})
 
 	case "off":
 		if s.syncChannelID == "" {
@@ -2324,6 +2350,10 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 			})
 		}
 
+		if s.syncStopSSE != nil {
+			close(s.syncStopSSE)
+			s.syncStopSSE = nil
+		}
 		s.remoteClient.UnsubscribeSync(s.syncChannelID)
 		s.syncChannelID = ""
 
@@ -2333,6 +2363,96 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 		})
 
 	default:
-		return mcp.NewToolResultError("action must be 'on' or 'off'"), nil
+		return mcp.NewToolResultError("action must be 'on', 'off', or 'status'"), nil
+	}
+}
+
+// readSSEEvents connects to the SSE stream and applies incoming file changes to disk.
+func (s *Server) readSSEEvents(channelID string) {
+	if s.remoteClient == nil {
+		return
+	}
+
+	url := fmt.Sprintf("%s%s/v1/sync/events?channel=%s",
+		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), channelID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if s.remoteClient.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.remoteClient.AuthToken)
+	}
+
+	client := &http.Client{Timeout: 0} // no timeout for SSE
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var eventType, eventData string
+
+	for {
+		select {
+		case <-s.syncStopSSE:
+			return
+		default:
+		}
+
+		if !scanner.Scan() {
+			return // connection closed
+		}
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			eventData = strings.TrimPrefix(line, "data: ")
+		} else if line == "" && eventData != "" {
+			// End of event — process it
+			if eventType == "file_change" {
+				s.handleSyncFileChange(eventData)
+			}
+			eventType = ""
+			eventData = ""
+		}
+	}
+}
+
+// handleSyncFileChange applies a received file change to disk.
+func (s *Server) handleSyncFileChange(data string) {
+	var event struct {
+		Agent   string `json:"agent"`
+		File    string `json:"file"`
+		Content string `json:"content"` // base64
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return
+	}
+	if event.Content == "" || event.File == "" {
+		return
+	}
+
+	content, err := base64.StdEncoding.DecodeString(event.Content)
+	if err != nil {
+		return
+	}
+
+	// Write to disk
+	absPath := filepath.Join(s.workDir, event.File)
+
+	// Safety: don't write outside workDir
+	if !strings.HasPrefix(absPath, s.workDir) {
+		return
+	}
+
+	// Ensure parent directory exists
+	os.MkdirAll(filepath.Dir(absPath), 0755)
+
+	if err := os.WriteFile(absPath, content, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] failed to write %s: %v\n", event.File, err)
 	}
 }
