@@ -94,6 +94,9 @@ type Server struct {
 	lastEdgeSeq    int64
 	syncChannelID  string   // live sync channel ID (empty if not subscribed)
 	syncStopSSE    chan struct{} // signals SSE reader goroutine to stop
+	// Files written by sync — watcher should skip these to avoid feedback loop
+	syncWrittenMu  sync.Mutex
+	syncWritten    map[string]time.Time // path -> time written
 	// Last-synced file content for 3-way merge on receive
 	syncBaseMu     sync.RWMutex
 	syncBase       map[string][]byte // path -> content at last sync point
@@ -218,6 +221,10 @@ func (s *Server) startWatcher(db *graph.DB) {
 				// Push file content if live sync is active
 				if s.syncChannelID != "" {
 					for _, path := range editedPaths {
+						// Skip files written by sync to avoid feedback loop
+						if s.isSyncWritten(path) {
+							continue
+						}
 						absPath := filepath.Join(s.workDir, path)
 						content, err := os.ReadFile(absPath)
 						if err != nil || len(content) > 512*1024 { // skip files > 512KB
@@ -2571,6 +2578,9 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 		return
 	}
 
+	// Mark as sync-written so the watcher doesn't push it back
+	s.markSyncWritten(relPath)
+
 	s.syncBaseMu.Lock()
 	if s.syncBase != nil {
 		s.syncBase[relPath] = incoming
@@ -2820,6 +2830,7 @@ func (s *Server) syncInitialPull() int {
 			}
 			os.MkdirAll(filepath.Dir(absPath), 0755)
 			if err := os.WriteFile(absPath, content, 0644); err == nil {
+				s.markSyncWritten(path)
 				fmt.Fprintf(os.Stderr, "[kai-sync] initial: wrote %s (new file)\n", path)
 				synced++
 			}
@@ -2844,6 +2855,7 @@ func (s *Server) syncInitialPull() int {
 			// Local file matches the base (user B didn't edit this file).
 			// Safe to overwrite with remote content.
 			os.WriteFile(absPath, remoteContent, 0644)
+			s.markSyncWritten(path)
 			fmt.Fprintf(os.Stderr, "[kai-sync] initial: updated %s\n", path)
 			synced++
 			continue
@@ -2864,6 +2876,7 @@ func (s *Server) syncInitialPull() int {
 				if mergeErr == nil && mergeResult.Success {
 					if merged, ok := mergeResult.Files["file"]; ok {
 						os.WriteFile(absPath, merged, 0644)
+						s.markSyncWritten(path)
 						fmt.Fprintf(os.Stderr, "[kai-sync] initial: merged %s (auto-resolved)\n", path)
 						synced++
 						continue
@@ -2901,6 +2914,35 @@ func (s *Server) syncInitialPull() int {
 func blake3Sum(data []byte) []byte {
 	h := blake3.Sum256(data)
 	return h[:]
+}
+
+// markSyncWritten records that a file was written by the sync system.
+// The push code checks this to avoid pushing sync-received files back to the server.
+func (s *Server) markSyncWritten(path string) {
+	s.syncWrittenMu.Lock()
+	if s.syncWritten == nil {
+		s.syncWritten = make(map[string]time.Time)
+	}
+	s.syncWritten[path] = time.Now()
+	s.syncWrittenMu.Unlock()
+}
+
+// isSyncWritten returns true if the file was recently written by sync (within 60s).
+func (s *Server) isSyncWritten(path string) bool {
+	s.syncWrittenMu.Lock()
+	defer s.syncWrittenMu.Unlock()
+	if s.syncWritten == nil {
+		return false
+	}
+	t, ok := s.syncWritten[path]
+	if !ok {
+		return false
+	}
+	if time.Since(t) > 60*time.Second {
+		delete(s.syncWritten, path)
+		return false
+	}
+	return true
 }
 
 type syncConflictInfo struct {
