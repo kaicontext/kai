@@ -434,11 +434,12 @@ func TestBuildPack_Empty(t *testing.T) {
 }
 
 func TestRemoteConfig(t *testing.T) {
-	// Create a temp directory for config
+	// Create a temp directory with .kai/ for config
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	os.MkdirAll(filepath.Join(tmpDir, ".kai"), 0755)
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
 
 	// Initially empty
 	cfg, err := LoadConfig()
@@ -539,9 +540,10 @@ func TestDeleteRemote_NotFound(t *testing.T) {
 
 func TestSetRemoteURL(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	os.MkdirAll(filepath.Join(tmpDir, ".kai"), 0755)
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
 
 	err := SetRemoteURL("origin", "http://example.com")
 	if err != nil {
@@ -566,9 +568,10 @@ func TestSetRemoteURL(t *testing.T) {
 
 func TestNewClientForRemote(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	os.MkdirAll(filepath.Join(tmpDir, ".kai"), 0755)
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
 
 	err := SetRemote("origin", &RemoteEntry{
 		URL:    "http://localhost:7447",
@@ -610,16 +613,14 @@ func TestConfigPath(t *testing.T) {
 
 func TestLoadConfig_MigrateOldFormat(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	os.MkdirAll(filepath.Join(tmpDir, ".kai"), 0755)
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
 
-	// Create old format config
-	configDir := filepath.Join(tmpDir, ".kai")
-	os.MkdirAll(configDir, 0755)
-
+	// Create old format config in local .kai/
 	oldConfig := `{"remotes":{"origin":"http://old-url.com"}}`
-	os.WriteFile(filepath.Join(configDir, "remotes.json"), []byte(oldConfig), 0644)
+	os.WriteFile(filepath.Join(tmpDir, ".kai", "remotes.json"), []byte(oldConfig), 0644)
 
 	cfg, err := LoadConfig()
 	if err != nil {

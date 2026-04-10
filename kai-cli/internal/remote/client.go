@@ -1,4 +1,5 @@
 // Package remote provides client functionality for communicating with Kailab servers.
+// v0.9.87 - live sync test
 package remote
 
 import (
@@ -699,16 +700,10 @@ func loadConfigFromPath(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// LoadConfig loads the remote configuration.
-// Checks local .kai/remotes.json first, then falls back to global ~/.kai/remotes.json.
+// LoadConfig loads the remote configuration from the local .kai/remotes.json only.
+// No global fallback — each project must have its own remote config.
 func LoadConfig() (*Config, error) {
-	// Try local first
 	if cfg, err := loadConfigFromPath(LocalConfigPath()); err == nil {
-		return cfg, nil
-	}
-
-	// Fall back to global
-	if cfg, err := loadConfigFromPath(GlobalConfigPath()); err == nil {
 		return cfg, nil
 	}
 
@@ -716,13 +711,12 @@ func LoadConfig() (*Config, error) {
 }
 
 // SaveConfig saves the remote configuration to the project-local .kai/remotes.json.
-// Falls back to global ~/.kai/remotes.json if .kai/ directory doesn't exist (no kai init).
+// Returns an error if .kai/ doesn't exist (project must be initialized first).
 func SaveConfig(cfg *Config) error {
-	// Prefer local .kai/ if it exists (project has been initialized)
 	path := LocalConfigPath()
 	kaiDir, _ := filepath.Abs(".kai")
 	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
-		path = GlobalConfigPath()
+		return fmt.Errorf("no .kai directory — run 'kai init' first")
 	}
 
 	dir := filepath.Dir(path)
@@ -780,15 +774,15 @@ func GetRemoteURL(name string) (string, error) {
 }
 
 // SetRemote sets the entry for a named remote.
-// If the remote already exists, it is NOT overwritten — use ForceSetRemote for explicit changes.
+// If the remote already exists, it is NOT overwritten.
+// Use ForceSetRemote for explicit user changes (kai remote set).
 func SetRemote(name string, entry *RemoteEntry) error {
 	cfg, err := LoadConfig()
 	if err != nil {
-		return err
+		cfg = &Config{Remotes: make(map[string]*RemoteEntry)}
 	}
 
 	if existing, ok := cfg.Remotes[name]; ok && existing != nil {
-		// Remote already set — don't overwrite
 		return nil
 	}
 
