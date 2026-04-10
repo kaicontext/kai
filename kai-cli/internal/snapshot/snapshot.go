@@ -94,6 +94,7 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 			// Only write the blob to object store if the file is parseable
 			// (will be read back during Analyze). Non-parseable files (json,
 			// yaml, md, html, css, etc.) only need the digest for the node ID.
+			// Content is available from disk via git for kai clone/pull.
 			if isParseableLang(file.Lang) {
 				var err error
 				digest, err = c.db.WriteObject(file.Content)

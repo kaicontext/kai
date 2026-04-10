@@ -1,5 +1,4 @@
 // Package remote provides client functionality for communicating with Kailab servers.
-// v0.9.87 - live sync test
 package remote
 
 import (

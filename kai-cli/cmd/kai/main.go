@@ -69,7 +69,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.88"
+var Version = "0.9.89"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -13450,7 +13450,13 @@ func runPull(cmd *cobra.Command, args []string) error {
 			// Fetch raw content from remote
 			rawContent, err := client.GetRawContent(f.ContentDigest)
 			if err != nil {
-				fmt.Printf("  Warning: failed to fetch content for %s: %v\n", f.Path, err)
+				// If the file exists on disk, that's fine — git has it
+				if _, diskErr := os.Stat(f.Path); diskErr == nil {
+					continue // file on disk, no need for blob
+				}
+				if os.Getenv("KAI_PULL_QUIET") == "" {
+					fmt.Printf("  Warning: failed to fetch content for %s: %v\n", f.Path, err)
+				}
 				continue
 			}
 			if _, err := db.WriteObject(rawContent); err != nil {
@@ -13500,9 +13506,91 @@ func runPull(cmd *cobra.Command, args []string) error {
 }
 
 func runClone(cmd *cobra.Command, args []string) error {
-	rawURL := args[0]
+	// Forward to git clone, then set up kai
+	gitArgs := append([]string{"clone"}, args...)
+	gitCmd := exec.Command("git", gitArgs...)
+	gitCmd.Stdout = os.Stdout
+	gitCmd.Stderr = os.Stderr
+	gitCmd.Stdin = os.Stdin
+	if err := gitCmd.Run(); err != nil {
+		return fmt.Errorf("git clone failed: %w", err)
+	}
 
-	// Parse the URL to extract tenant and repo if not provided via flags
+	// Determine the directory git cloned into
+	rawURL := args[0]
+	dirName := ""
+	if len(args) > 1 {
+		dirName = args[1]
+	} else {
+		name := rawURL
+		name = strings.TrimSuffix(name, ".git")
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		} else if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			name = name[idx+1:]
+			if idx2 := strings.LastIndex(name, "/"); idx2 >= 0 {
+				name = name[idx2+1:]
+			}
+		}
+		dirName = name
+	}
+
+	if dirName == "" || dirName == "." {
+		fmt.Println("Run 'kai capture' to build the semantic graph.")
+		return nil
+	}
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dirName)
+	defer os.Chdir(origDir)
+
+	// Build the semantic graph from the cloned files
+	fmt.Println("\nBuilding semantic graph...")
+	captureCmd := exec.Command("kai", "capture")
+	captureCmd.Stdout = os.Stdout
+	captureCmd.Stderr = os.Stderr
+	captureCmd.Run()
+
+	// Detect tenant/repo from git remote and set kai remote
+	tenant := cloneTenant
+	repo := cloneRepo
+	if tenant == "" || repo == "" {
+		if out, err := exec.Command("git", "remote", "get-url", "origin").Output(); err == nil {
+			gitURL := strings.TrimSpace(string(out))
+			gitURL = strings.TrimSuffix(gitURL, ".git")
+			if idx := strings.LastIndex(gitURL, ":"); idx >= 0 {
+				parts := strings.Split(gitURL[idx+1:], "/")
+				if len(parts) == 2 {
+					tenant = parts[0]
+					repo = parts[1]
+				}
+			} else if idx := strings.Index(gitURL, ".com/"); idx >= 0 {
+				parts := strings.Split(gitURL[idx+5:], "/")
+				if len(parts) == 2 {
+					tenant = parts[0]
+					repo = parts[1]
+				}
+			}
+		}
+	}
+
+	if tenant != "" && repo != "" {
+		serverURL := os.Getenv("KAI_SERVER")
+		if serverURL == "" {
+			serverURL = remote.DefaultServer
+		}
+		remote.ForceSetRemote("origin", &remote.RemoteEntry{
+			URL: serverURL, Tenant: tenant, Repo: repo,
+		})
+		fmt.Printf("Kai remote: %s/%s\n", tenant, repo)
+	}
+
+	fmt.Printf("\nDone! cd %s\n", dirName)
+	return nil
+}
+
+func runCloneLegacy(cmd *cobra.Command, args []string) error {
+	rawURL := args[0]
 	tenant := cloneTenant
 	repo := cloneRepo
 
@@ -13518,28 +13606,52 @@ func runClone(cmd *cobra.Command, args []string) error {
 			dirName = args[1]
 		}
 
-		// Git clone via SSH
-		sshURL := fmt.Sprintf("ssh://git@git.kaicontext.com:2222/%s/%s.git", tenant, repo)
+		// Git clone — use the repo's git origin URL from the server,
+		// or fall back to common providers
 		fmt.Printf("Cloning %s/%s into '%s'...\n", tenant, repo, dirName)
-		gitCmd := exec.Command("git", "clone", sshURL, dirName)
-		gitCmd.Stdout = os.Stdout
-		gitCmd.Stderr = os.Stderr
-		if err := gitCmd.Run(); err != nil {
-			return fmt.Errorf("git clone failed: %w", err)
+
+		// Try to get git URL from the server's repo metadata
+		// For now, try GitHub (most common for kaicontext repos)
+		cloneURLs := []string{
+			fmt.Sprintf("git@github.com:%s/%s.git", tenant, repo),
+			fmt.Sprintf("https://github.com/%s/%s.git", tenant, repo),
+			fmt.Sprintf("ssh://git@git.kaicontext.com:2222/%s/%s.git", tenant, repo),
 		}
+
+		var cloned bool
+		for _, cloneURL := range cloneURLs {
+			gitCmd := exec.Command("git", "clone", cloneURL, dirName)
+			gitCmd.Stdout = os.Stdout
+			gitCmd.Stderr = os.Stderr
+			if err := gitCmd.Run(); err == nil {
+				cloned = true
+				break
+			}
+			os.RemoveAll(dirName) // clean up failed attempt
+		}
+		if !cloned {
+			return fmt.Errorf("git clone failed — tried GitHub and Kai SSH")
+		}
+
+		// Checkout main branch if not already
+		checkoutCmd := exec.Command("git", "checkout", "main")
+		checkoutCmd.Dir = dirName
+		checkoutCmd.Stdout = os.Stdout
+		checkoutCmd.Stderr = os.Stderr
+		checkoutCmd.Run() // best effort — main might not exist
 
 		// Set up kai in the cloned directory
 		origDir, _ := os.Getwd()
 		os.Chdir(dirName)
 		defer os.Chdir(origDir)
 
-		// Initialize kai
-		fmt.Println("Initializing Kai...")
-		initCmd := exec.Command("kai", "init", "--no-interactive")
-		initCmd.Stdout = os.Stdout
-		initCmd.Stderr = os.Stderr
-		if err := initCmd.Run(); err != nil {
-			fmt.Printf("Warning: kai init failed: %v\n", err)
+		// Build graph from the cloned files
+		fmt.Println("Building semantic graph...")
+		captureCmd := exec.Command("kai", "capture")
+		captureCmd.Stdout = os.Stdout
+		captureCmd.Stderr = os.Stderr
+		if err := captureCmd.Run(); err != nil {
+			fmt.Printf("Warning: kai capture failed: %v\n", err)
 		}
 
 		// Set up kai remote
@@ -13553,13 +13665,6 @@ func runClone(cmd *cobra.Command, args []string) error {
 			Repo:   repo,
 		}
 		remote.ForceSetRemote("origin", entry)
-
-		// Pull kai graph data
-		fmt.Println("Pulling semantic graph...")
-		pullCmd := exec.Command("kai", "pull", "--force")
-		pullCmd.Stdout = os.Stdout
-		pullCmd.Stderr = os.Stderr
-		pullCmd.Run() // best effort
 
 		fmt.Printf("\nDone! cd %s to start working.\n", dirName)
 		return nil
