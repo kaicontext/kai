@@ -12133,7 +12133,7 @@ func runRemoteSet(cmd *cobra.Command, args []string) error {
 		Repo:   repo,
 	}
 
-	if err := remote.SetRemote(name, entry); err != nil {
+	if err := remote.ForceSetRemote(name, entry); err != nil {
 		return fmt.Errorf("setting remote: %w", err)
 	}
 

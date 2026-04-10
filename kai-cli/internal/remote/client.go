@@ -1,4 +1,6 @@
 // Package remote provides client functionality for communicating with Kailab servers.
+// LIVE SYNC v4 - SSE timeout fix deployed, this should arrive!
+// LIVE SYNC TEST - if you see this in the other window, it worked!
 package remote
 
 import (
@@ -639,8 +641,13 @@ type Config struct {
 }
 
 // LocalConfigPath returns the project-local remote config path (.kai/remotes.json).
+// Resolves to an absolute path based on the current working directory.
 func LocalConfigPath() string {
-	return filepath.Join(".kai", "remotes.json")
+	abs, err := filepath.Abs(filepath.Join(".kai", "remotes.json"))
+	if err != nil {
+		return filepath.Join(".kai", "remotes.json")
+	}
+	return abs
 }
 
 // GlobalConfigPath returns the global remote config path (~/.kai/remotes.json).
@@ -715,7 +722,8 @@ func LoadConfig() (*Config, error) {
 func SaveConfig(cfg *Config) error {
 	// Prefer local .kai/ if it exists (project has been initialized)
 	path := LocalConfigPath()
-	if _, err := os.Stat(".kai"); os.IsNotExist(err) {
+	kaiDir, _ := filepath.Abs(".kai")
+	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
 		path = GlobalConfigPath()
 	}
 
@@ -774,7 +782,25 @@ func GetRemoteURL(name string) (string, error) {
 }
 
 // SetRemote sets the entry for a named remote.
+// If the remote already exists, it is NOT overwritten — use ForceSetRemote for explicit changes.
 func SetRemote(name string, entry *RemoteEntry) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+
+	if existing, ok := cfg.Remotes[name]; ok && existing != nil {
+		// Remote already set — don't overwrite
+		return nil
+	}
+
+	cfg.Remotes[name] = entry
+	return SaveConfig(cfg)
+}
+
+// ForceSetRemote overwrites the entry for a named remote.
+// Use this only for explicit user actions (kai remote add, kai remote set-url).
+func ForceSetRemote(name string, entry *RemoteEntry) error {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return err
