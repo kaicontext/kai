@@ -24,6 +24,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"lukechampine.com/blake3"
+
 	"kai-core/merge"
 	"kai-core/parse"
 	"kai/internal/authorship"
@@ -2353,13 +2355,20 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 		s.syncBase = make(map[string][]byte)
 		s.syncBaseMu.Unlock()
 
-		// Start background SSE reader to receive and apply file changes
+		// Initial sync: pull latest snapshot and apply any files that differ locally
+		synced := s.syncInitialPull()
+
+		// Start background polling for ongoing changes
 		go s.readSSEEvents(resp.ChannelID)
 
 		result := map[string]interface{}{
 			"status":  "subscribed",
 			"channel": resp.ChannelID,
 			"message": "Live sync active. File changes from other agents will be applied automatically.",
+		}
+		if synced > 0 {
+			result["initial_sync"] = synced
+			result["message"] = fmt.Sprintf("Live sync active. Applied %d file(s) from server.", synced)
 		}
 		if len(files) > 0 {
 			result["watching"] = files
@@ -2731,6 +2740,167 @@ func (s *Server) handleSyncFileChange(data string) {
 	s.syncBaseMu.Lock()
 	s.syncBase[event.File] = incoming
 	s.syncBaseMu.Unlock()
+}
+
+// syncInitialPull compares the remote snapshot against local files
+// and writes any files that differ. Uses the local graph DB which
+// is populated by kai pull / kai push.
+func (s *Server) syncInitialPull() int {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+	if db == nil {
+		return 0
+	}
+
+	// Step 1: Snapshot the LOCAL state before pulling.
+	// This is the "base" for 3-way merge — the common ancestor.
+	localDigests := make(map[string]string) // path -> digest before pull
+	localSnapID, _ := s.latestSnapshotID()
+	if localSnapID != nil {
+		edges, _ := db.GetEdges(localSnapID, graph.EdgeHasFile)
+		for _, edge := range edges {
+			node, _ := db.GetNode(edge.Dst)
+			if node == nil {
+				continue
+			}
+			path, _ := node.Payload["path"].(string)
+			digest, _ := node.Payload["digest"].(string)
+			if path != "" && digest != "" {
+				localDigests[path] = digest
+			}
+		}
+	}
+
+	// Step 2: Pull the latest snapshot from the server.
+	if s.remoteClient != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] pulling latest snapshot from server...\n")
+		cmd := exec.Command("kai", "pull", "--force")
+		cmd.Dir = s.workDir
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "[kai-sync] pull failed (continuing with local snapshot): %v\n", err)
+		}
+		// Reopen DB to pick up pulled data
+		// (kai pull updates refs but the DB handle is already open, so refs are visible)
+	}
+
+	// Step 3: Get the remote snapshot (now snap.latest after pull)
+	remoteSnapID, err := s.latestSnapshotID()
+	if err != nil {
+		return 0
+	}
+
+	edges, err := db.GetEdges(remoteSnapID, graph.EdgeHasFile)
+	if err != nil {
+		return 0
+	}
+
+	synced := 0
+	for _, edge := range edges {
+		node, err := db.GetNode(edge.Dst)
+		if err != nil || node == nil {
+			continue
+		}
+
+		path, _ := node.Payload["path"].(string)
+		remoteDigest, _ := node.Payload["digest"].(string)
+		if path == "" || remoteDigest == "" {
+			continue
+		}
+
+		absPath := filepath.Join(s.workDir, path)
+		localContent, readErr := os.ReadFile(absPath)
+
+		if readErr != nil {
+			// File doesn't exist locally — extract from object store
+			content, err := db.ReadObject(remoteDigest)
+			if err != nil || len(content) == 0 {
+				continue
+			}
+			os.MkdirAll(filepath.Dir(absPath), 0755)
+			if err := os.WriteFile(absPath, content, 0644); err == nil {
+				fmt.Fprintf(os.Stderr, "[kai-sync] initial: wrote %s (new file)\n", path)
+				synced++
+			}
+			continue
+		}
+
+		// File exists — check if remote content matches local
+		localFileDigest := fmt.Sprintf("%x", blake3Sum(localContent))
+		if localFileDigest == remoteDigest {
+			continue // same content
+		}
+
+		// Content differs. Read remote content.
+		remoteContent, err := db.ReadObject(remoteDigest)
+		if err != nil || len(remoteContent) == 0 {
+			continue
+		}
+
+		// Check if local file was modified vs the pre-pull snapshot (the base).
+		baseDigest := localDigests[path]
+		if baseDigest == localFileDigest {
+			// Local file matches the base (user B didn't edit this file).
+			// Safe to overwrite with remote content.
+			os.WriteFile(absPath, remoteContent, 0644)
+			fmt.Fprintf(os.Stderr, "[kai-sync] initial: updated %s\n", path)
+			synced++
+			continue
+		}
+
+		// Local file was modified by user B AND remote is different.
+		// Need 3-way merge: base (pre-pull snapshot) vs local vs remote.
+		var baseContent []byte
+		if baseDigest != "" {
+			baseContent, _ = db.ReadObject(baseDigest)
+		}
+
+		if baseContent != nil {
+			// 3-way merge
+			lang := detectSyncLang(path)
+			if lang != "" {
+				mergeResult, mergeErr := merge.Merge3Way(baseContent, localContent, remoteContent, lang)
+				if mergeErr == nil && mergeResult.Success {
+					if merged, ok := mergeResult.Files["file"]; ok {
+						os.WriteFile(absPath, merged, 0644)
+						fmt.Fprintf(os.Stderr, "[kai-sync] initial: merged %s (auto-resolved)\n", path)
+						synced++
+						continue
+					}
+				}
+			}
+			// Merge failed — preserve local
+			fmt.Fprintf(os.Stderr, "[kai-sync] initial: conflict on %s — local edits preserved\n", path)
+			s.syncConflictsMu.Lock()
+			s.syncConflicts = append(s.syncConflicts, syncConflictInfo{
+				File:    path,
+				Agent:   "server",
+				Time:    time.Now().Format(time.RFC3339),
+				Message: "Conflict during initial sync. Your local edits were preserved.",
+			})
+			s.syncConflictsMu.Unlock()
+		} else {
+			// No base available — preserve local, don't clobber
+			fmt.Fprintf(os.Stderr, "[kai-sync] initial: conflict on %s (no base) — local edits preserved\n", path)
+			s.syncConflictsMu.Lock()
+			s.syncConflicts = append(s.syncConflicts, syncConflictInfo{
+				File:    path,
+				Agent:   "server",
+				Time:    time.Now().Format(time.RFC3339),
+				Message: "File differs from server but no common base found. Your local edits were preserved.",
+			})
+			s.syncConflictsMu.Unlock()
+		}
+	}
+
+	return synced
+}
+
+// blake3Sum computes a blake3 hash.
+func blake3Sum(data []byte) []byte {
+	h := blake3.Sum256(data)
+	return h[:]
 }
 
 type syncConflictInfo struct {

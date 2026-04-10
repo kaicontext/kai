@@ -13508,32 +13508,76 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	// Check if input is shorthand format: org/repo (no scheme)
 	if !strings.Contains(rawURL, "://") && strings.Count(rawURL, "/") == 1 {
-		// Shorthand format: org/repo - use default server
+		// Shorthand format: org/repo — git clone via SSH, then set up kai
 		parts := strings.Split(rawURL, "/")
 		tenant = parts[0]
 		repo = parts[1]
-		// Use default server (env var or constant)
+
+		dirName := repo
+		if len(args) > 1 {
+			dirName = args[1]
+		}
+
+		// Git clone via SSH
+		sshURL := fmt.Sprintf("ssh://git@git.kaicontext.com:2222/%s/%s.git", tenant, repo)
+		fmt.Printf("Cloning %s/%s into '%s'...\n", tenant, repo, dirName)
+		gitCmd := exec.Command("git", "clone", sshURL, dirName)
+		gitCmd.Stdout = os.Stdout
+		gitCmd.Stderr = os.Stderr
+		if err := gitCmd.Run(); err != nil {
+			return fmt.Errorf("git clone failed: %w", err)
+		}
+
+		// Set up kai in the cloned directory
+		origDir, _ := os.Getwd()
+		os.Chdir(dirName)
+		defer os.Chdir(origDir)
+
+		// Initialize kai
+		fmt.Println("Initializing Kai...")
+		initCmd := exec.Command("kai", "init", "--no-interactive")
+		initCmd.Stdout = os.Stdout
+		initCmd.Stderr = os.Stderr
+		if err := initCmd.Run(); err != nil {
+			fmt.Printf("Warning: kai init failed: %v\n", err)
+		}
+
+		// Set up kai remote
 		serverURL := os.Getenv("KAI_SERVER")
 		if serverURL == "" {
 			serverURL = remote.DefaultServer
 		}
-		rawURL = serverURL
-	} else {
-		// Parse URL: http://server/tenant/repo
-		parsedURL, err := url.Parse(rawURL)
-		if err != nil {
-			return fmt.Errorf("invalid URL: %w", err)
+		entry := &remote.RemoteEntry{
+			URL:    serverURL,
+			Tenant: tenant,
+			Repo:   repo,
 		}
+		remote.ForceSetRemote("origin", entry)
 
-		// Extract tenant/repo from path if not specified via flags
-		pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-		if len(pathParts) >= 2 && tenant == "" && repo == "" {
-			tenant = pathParts[0]
-			repo = pathParts[1]
-			// Rebuild base URL without tenant/repo path
-			parsedURL.Path = ""
-			rawURL = parsedURL.String()
-		}
+		// Pull kai graph data
+		fmt.Println("Pulling semantic graph...")
+		pullCmd := exec.Command("kai", "pull", "--force")
+		pullCmd.Stdout = os.Stdout
+		pullCmd.Stderr = os.Stderr
+		pullCmd.Run() // best effort
+
+		fmt.Printf("\nDone! cd %s to start working.\n", dirName)
+		return nil
+	}
+
+	// Full URL format: http://server/tenant/repo
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Extract tenant/repo from path if not specified via flags
+	pathParts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	if len(pathParts) >= 2 && tenant == "" && repo == "" {
+		tenant = pathParts[0]
+		repo = pathParts[1]
+		parsedURL.Path = ""
+		rawURL = parsedURL.String()
 	}
 
 	// Validate we have tenant and repo
@@ -13572,12 +13616,11 @@ func runClone(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Chdir(origDir)
 
-	// Initialize Kai (skip creating kai.modules.yaml - the remote repo may have one)
+	// Initialize Kai
 	fmt.Println("Initializing Kai...")
 	skipModulesFile = true
 	if err := runInit(cmd, nil); err != nil {
 		skipModulesFile = false
-		// Clean up on failure
 		os.Chdir(origDir)
 		os.RemoveAll(dirName)
 		return fmt.Errorf("initializing: %w", err)
