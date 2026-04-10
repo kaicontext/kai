@@ -218,8 +218,14 @@ func (s *Server) startWatcher(db *graph.DB) {
 						if err != nil || len(content) > 512*1024 { // skip files > 512KB
 							continue
 						}
+						// Convert path to git-relative so all clones use the same paths
+						syncPath := toGitRelativePath(s.workDir, path)
 						encoded := base64.StdEncoding.EncodeToString(content)
-						client.SyncPushFile(agentName, s.syncChannelID, path, "", encoded)
+						if err := client.SyncPushFile(agentName, s.syncChannelID, syncPath, "", encoded); err != nil {
+							fmt.Fprintf(os.Stderr, "[kai-sync] push failed for %s: %v\n", syncPath, err)
+						} else {
+							fmt.Fprintf(os.Stderr, "[kai-sync] pushed %s (%d bytes)\n", syncPath, len(content))
+						}
 						// Update base so we can 3-way merge incoming changes
 						s.syncBaseMu.Lock()
 						if s.syncBase != nil {
@@ -2387,9 +2393,160 @@ func (s *Server) readSSEEvents(channelID string) {
 		return
 	}
 
-	url := fmt.Sprintf("%s%s/v1/sync/events?channel=%s",
-		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), channelID)
+	// Poll-based sync instead of SSE (SSE has proxy timeout issues)
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
 
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.syncStopSSE:
+			return
+		case <-ticker.C:
+			s.pollSyncChanges(agentName)
+		}
+	}
+
+	// SSE approach (disabled — proxy doesn't support long-lived connections reliably)
+	/*
+	for {
+		select {
+		case <-s.syncStopSSE:
+			return
+		default:
+		}
+
+		url := fmt.Sprintf("%s%s/v1/sync/events?channel=%s",
+			s.remoteClient.BaseURL, s.remoteClient.RepoPath(), s.syncChannelID)
+		s.connectSSE(url, s.syncChannelID)
+
+		// If we get here, the connection dropped. Retry after a delay.
+		select {
+		case <-s.syncStopSSE:
+			return
+		case <-time.After(5 * time.Second):
+			fmt.Fprintf(os.Stderr, "[kai-sync] SSE reconnecting...\n")
+		}
+	}
+	*/
+}
+
+// syncLastPollTime tracks when we last polled for sync changes.
+var syncLastPollTime int64
+
+// pollSyncChanges fetches file content pushed by other agents.
+// Polls GET /v1/sync/files which works through proxies (unlike SSE).
+func (s *Server) pollSyncChanges(agentName string) {
+	url := fmt.Sprintf("%s%s/v1/sync/files?since=%d&agent=%s",
+		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), syncLastPollTime, agentName)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	if s.remoteClient.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.remoteClient.AuthToken)
+	}
+
+	resp, err := s.remoteClient.HTTPClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return
+	}
+
+	var result struct {
+		Files []struct {
+			Path    string `json:"path"`
+			Agent   string `json:"agent"`
+			Content string `json:"content"`
+			Time    int64  `json:"time"`
+		} `json:"files"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	for _, f := range result.Files {
+		if f.Time > syncLastPollTime {
+			syncLastPollTime = f.Time
+		}
+
+		// Decode and apply
+		content, err := base64.StdEncoding.DecodeString(f.Content)
+		if err != nil || len(content) == 0 {
+			continue
+		}
+
+		absPath := filepath.Join(s.workDir, f.Path)
+		if !strings.HasPrefix(absPath, s.workDir) {
+			continue
+		}
+
+		// Use the same merge logic as the SSE handler
+		s.applySyncContent(f.Path, absPath, content, f.Agent)
+	}
+}
+
+func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agent string) {
+	local, localErr := os.ReadFile(absPath)
+
+	if localErr == nil && bytes.Equal(local, incoming) {
+		return // identical
+	}
+
+	s.syncBaseMu.RLock()
+	base := s.syncBase[relPath]
+	s.syncBaseMu.RUnlock()
+
+	var toWrite []byte
+
+	if localErr != nil || base == nil {
+		toWrite = incoming
+	} else if bytes.Equal(local, base) {
+		toWrite = incoming
+	} else {
+		lang := detectSyncLang(relPath)
+		if lang != "" {
+			mergeResult, mergeErr := merge.Merge3Way(base, local, incoming, lang)
+			if mergeErr == nil && mergeResult.Success {
+				if merged, ok := mergeResult.Files["file"]; ok {
+					toWrite = merged
+					fmt.Fprintf(os.Stderr, "[kai-sync] merged %s (auto-resolved)\n", relPath)
+				}
+			}
+		}
+		if toWrite == nil {
+			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n", relPath, agent)
+			s.syncBaseMu.Lock()
+			if s.syncBase != nil {
+				s.syncBase[relPath] = incoming
+			}
+			s.syncBaseMu.Unlock()
+			return
+		}
+	}
+
+	os.MkdirAll(filepath.Dir(absPath), 0755)
+	if err := os.WriteFile(absPath, toWrite, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] failed to write %s: %v\n", relPath, err)
+		return
+	}
+
+	s.syncBaseMu.Lock()
+	if s.syncBase != nil {
+		s.syncBase[relPath] = incoming
+	}
+	s.syncBaseMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[kai-sync] applied %s from %s\n", relPath, agent)
+}
+
+func (s *Server) connectSSE(url, channelID string) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return
@@ -2399,14 +2556,41 @@ func (s *Server) readSSEEvents(channelID string) {
 		req.Header.Set("Authorization", "Bearer "+s.remoteClient.AuthToken)
 	}
 
-	client := &http.Client{Timeout: 0} // no timeout for SSE
-	resp, err := client.Do(req)
+	fmt.Fprintf(os.Stderr, "[kai-sync] connecting SSE to %s\n", url)
+	sseClient := &http.Client{Timeout: 0}
+	resp, err := sseClient.Do(req)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] SSE connect failed: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 404 {
+		// Channel expired or server restarted — re-subscribe
+		fmt.Fprintf(os.Stderr, "[kai-sync] channel expired, re-subscribing...\n")
+		resp.Body.Close()
+		agentName := s.agentName
+		if agentName == "" {
+			agentName = "mcp-client"
+		}
+		newResp, err := s.remoteClient.SubscribeSync(agentName, s.remoteClient.Actor, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[kai-sync] re-subscribe failed: %v\n", err)
+			return
+		}
+		s.syncChannelID = newResp.ChannelID
+		fmt.Fprintf(os.Stderr, "[kai-sync] re-subscribed on channel %s\n", newResp.ChannelID)
+		return // will reconnect with new channel on next retry
+	}
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "[kai-sync] SSE status: %d\n", resp.StatusCode)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[kai-sync] SSE connected\n")
+
 	scanner := bufio.NewScanner(resp.Body)
+	// Increase scanner buffer for large file content
+	scanner.Buffer(make([]byte, 0), 10*1024*1024) // 10MB max
 	var eventType, eventData string
 
 	for {
@@ -2417,7 +2601,8 @@ func (s *Server) readSSEEvents(channelID string) {
 		}
 
 		if !scanner.Scan() {
-			return // connection closed
+			fmt.Fprintf(os.Stderr, "[kai-sync] SSE connection closed\n")
+			return
 		}
 		line := scanner.Text()
 
@@ -2522,6 +2707,47 @@ func (s *Server) handleSyncFileChange(data string) {
 	s.syncBaseMu.Lock()
 	s.syncBase[event.File] = incoming
 	s.syncBaseMu.Unlock()
+}
+
+// toGitRelativePath converts a workDir-relative path to a git-root-relative path.
+// This ensures all clones of the same repo use the same file paths in sync.
+func toGitRelativePath(workDir, relPath string) string {
+	absPath := filepath.Join(workDir, relPath)
+
+	// Walk up from absPath to find .git
+	dir := filepath.Dir(absPath)
+	for dir != "/" && dir != "." {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			// Found git root
+			gitRel, err := filepath.Rel(dir, absPath)
+			if err == nil {
+				return filepath.ToSlash(gitRel)
+			}
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+
+	// Fallback: return as-is
+	return relPath
+}
+
+// fromGitRelativePath converts a git-root-relative path to a workDir-relative path.
+func fromGitRelativePath(workDir, gitRelPath string) string {
+	// Find git root from workDir
+	dir := workDir
+	for dir != "/" && dir != "." {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			absPath := filepath.Join(dir, gitRelPath)
+			rel, err := filepath.Rel(workDir, absPath)
+			if err == nil {
+				return filepath.ToSlash(rel)
+			}
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	return gitRelPath
 }
 
 // detectSyncLang maps file path to a language the merge engine supports.

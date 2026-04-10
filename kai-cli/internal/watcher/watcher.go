@@ -1,6 +1,8 @@
 // Package watcher provides file system watching for live graph updates.
 // When files change, the watcher incrementally updates the semantic graph
 // (symbols, imports, calls, tests) without a full recapture.
+// Supports live sync: pushes file content to other agents via SSE.
+// Live sync test: if you can read this, it worked!
 package watcher
 
 import (

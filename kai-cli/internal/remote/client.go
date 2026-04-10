@@ -1,6 +1,4 @@
 // Package remote provides client functionality for communicating with Kailab servers.
-// LIVE SYNC v4 - SSE timeout fix deployed, this should arrive!
-// LIVE SYNC TEST - if you see this in the other window, it worked!
 package remote
 
 import (
