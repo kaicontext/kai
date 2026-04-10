@@ -280,12 +280,11 @@ func (ds *DirectorySource) walkDir(absDir, relDir string, entries *[]fileEntry) 
 		return nil // skip unreadable dirs
 	}
 
-	// Check if this directory's mtime is unchanged
-	dirUnchanged := false
+	// Update directory mtime in stat cache (used for readdir optimization only,
+	// NOT for skipping individual file stat checks — see comment below).
 	if ds.statCache != nil && relDir != "." {
 		dirInfo, err := os.Stat(absDir)
 		if err == nil {
-			dirUnchanged = ds.statCache.DirUnchanged(relDir, dirInfo)
 			ds.statCache.UpdateDir(relDir, dirInfo)
 		}
 	}
@@ -313,23 +312,11 @@ func (ds *DirectorySource) walkDir(absDir, relDir string, entries *[]fileEntry) 
 			continue
 		}
 
-		// If directory is unchanged, skip ignore matching and stat —
-		// replay from cache if available
-		if dirUnchanged && ds.statCache != nil {
-			if digest, cachedLang, ok := ds.statCache.LookupByPath(relPath); ok {
-				if cachedLang != "" {
-					lang = cachedLang
-				}
-				*entries = append(*entries, fileEntry{
-					absPath: absPath,
-					relPath: relPath,
-					lang:    lang,
-					info:    nil, // use cache in phase 2
-					cached:  digest,
-				})
-				continue
-			}
-		}
+		// Note: we do NOT skip individual file stat checks based on directory mtime.
+		// Modifying a file's content changes the file's mtime but NOT the parent
+		// directory's mtime (directory mtime only changes on create/delete).
+		// Always stat individual files and let the stat cache (Phase 2) compare
+		// mtime+size to decide whether to re-read.
 
 		// Check ignore patterns (expensive — skip for unchanged dirs)
 		if ds.ignore != nil && ds.ignore.Match(relPath, false) {
