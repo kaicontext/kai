@@ -93,6 +93,7 @@ type Server struct {
 	// Edge sync state
 	lastEdgeSeq    int64
 	syncChannelID  string   // live sync channel ID (empty if not subscribed)
+	syncAgentName  string   // session-unique agent name for sync
 	syncStopSSE    chan struct{} // signals SSE reader goroutine to stop
 	// Files written by sync — watcher should skip these to avoid feedback loop
 	syncWrittenMu  sync.Mutex
@@ -197,6 +198,7 @@ func (s *Server) startWatcher(db *graph.DB) {
 		if agentName == "" {
 			agentName = "mcp-client"
 		}
+		s.syncAgentName = agentName + ":" + s.sessionID
 		w.OnActivity = func(entries []watcher.ActivityEntry) {
 			var files []remote.ActivityFile
 			var editedPaths []string
@@ -233,7 +235,7 @@ func (s *Server) startWatcher(db *graph.DB) {
 						// Convert path to git-relative so all clones use the same paths
 						syncPath := toGitRelativePath(s.workDir, path)
 						encoded := base64.StdEncoding.EncodeToString(content)
-						if err := client.SyncPushFile(agentName, s.syncChannelID, syncPath, "", encoded); err != nil {
+						if err := client.SyncPushFile(s.syncAgentName, s.syncChannelID, syncPath, "", encoded); err != nil {
 							fmt.Fprintf(os.Stderr, "[kai-sync] push failed for %s: %v\n", syncPath, err)
 						} else {
 							fmt.Fprintf(os.Stderr, "[kai-sync] pushed %s (%d bytes)\n", syncPath, len(content))
@@ -2470,7 +2472,7 @@ var syncLastPollTime int64
 // Polls GET /v1/sync/files which works through proxies (unlike SSE).
 func (s *Server) pollSyncChanges(agentName string) {
 	url := fmt.Sprintf("%s%s/v1/sync/files?since=%d&agent=%s",
-		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), syncLastPollTime, agentName)
+		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), syncLastPollTime, s.syncAgentName)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -2500,6 +2502,10 @@ func (s *Server) pollSyncChanges(agentName string) {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
+	if len(result.Files) > 0 {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: %d file(s) from server\n", len(result.Files))
+	}
+
 	for _, f := range result.Files {
 		if f.Time > syncLastPollTime {
 			syncLastPollTime = f.Time
@@ -2511,13 +2517,14 @@ func (s *Server) pollSyncChanges(agentName string) {
 			continue
 		}
 
-		absPath := filepath.Join(s.workDir, f.Path)
+		// Convert git-relative path to local workDir-relative path
+		localPath := fromGitRelativePath(s.workDir, f.Path)
+		absPath := filepath.Join(s.workDir, localPath)
 		if !strings.HasPrefix(absPath, s.workDir) {
 			continue
 		}
 
-		// Use the same merge logic as the SSE handler
-		s.applySyncContent(f.Path, absPath, content, f.Agent)
+		s.applySyncContent(localPath, absPath, content, f.Agent)
 	}
 }
 
@@ -2927,18 +2934,31 @@ func (s *Server) markSyncWritten(path string) {
 	s.syncWrittenMu.Unlock()
 }
 
-// isSyncWritten returns true if the file was recently written by sync (within 60s).
+// isSyncWritten returns true if the file was written by sync and hasn't been
+// modified by the user since. Compares sync write time against file mtime.
 func (s *Server) isSyncWritten(path string) bool {
 	s.syncWrittenMu.Lock()
 	defer s.syncWrittenMu.Unlock()
 	if s.syncWritten == nil {
 		return false
 	}
-	t, ok := s.syncWritten[path]
+	syncTime, ok := s.syncWritten[path]
 	if !ok {
 		return false
 	}
-	if time.Since(t) > 60*time.Second {
+	// Expire after 60 seconds regardless
+	if time.Since(syncTime) > 60*time.Second {
+		delete(s.syncWritten, path)
+		return false
+	}
+	// Check if the file was modified AFTER the sync write — if so, it's a real edit
+	absPath := filepath.Join(s.workDir, path)
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return false
+	}
+	// If file mtime is more than 1 second after sync write, user edited it
+	if info.ModTime().After(syncTime.Add(time.Second)) {
 		delete(s.syncWritten, path)
 		return false
 	}
