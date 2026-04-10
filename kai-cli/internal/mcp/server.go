@@ -83,6 +83,9 @@ type Server struct {
 	warnings     []remote.OverlapWarning
 	locksMu      sync.RWMutex
 	locks        []remote.FileLock
+	// Sync conflicts (surfaced in kai_activity)
+	syncConflictsMu sync.RWMutex
+	syncConflicts   []syncConflictInfo
 	// Remote client for lock/unlock/sync (cached from watcher setup)
 	remoteClient *remote.Client
 	// Edge sync state
@@ -2051,6 +2054,15 @@ func (s *Server) handleActivity(ctx context.Context, req mcp.CallToolRequest) (*
 		result["lock_count"] = len(locks)
 	}
 
+	// Include sync conflicts
+	s.syncConflictsMu.RLock()
+	conflicts := s.syncConflicts
+	s.syncConflictsMu.RUnlock()
+	if len(conflicts) > 0 {
+		result["sync_conflicts"] = conflicts
+		result["sync_conflict_count"] = len(conflicts)
+	}
+
 	return jsonResult(result)
 }
 
@@ -2523,6 +2535,18 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 		}
 		if toWrite == nil {
 			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n", relPath, agent)
+			s.syncConflictsMu.Lock()
+			s.syncConflicts = append(s.syncConflicts, syncConflictInfo{
+				File:    relPath,
+				Agent:   agent,
+				Time:    time.Now().Format(time.RFC3339),
+				Message: "Both you and " + agent + " edited the same function. Your local edits were preserved.",
+			})
+			// Keep only last 10 conflicts
+			if len(s.syncConflicts) > 10 {
+				s.syncConflicts = s.syncConflicts[len(s.syncConflicts)-10:]
+			}
+			s.syncConflictsMu.Unlock()
 			s.syncBaseMu.Lock()
 			if s.syncBase != nil {
 				s.syncBase[relPath] = incoming
@@ -2707,6 +2731,13 @@ func (s *Server) handleSyncFileChange(data string) {
 	s.syncBaseMu.Lock()
 	s.syncBase[event.File] = incoming
 	s.syncBaseMu.Unlock()
+}
+
+type syncConflictInfo struct {
+	File    string `json:"file"`
+	Agent   string `json:"agent"`
+	Time    string `json:"time"`
+	Message string `json:"message"`
 }
 
 // toGitRelativePath converts a workDir-relative path to a git-root-relative path.
