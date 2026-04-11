@@ -1765,6 +1765,10 @@ func (c *Client) SyncPushFile(agent, channelID, filePath, digest, contentBase64 
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("sync push failed: HTTP %d: %s", resp.StatusCode, string(body))
+	}
 	return nil
 }
 
@@ -1804,7 +1808,8 @@ func (c *Client) SubscribeSync(agent, actor string, files []string) (*SyncSubscr
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("sync subscribe failed: %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sync subscribe failed: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result SyncSubscribeResponse

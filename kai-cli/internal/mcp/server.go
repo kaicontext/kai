@@ -194,6 +194,7 @@ func (s *Server) startWatcher(db *graph.DB) {
 	// Wire activity heartbeats and edge deltas to the server (best-effort)
 	if client, err := remote.NewClientForRemote("origin"); err == nil {
 		s.remoteClient = client
+		fmt.Fprintf(os.Stderr, "[kai-sync] remote client connected: %s\n", client.BaseURL)
 		agentName := s.agentName
 		if agentName == "" {
 			agentName = "mcp-client"
@@ -268,6 +269,8 @@ func (s *Server) startWatcher(db *graph.DB) {
 			}
 			go client.PushEdgesIncremental(remoteUpdates)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[kai-sync] no remote configured (origin): %v\n", err)
 	}
 
 	if err := w.Start(); err != nil {
@@ -2325,6 +2328,7 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	if s.remoteClient == nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] live_sync(%s) called but no remote client configured\n", action)
 		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
 	}
 
@@ -2355,8 +2359,10 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 
 		resp, err := s.remoteClient.SubscribeSync(agentName, s.remoteClient.Actor, files)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[kai-sync] subscribe failed: %v\n", err)
 			return mcp.NewToolResultError(fmt.Sprintf("subscribe failed: %v", err)), nil
 		}
+		fmt.Fprintf(os.Stderr, "[kai-sync] subscribed: channel=%s agent=%s\n", resp.ChannelID, agentName)
 
 		s.syncChannelID = resp.ChannelID
 		s.syncStopSSE = make(chan struct{})
@@ -2388,9 +2394,30 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 
 	case "status":
 		if s.syncChannelID == "" {
-			return jsonResult(map[string]interface{}{"status": "off"})
+			status := map[string]interface{}{"status": "off"}
+			if s.remoteClient != nil {
+				status["remote"] = s.remoteClient.BaseURL
+			} else {
+				status["remote"] = nil
+			}
+			return jsonResult(status)
 		}
-		return jsonResult(map[string]interface{}{"status": "on", "channel": s.syncChannelID})
+		s.syncBaseMu.RLock()
+		baseCount := len(s.syncBase)
+		s.syncBaseMu.RUnlock()
+		s.syncConflictsMu.RLock()
+		conflictCount := len(s.syncConflicts)
+		s.syncConflictsMu.RUnlock()
+		return jsonResult(map[string]interface{}{
+			"status":         "on",
+			"channel":        s.syncChannelID,
+			"remote":         s.remoteClient.BaseURL,
+			"agent":          s.syncAgentName,
+			"polling":        s.syncStopSSE != nil,
+			"last_poll_time": syncLastPollTime,
+			"tracked_files":  baseCount,
+			"conflicts":      conflictCount,
+		})
 
 	case "off":
 		if s.syncChannelID == "" {
@@ -2420,6 +2447,7 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 // readSSEEvents connects to the SSE stream and applies incoming file changes to disk.
 func (s *Server) readSSEEvents(channelID string) {
 	if s.remoteClient == nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] polling goroutine aborted: no remote client\n")
 		return
 	}
 
@@ -2429,8 +2457,11 @@ func (s *Server) readSSEEvents(channelID string) {
 		agentName = "mcp-client"
 	}
 
+	fmt.Fprintf(os.Stderr, "[kai-sync] polling goroutine started: channel=%s interval=5s\n", channelID)
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	defer fmt.Fprintf(os.Stderr, "[kai-sync] polling goroutine stopped: channel=%s\n", channelID)
 
 	for {
 		select {
@@ -2468,14 +2499,19 @@ func (s *Server) readSSEEvents(channelID string) {
 // syncLastPollTime tracks when we last polled for sync changes.
 var syncLastPollTime int64
 
+// syncPollCount tracks how many polls have been made (for periodic alive logging).
+var syncPollCount int64
+
 // pollSyncChanges fetches file content pushed by other agents.
 // Polls GET /v1/sync/files which works through proxies (unlike SSE).
 func (s *Server) pollSyncChanges(agentName string) {
+	syncPollCount++
 	url := fmt.Sprintf("%s%s/v1/sync/files?since=%d&agent=%s",
 		s.remoteClient.BaseURL, s.remoteClient.RepoPath(), syncLastPollTime, s.syncAgentName)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: failed to create request: %v\n", err)
 		return
 	}
 	if s.remoteClient.AuthToken != "" {
@@ -2484,11 +2520,13 @@ func (s *Server) pollSyncChanges(agentName string) {
 
 	resp, err := s.remoteClient.HTTPClient.Do(req)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: request failed: %v (url=%s)\n", err, url)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: HTTP %d from %s\n", resp.StatusCode, url)
 		return
 	}
 
@@ -2500,7 +2538,15 @@ func (s *Server) pollSyncChanges(agentName string) {
 			Time    int64  `json:"time"`
 		} `json:"files"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: JSON decode error: %v\n", err)
+		return
+	}
+
+	// Log alive heartbeat every 12 polls (~1 minute)
+	if syncPollCount%12 == 0 {
+		fmt.Fprintf(os.Stderr, "[kai-sync] poll: alive (poll #%d, since=%d)\n", syncPollCount, syncLastPollTime)
+	}
 
 	if len(result.Files) > 0 {
 		fmt.Fprintf(os.Stderr, "[kai-sync] poll: %d file(s) from server\n", len(result.Files))
@@ -2513,7 +2559,12 @@ func (s *Server) pollSyncChanges(agentName string) {
 
 		// Decode and apply
 		content, err := base64.StdEncoding.DecodeString(f.Content)
-		if err != nil || len(content) == 0 {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[kai-sync] poll: base64 decode failed for %s: %v\n", f.Path, err)
+			continue
+		}
+		if len(content) == 0 {
+			fmt.Fprintf(os.Stderr, "[kai-sync] poll: empty content for %s, skipping\n", f.Path)
 			continue
 		}
 
