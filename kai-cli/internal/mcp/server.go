@@ -2451,29 +2451,9 @@ func (s *Server) readSSEEvents(channelID string) {
 		return
 	}
 
-	// Poll-based sync instead of SSE (SSE has proxy timeout issues)
-	agentName := s.agentName
-	if agentName == "" {
-		agentName = "mcp-client"
-	}
+	fmt.Fprintf(os.Stderr, "[kai-sync] SSE goroutine started: channel=%s\n", channelID)
+	defer fmt.Fprintf(os.Stderr, "[kai-sync] SSE goroutine stopped: channel=%s\n", channelID)
 
-	fmt.Fprintf(os.Stderr, "[kai-sync] polling goroutine started: channel=%s interval=5s\n", channelID)
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	defer fmt.Fprintf(os.Stderr, "[kai-sync] polling goroutine stopped: channel=%s\n", channelID)
-
-	for {
-		select {
-		case <-s.syncStopSSE:
-			return
-		case <-ticker.C:
-			s.pollSyncChanges(agentName)
-		}
-	}
-
-	// SSE approach (disabled — proxy doesn't support long-lived connections reliably)
-	/*
 	for {
 		select {
 		case <-s.syncStopSSE:
@@ -2493,7 +2473,6 @@ func (s *Server) readSSEEvents(channelID string) {
 			fmt.Fprintf(os.Stderr, "[kai-sync] SSE reconnecting...\n")
 		}
 	}
-	*/
 }
 
 // syncLastPollTime tracks when we last polled for sync changes.
@@ -2653,12 +2632,18 @@ func (s *Server) connectSSE(url, channelID string) {
 		return
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Accept-Encoding", "identity") // Disable gzip for streaming
 	if s.remoteClient.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.remoteClient.AuthToken)
 	}
 
 	fmt.Fprintf(os.Stderr, "[kai-sync] connecting SSE to %s\n", url)
-	sseClient := &http.Client{Timeout: 0}
+	sseClient := &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			DisableCompression: true,
+		},
+	}
 	resp, err := sseClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[kai-sync] SSE connect failed: %v\n", err)
