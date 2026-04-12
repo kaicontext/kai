@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.92"
+var Version = "0.9.93"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -1596,6 +1596,16 @@ var authStatusCmd = &cobra.Command{
 	RunE:  runAuthStatus,
 }
 
+var usageCmd = &cobra.Command{
+	Use:   "usage",
+	Short: "Show billing usage for the current period",
+	Long: `Show commit usage and billing information for your organization.
+
+Examples:
+  kai usage                  # Show usage for current org`,
+	RunE: runUsage,
+}
+
 // Review commands
 var reviewCmd = &cobra.Command{
 	Use:   "review",
@@ -2932,6 +2942,10 @@ func init() {
 	authCmd.AddCommand(authLogoutCmd)
 	authCmd.AddCommand(authStatusCmd)
 	rootCmd.AddCommand(authCmd)
+
+	// Billing usage
+	usageCmd.GroupID = groupRemote
+	rootCmd.AddCommand(usageCmd)
 
 	// Add review subcommands
 	reviewCmd.AddCommand(reviewOpenCmd)
@@ -13095,9 +13109,25 @@ func runPush(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	var pushUsage *remote.UsageInfo
 	if len(batchUpdates) > 0 {
 		result, err := client.BatchUpdateRefs(batchUpdates)
 		if err != nil {
+			// Check for commit limit error
+			if limErr, ok := err.(*remote.CommitLimitError); ok {
+				fmt.Fprintf(os.Stderr, "\r\033[K")
+				fmt.Println()
+				fmt.Println("  Push blocked: you've reached the commit limit for this billing period.")
+				fmt.Println()
+				fmt.Printf("    Plan:    %s\n", limErr.Tier)
+				fmt.Printf("    Used:    %d / %d commits\n", limErr.Used, limErr.Limit)
+				fmt.Println()
+				if limErr.UpgradeURL != "" {
+					fmt.Printf("  Upgrade to Pro for more commits: %s\n", limErr.UpgradeURL)
+				}
+				fmt.Println()
+				return fmt.Errorf("commit limit reached")
+			}
 			// Fallback to individual updates if batch not supported (405 or other error)
 			if strings.Contains(err.Error(), "405") || strings.Contains(err.Error(), "Method Not Allowed") {
 				for _, upd := range batchUpdates {
@@ -13116,6 +13146,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("updating refs: %w", err)
 			}
 		} else {
+			pushUsage = result.Usage
 			for _, res := range result.Results {
 				if res.OK {
 					debugf("%s -> updated (push %s)", res.Name, result.PushID[:8])
@@ -13220,6 +13251,32 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\r\033[K")
 	fmt.Printf("Pushed to %s.\n", remoteName)
+
+	// Display billing usage warnings
+	if pushUsage != nil {
+		pct := 0
+		if pushUsage.Limit > 0 {
+			pct = pushUsage.Used * 100 / pushUsage.Limit
+		}
+		switch {
+		case pushUsage.Plan == "pro" && pushUsage.Used > pushUsage.Limit:
+			overage := pushUsage.Used - pushUsage.Limit
+			rate := pushUsage.OverageRate
+			if rate == "" {
+				rate = "$0.05"
+			}
+			fmt.Printf("\n  Pro plan: %d commits used (%d overage at %s/each)\n\n", pushUsage.Used, overage, rate)
+		case pct >= 90:
+			fmt.Printf("\n  Usage: %d / %d commits (%d%%) this period\n", pushUsage.Used, pushUsage.Limit, pct)
+			if pushUsage.UpgradeURL != "" {
+				fmt.Printf("  Upgrade to Pro: %s\n", pushUsage.UpgradeURL)
+			}
+			fmt.Println()
+		case pct >= 80:
+			fmt.Printf("\n  Usage: %d / %d commits (%d%%) this period\n\n", pushUsage.Used, pushUsage.Limit, pct)
+		}
+	}
+
 	return nil
 }
 
@@ -14121,6 +14178,67 @@ func runAuthStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runUsage(cmd *cobra.Command, args []string) error {
+	client, err := remote.NewClientForRemote("origin")
+	if err != nil {
+		return fmt.Errorf("no remote configured (use 'kai remote set origin <url>')")
+	}
+
+	usage, err := client.GetUsage(client.Tenant)
+	if err != nil {
+		return fmt.Errorf("getting usage: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("  Org:     %s\n", client.Tenant)
+	fmt.Printf("  Plan:    %s\n", usage.Tier)
+	fmt.Printf("  Period:  %s\n", usage.Period)
+	fmt.Println()
+
+	pct := 0
+	if usage.CommitsLimit > 0 {
+		pct = usage.CommitsUsed * 100 / usage.CommitsLimit
+	}
+
+	bar := renderUsageBar(pct, 30)
+	fmt.Printf("  Commits: %d / %d  %s  %d%%\n", usage.CommitsUsed, usage.CommitsLimit, bar, pct)
+
+	if usage.Tier == "pro" && usage.CommitsUsed > usage.CommitsLimit {
+		overage := usage.CommitsUsed - usage.CommitsLimit
+		rate := "$0.05"
+		if usage.OverageRate != nil {
+			rate = *usage.OverageRate
+		}
+		fmt.Printf("  Overage: %d commits at %s/each\n", overage, rate)
+	}
+
+	if usage.UpgradeURL != nil {
+		fmt.Println()
+		fmt.Printf("  Upgrade to Pro: %s\n", *usage.UpgradeURL)
+	}
+
+	fmt.Println()
+	return nil
+}
+
+func renderUsageBar(pct, width int) string {
+	if pct > 100 {
+		pct = 100
+	}
+	filled := pct * width / 100
+	empty := width - filled
+
+	bar := strings.Repeat("=", filled) + strings.Repeat("-", empty)
+
+	// Color based on usage
+	if pct >= 90 {
+		return "\033[31m[" + bar + "]\033[0m" // red
+	} else if pct >= 80 {
+		return "\033[33m[" + bar + "]\033[0m" // yellow
+	}
+	return "\033[32m[" + bar + "]\033[0m" // green
 }
 
 // Review command implementations

@@ -35,6 +35,7 @@ import (
 	"kai/internal/ref"
 	"kai/internal/remote"
 	"kai/internal/snapshot"
+	"kai/internal/synclog"
 	"kai/internal/watcher"
 )
 
@@ -88,6 +89,9 @@ type Server struct {
 	// Sync conflicts (surfaced in kai_activity)
 	syncConflictsMu sync.RWMutex
 	syncConflicts   []syncConflictInfo
+	// Billing warning (surfaced in kai_activity)
+	billingWarningMu sync.RWMutex
+	billingWarning   string
 	// Remote client for lock/unlock/sync (cached from watcher setup)
 	remoteClient *remote.Client
 	// Edge sync state
@@ -101,6 +105,11 @@ type Server struct {
 	// Last-synced file content for 3-way merge on receive
 	syncBaseMu     sync.RWMutex
 	syncBase       map[string][]byte // path -> content at last sync point
+	// Sync audit log writer
+	syncLogWriter  *synclog.SyncLogWriter
+	// Content cache for auto-checkpoint line range detection
+	preEditMu      sync.RWMutex
+	preEditContent map[string][]byte // path -> content before last edit
 	// Rate limiting: cap read-only tool calls to avoid context bloat
 	readCallCount int32
 }
@@ -221,11 +230,52 @@ func (s *Server) startWatcher(db *graph.DB) {
 					s.warnings = warnings
 					s.warningsMu.Unlock()
 				}
+				// Auto-checkpoint: record AI authorship for edited files
+				for _, path := range editedPaths {
+					if s.isSyncWritten(path) {
+						continue // don't attribute sync-received files to local agent
+					}
+					absPath := filepath.Join(s.workDir, path)
+					content, err := os.ReadFile(absPath)
+					if err != nil || len(content) > 512*1024 {
+						continue
+					}
+
+					s.preEditMu.RLock()
+					old := s.preEditContent[path]
+					s.preEditMu.RUnlock()
+
+					ranges := authorship.DiffLineRanges(old, content)
+					for _, r := range ranges {
+						s.cpWriter.Write(authorship.CheckpointRecord{
+							File:       path,
+							StartLine:  r.Start,
+							EndLine:    r.End,
+							Action:     "modify",
+							AuthorType: "ai",
+							Agent:      agentName,
+							Timestamp:  time.Now().UnixMilli(),
+						})
+					}
+
+					s.preEditMu.Lock()
+					s.preEditContent[path] = content
+					s.preEditMu.Unlock()
+				}
+
 				// Push file content if live sync is active
 				if s.syncChannelID != "" {
 					for _, path := range editedPaths {
 						// Skip files written by sync to avoid feedback loop
 						if s.isSyncWritten(path) {
+							s.syncLogWriter.Write(synclog.SyncLogEntry{
+								Event:     synclog.EventSkip,
+								File:      path,
+								Agent:     s.syncAgentName,
+								Channel:   s.syncChannelID,
+								Timestamp: time.Now().UnixMilli(),
+								Detail:    "feedback loop prevention",
+							})
 							continue
 						}
 						absPath := filepath.Join(s.workDir, path)
@@ -237,9 +287,26 @@ func (s *Server) startWatcher(db *graph.DB) {
 						syncPath := toGitRelativePath(s.workDir, path)
 						encoded := base64.StdEncoding.EncodeToString(content)
 						if err := client.SyncPushFile(s.syncAgentName, s.syncChannelID, syncPath, "", encoded); err != nil {
+							if limErr, ok := err.(*remote.CommitLimitError); ok {
+								fmt.Fprintf(os.Stderr, "[kai-sync] sync limit reached: %d/%d on %s plan\n", limErr.Used, limErr.Limit, limErr.Tier)
+								if limErr.UpgradeURL != "" {
+									fmt.Fprintf(os.Stderr, "[kai-sync] upgrade: %s\n", limErr.UpgradeURL)
+								}
+								s.billingWarningMu.Lock()
+								s.billingWarning = fmt.Sprintf("Usage limit reached (%d/%d on %s plan). Live sync paused. Upgrade: %s", limErr.Used, limErr.Limit, limErr.Tier, limErr.UpgradeURL)
+								s.billingWarningMu.Unlock()
+								break // stop trying to sync more files
+							}
 							fmt.Fprintf(os.Stderr, "[kai-sync] push failed for %s: %v\n", syncPath, err)
 						} else {
 							fmt.Fprintf(os.Stderr, "[kai-sync] pushed %s (%d bytes)\n", syncPath, len(content))
+							s.syncLogWriter.Write(synclog.SyncLogEntry{
+								Event:     synclog.EventPush,
+								File:      syncPath,
+								Agent:     s.syncAgentName,
+								Channel:   s.syncChannelID,
+								Timestamp: time.Now().UnixMilli(),
+							})
 						}
 						// Update base so we can 3-way merge incoming changes
 						s.syncBaseMu.Lock()
@@ -696,6 +763,26 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 					return mcp.NewToolResultText("Rate limit: you have already queried the semantic graph — use the results above instead of making more calls."), nil
 				}
 				return inner(ctx, req)
+			}
+		}
+		// Wrap all tools to prepend billing warnings when the org has hit its limit
+		{
+			inner := handler
+			handler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				result, err := inner(ctx, req)
+				if err != nil {
+					return result, err
+				}
+				s.billingWarningMu.RLock()
+				warning := s.billingWarning
+				s.billingWarningMu.RUnlock()
+				if warning != "" && result != nil && len(result.Content) > 0 {
+					if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+						textContent.Text = "[BILLING] " + warning + "\n\n" + textContent.Text
+						result.Content[0] = textContent
+					}
+				}
+				return result, err
 			}
 		}
 		srv.AddTool(tool, handler)
@@ -2077,6 +2164,14 @@ func (s *Server) handleActivity(ctx context.Context, req mcp.CallToolRequest) (*
 		result["sync_conflict_count"] = len(conflicts)
 	}
 
+	// Include billing warning
+	s.billingWarningMu.RLock()
+	billingWarning := s.billingWarning
+	s.billingWarningMu.RUnlock()
+	if billingWarning != "" {
+		result["billing_warning"] = billingWarning
+	}
+
 	return jsonResult(result)
 }
 
@@ -2434,6 +2529,20 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 		s.remoteClient.UnsubscribeSync(s.syncChannelID)
 		s.syncChannelID = ""
 
+		// Auto-capture to seal pending sync log and checkpoints
+		if synclog.CountPendingSyncLogs(s.kaiDir) > 0 || authorship.CountPendingCheckpoints(s.kaiDir) > 0 {
+			go func() {
+				cmd := exec.Command("kai", "capture")
+				cmd.Dir = s.workDir
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					fmt.Fprintf(os.Stderr, "[kai-sync] auto-capture on sync-off failed: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "[kai-sync] auto-capture on sync-off succeeded\n")
+				}
+			}()
+		}
+
 		return jsonResult(map[string]interface{}{
 			"status":  "unsubscribed",
 			"message": "Live sync disabled.",
@@ -2765,6 +2874,15 @@ func (s *Server) handleSyncFileChange(data string) {
 				if merged, ok := mergeResult.Files["file"]; ok {
 					toWrite = merged
 					fmt.Fprintf(os.Stderr, "[kai-sync] merged %s (auto-resolved)\n", event.File)
+					s.syncLogWriter.Write(synclog.SyncLogEntry{
+						Event:     synclog.EventMerge,
+						File:      event.File,
+						Agent:     s.syncAgentName,
+						PeerAgent: event.Agent,
+						Channel:   s.syncChannelID,
+						Timestamp: time.Now().UnixMilli(),
+						Detail:    "3-way merge auto-resolved",
+					})
 				}
 			}
 		}
@@ -2773,6 +2891,15 @@ func (s *Server) handleSyncFileChange(data string) {
 			// Merge failed or unsupported language — skip write, don't clobber
 			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n",
 				event.File, event.Agent)
+			s.syncLogWriter.Write(synclog.SyncLogEntry{
+				Event:     synclog.EventConflict,
+				File:      event.File,
+				Agent:     s.syncAgentName,
+				PeerAgent: event.Agent,
+				Channel:   s.syncChannelID,
+				Timestamp: time.Now().UnixMilli(),
+				Detail:    "local edits preserved",
+			})
 			// Still update base so next incoming change can merge against the latest remote
 			s.syncBaseMu.Lock()
 			s.syncBase[event.File] = incoming
@@ -2793,6 +2920,14 @@ func (s *Server) handleSyncFileChange(data string) {
 	s.syncBaseMu.Lock()
 	s.syncBase[event.File] = incoming
 	s.syncBaseMu.Unlock()
+	s.syncLogWriter.Write(synclog.SyncLogEntry{
+		Event:     synclog.EventReceive,
+		File:      event.File,
+		Agent:     s.syncAgentName,
+		PeerAgent: event.Agent,
+		Channel:   s.syncChannelID,
+		Timestamp: time.Now().UnixMilli(),
+	})
 }
 
 // syncInitialPull compares the remote snapshot against local files
@@ -2921,6 +3056,15 @@ func (s *Server) syncInitialPull() int {
 						os.WriteFile(absPath, merged, 0644)
 						s.markSyncWritten(path)
 						fmt.Fprintf(os.Stderr, "[kai-sync] initial: merged %s (auto-resolved)\n", path)
+						s.syncLogWriter.Write(synclog.SyncLogEntry{
+							Event:     synclog.EventMerge,
+							File:      path,
+							Agent:     s.syncAgentName,
+							PeerAgent: "server",
+							Channel:   s.syncChannelID,
+							Timestamp: time.Now().UnixMilli(),
+							Detail:    "initial sync 3-way merge",
+						})
 						synced++
 						continue
 					}

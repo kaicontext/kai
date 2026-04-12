@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,72 @@ func (c *Client) repoPath() string {
 // RepoPath returns the /{tenant}/{repo} path prefix.
 func (c *Client) RepoPath() string {
 	return c.repoPath()
+}
+
+// CommitLimitError is returned when the org has exceeded its commit limit.
+type CommitLimitError struct {
+	Tier       string
+	Used       int
+	Limit      int
+	UpgradeURL string
+}
+
+func (e *CommitLimitError) Error() string {
+	return fmt.Sprintf("commit limit reached: %d/%d on %s plan", e.Used, e.Limit, e.Tier)
+}
+
+// UsageResponse is the response from the billing usage API.
+type UsageResponse struct {
+	Tier         string  `json:"tier"`
+	CommitsUsed  int     `json:"commits_used"`
+	CommitsLimit int     `json:"commits_limit"`
+	Period       string  `json:"period"`
+	OverageRate  *string `json:"overage_rate"`
+	UpgradeURL   *string `json:"upgrade_url"`
+}
+
+// GetUsage retrieves the current billing usage for an org.
+func (c *Client) GetUsage(orgSlug string) (*UsageResponse, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/billing/usage?org="+orgSlug, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var result UsageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result, nil
+}
+
+// parseUsageHeaders extracts billing usage info from response headers.
+func parseUsageHeaders(resp *http.Response) *UsageInfo {
+	plan := resp.Header.Get("X-Kai-Plan")
+	if plan == "" {
+		return nil
+	}
+	used, _ := strconv.Atoi(resp.Header.Get("X-Kai-Usage"))
+	limit, _ := strconv.Atoi(resp.Header.Get("X-Kai-Limit"))
+	return &UsageInfo{
+		Plan:        plan,
+		Used:        used,
+		Limit:       limit,
+		UpgradeURL:  resp.Header.Get("X-Kai-Upgrade-URL"),
+		OverageRate: resp.Header.Get("X-Kai-Overage-Rate"),
+	}
 }
 
 // --- Wire types (matching kailab/proto/wire.go) ---
@@ -122,6 +189,16 @@ type BatchRefResult struct {
 type BatchRefUpdateResponse struct {
 	PushID  string           `json:"pushId"`
 	Results []BatchRefResult `json:"results"`
+	Usage   *UsageInfo       `json:"-"` // populated from response headers
+}
+
+// UsageInfo contains billing usage data returned via response headers.
+type UsageInfo struct {
+	Plan        string
+	Used        int
+	Limit       int
+	UpgradeURL  string
+	OverageRate string
 }
 
 // RefEntry represents a single ref.
@@ -296,6 +373,25 @@ func (c *Client) BatchUpdateRefs(updates []BatchRefUpdate) (*BatchRefUpdateRespo
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusPaymentRequired {
+		var limitErr struct {
+			Error      string `json:"error"`
+			Tier       string `json:"tier"`
+			Limit      int    `json:"limit"`
+			Used       int    `json:"used"`
+			UpgradeURL string `json:"upgrade_url"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&limitErr); err == nil && limitErr.Error == "commit_limit_reached" {
+			return nil, &CommitLimitError{
+				Tier:       limitErr.Tier,
+				Used:       limitErr.Used,
+				Limit:      limitErr.Limit,
+				UpgradeURL: limitErr.UpgradeURL,
+			}
+		}
+		return nil, fmt.Errorf("payment required")
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
 	}
@@ -304,6 +400,7 @@ func (c *Client) BatchUpdateRefs(updates []BatchRefUpdate) (*BatchRefUpdateRespo
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
+	result.Usage = parseUsageHeaders(resp)
 
 	return &result, nil
 }
@@ -1765,6 +1862,24 @@ func (c *Client) SyncPushFile(agent, channelID, filePath, digest, contentBase64 
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPaymentRequired {
+		var limitErr struct {
+			Error      string `json:"error"`
+			Tier       string `json:"tier"`
+			Limit      int    `json:"limit"`
+			Used       int    `json:"used"`
+			UpgradeURL string `json:"upgrade_url"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&limitErr); err == nil && limitErr.Error == "commit_limit_reached" {
+			return &CommitLimitError{
+				Tier:       limitErr.Tier,
+				Used:       limitErr.Used,
+				Limit:      limitErr.Limit,
+				UpgradeURL: limitErr.UpgradeURL,
+			}
+		}
+		return fmt.Errorf("sync limit reached")
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("sync push failed: HTTP %d: %s", resp.StatusCode, string(body))
