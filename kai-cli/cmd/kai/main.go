@@ -25,6 +25,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/sergi/go-diff/diffmatchpatch"
@@ -69,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.91"
+var Version = "0.9.92"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -251,6 +252,34 @@ This is equivalent to running:
 The capture command is the first step in the "2-minute value path":
   kai capture → kai diff → kai review open → kai ci plan`,
 	RunE: runCapture,
+}
+
+var primeCmd = &cobra.Command{
+	Use:   "prime <query>",
+	Short: "Output pre-injection context for a query (used by Claude Code hooks)",
+	Long: `Queries the semantic graph to find files and symbols relevant to a
+natural language query, then outputs structured context to stdout.
+
+Designed to be called from a Claude Code SessionStart hook so that
+Claude receives the right code context before it starts reasoning —
+eliminating expensive exploration round-trips.
+
+Examples:
+  kai prime "fix the login bug"
+  kai prime "database migration"
+  kai prime "add rate limiting to the API"
+
+Hook setup (in .claude/settings.local.json):
+  {
+    "hooks": {
+      "SessionStart": [{
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "kai prime \"$QUERY\""}]
+      }]
+    }
+  }`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPrime,
 }
 
 var (
@@ -2032,26 +2061,26 @@ func runBench(cmd *cobra.Command, args []string) error {
 	// prompt for each mode first so that both measured runs hit warm caches.
 	fmt.Fprintf(os.Stderr, "Warming caches...\n")
 	warmupPrompt := "say ok"
-	if _, err := runClaude(cwd, warmupPrompt, modelFlag, false); err != nil {
+	if _, err := runClaude(cwd, warmupPrompt, modelFlag, benchModeNoKai); err != nil {
 		fmt.Fprintf(os.Stderr, "  warning: warm-up without Kai failed: %v\n", err)
 	}
-	if _, err := runClaude(cwd, warmupPrompt, modelFlag, true); err != nil {
+	if _, err := runClaude(cwd, warmupPrompt, modelFlag, benchModeKaiPrime); err != nil {
 		fmt.Fprintf(os.Stderr, "  warning: warm-up with Kai failed: %v\n", err)
 	}
 	fmt.Fprintf(os.Stderr, "  Done\n\n")
 
 	// --- Run 1: Without Kai ---
 	fmt.Fprintf(os.Stderr, "Running without Kai (--strict-mcp-config with no servers)...\n")
-	withoutResult, err := runClaude(cwd, benchTask, modelFlag, false)
+	withoutResult, err := runClaude(cwd, benchTask, modelFlag, benchModeNoKai)
 	if err != nil {
 		return fmt.Errorf("run without Kai failed: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "  Done (%s, $%.4f)\n\n",
 		formatDuration(float64(withoutResult.DurationMS)/1000), withoutResult.TotalCostUSD)
 
-	// --- Run 2: With Kai ---
-	fmt.Fprintf(os.Stderr, "Running with Kai MCP...\n")
-	withResult, err := runClaude(cwd, benchTask, modelFlag, true)
+	// --- Run 2: With Kai (pre-injected context, no MCP overhead) ---
+	fmt.Fprintf(os.Stderr, "Running with Kai (pre-injected context, no MCP)...\n")
+	withResult, err := runClaude(cwd, benchTask, modelFlag, benchModeKaiPrime)
 	if err != nil {
 		return fmt.Errorf("run with Kai failed: %w", err)
 	}
@@ -2100,6 +2129,11 @@ func runBench(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Saved:        $0.0000 (0.0%%)\n")
 	}
 
+	fmt.Println()
+	fmt.Println("Turns:")
+	fmt.Printf("  Without Kai:  %d\n", withoutResult.NumTurns)
+	fmt.Printf("  With Kai:     %d\n", withResult.NumTurns)
+
 	if withoutResult.DurationMS > 0 && withResult.DurationMS > 0 {
 		speedup := float64(withoutResult.DurationMS) / float64(withResult.DurationMS)
 		fmt.Println()
@@ -2146,15 +2180,44 @@ func runBench(cmd *cobra.Command, args []string) error {
 // runClaude executes claude -p with the given task, returns parsed result.
 // If withKai is false, it disables all MCP servers via --strict-mcp-config with an empty config.
 // If withKai is true, it runs normally (Kai MCP available via user's config).
-func runClaude(cwd, task, model string, withKai bool) (claudeResult, error) {
-	args := []string{"-p", task, "--output-format", "json"}
+// benchMode controls how Claude is invoked in the benchmark.
+type benchMode int
+
+const (
+	benchModeNoKai    benchMode = iota // no MCP servers at all
+	benchModeKaiMCP                    // normal Kai MCP available (reserved for direct comparison)
+	benchModeKaiPrime                  // prime context prepended, no MCP servers
+)
+
+func runClaude(cwd, task, model string, mode benchMode) (claudeResult, error) {
+	prompt := task
+
+	// In prime mode, run kai prime to get context and prepend it to the prompt
+	if mode == benchModeKaiPrime {
+		// Use the same binary that's running (os.Args[0]) rather than relying on PATH
+		self, _ := os.Executable()
+		if self == "" {
+			self = os.Args[0]
+		}
+		primeCmd := exec.Command(self, "prime", task)
+		primeCmd.Dir = cwd
+		primeOut, err := primeCmd.Output()
+		if err != nil {
+			return claudeResult{}, fmt.Errorf("kai prime failed: %w", err)
+		}
+		if len(primeOut) > 0 {
+			prompt = string(primeOut) + "\n---\n\nTask: " + task
+		}
+	}
+
+	args := []string{"-p", prompt, "--output-format", "json"}
 
 	if model != "" {
 		args = append(args, "--model", model)
 	}
 
-	if !withKai {
-		// Create a temp file with empty MCP config to disable all MCP servers
+	if mode != benchModeKaiMCP {
+		// Disable all MCP servers for both noKai and prime modes
 		tmpFile, err := os.CreateTemp("", "kai-bench-mcp-*.json")
 		if err != nil {
 			return claudeResult{}, fmt.Errorf("creating temp MCP config: %w", err)
@@ -2847,6 +2910,10 @@ func init() {
 	benchCmd.Flags().StringVar(&benchModel, "model", "", "Claude model to use (e.g. sonnet, opus)")
 	_ = benchCmd.MarkFlagRequired("task")
 	rootCmd.AddCommand(benchCmd)
+
+	// Pre-injection context
+	primeCmd.GroupID = groupAdvanced
+	rootCmd.AddCommand(primeCmd)
 
 	// MCP server
 	mcpCmd.GroupID = groupAdvanced
@@ -18985,5 +19052,372 @@ func runCISecretSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Secret %s set.\n", args[0])
+	return nil
+}
+
+// --- kai prime: pre-injection context retrieval ---
+
+// primeStopWords are common words that don't help narrow down code search.
+var primeStopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "in": true, "for": true,
+	"to": true, "is": true, "it": true, "of": true, "and": true,
+	"or": true, "on": true, "at": true, "by": true, "my": true,
+	"this": true, "that": true, "with": true, "from": true, "be": true,
+	"do": true, "how": true, "what": true, "why": true, "can": true,
+	"i": true, "me": true, "we": true, "not": true, "no": true,
+	"all": true, "but": true, "so": true, "if": true, "up": true,
+}
+
+// primeTokenizeQuery splits a query into lowercase keywords, removing stop words.
+func primeTokenizeQuery(query string) []string {
+	// Split on non-alphanumeric characters
+	parts := regexp.MustCompile(`[^a-zA-Z0-9_]+`).Split(strings.ToLower(query), -1)
+	var keywords []string
+	for _, p := range parts {
+		if p == "" || primeStopWords[p] {
+			continue
+		}
+		keywords = append(keywords, p)
+	}
+	return keywords
+}
+
+// primeSplitCamelCase splits "handleLoginRequest" into ["handle", "login", "request"].
+func primeSplitCamelCase(s string) []string {
+	var parts []string
+	var current strings.Builder
+	for i, r := range s {
+		if i > 0 && unicode.IsUpper(r) {
+			if current.Len() > 0 {
+				parts = append(parts, strings.ToLower(current.String()))
+				current.Reset()
+			}
+		}
+		current.WriteRune(r)
+	}
+	if current.Len() > 0 {
+		parts = append(parts, strings.ToLower(current.String()))
+	}
+	return parts
+}
+
+// primeScoreText scores a text against keywords. Returns number of keyword hits.
+func primeScoreText(text string, keywords []string) float64 {
+	lower := strings.ToLower(text)
+	score := 0.0
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			score += 1.0
+			// Bonus for exact segment match (path segment or camelCase word)
+			segments := append(strings.Split(lower, "/"), strings.Split(lower, ".")...)
+			segments = append(segments, primeSplitCamelCase(text)...)
+			for _, seg := range segments {
+				if seg == kw {
+					score += 0.5
+					break
+				}
+			}
+		}
+	}
+	return score
+}
+
+// primeFileScore holds scoring data for a file during prime retrieval.
+type primeFileScore struct {
+	Path       string
+	FileID     []byte
+	Score      float64
+	Symbols    []primeSymbolInfo
+	Imports    []string
+	ImportedBy []string
+	Tests      []string
+}
+
+// primeSymbolInfo holds symbol data for prime output.
+type primeSymbolInfo struct {
+	Name      string
+	Kind      string
+	Signature string
+	Line      int
+}
+
+// primeGetRecentFiles returns files recently modified in git, ordered by recency.
+func primeGetRecentFiles() []string {
+	cmd := exec.Command("git", "log", "--format=", "--name-only", "-n", "30", "--diff-filter=ACMR")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		files = append(files, line)
+	}
+	return files
+}
+
+func runPrime(cmd *cobra.Command, args []string) error {
+	query := args[0]
+	keywords := primeTokenizeQuery(query)
+	if len(keywords) == 0 {
+		return fmt.Errorf("no usable keywords in query")
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Get latest snapshot
+	resolver := ref.NewResolver(db)
+	kind := ref.KindSnapshot
+	result, err := resolver.Resolve("@snap:last", &kind)
+	if err != nil {
+		return fmt.Errorf("no snapshots found — run 'kai capture' first: %w", err)
+	}
+	snapID := result.ID
+
+	// Get all files in the snapshot
+	creator := snapshot.NewCreator(db, nil)
+	files, err := creator.GetSnapshotFiles(snapID)
+	if err != nil {
+		return fmt.Errorf("getting snapshot files: %w", err)
+	}
+
+	// Score every file by keyword match on path + symbol names
+	scored := make(map[string]*primeFileScore)
+	for _, file := range files {
+		path, _ := file.Payload["path"].(string)
+		if path == "" {
+			continue
+		}
+
+		fs := &primeFileScore{
+			Path:   path,
+			FileID: file.ID,
+			Score:  primeScoreText(path, keywords),
+		}
+
+		// Score symbols in this file
+		symbols, err := creator.GetSymbolsInFile(file.ID, snapID)
+		if err != nil {
+			continue
+		}
+		for _, sym := range symbols {
+			name, _ := sym.Payload["fqName"].(string)
+			if name == "" {
+				continue
+			}
+			symScore := primeScoreText(name, keywords)
+			if symScore > 0 {
+				fs.Score += symScore
+			}
+
+			info := primeSymbolInfo{Name: name}
+			if v, _ := sym.Payload["kind"].(string); v != "" {
+				info.Kind = v
+			}
+			if v, _ := sym.Payload["signature"].(string); v != "" {
+				info.Signature = v
+			}
+			if r, ok := sym.Payload["range"].(map[string]interface{}); ok {
+				if line, ok := r["startLine"].(float64); ok {
+					info.Line = int(line)
+				}
+			}
+			fs.Symbols = append(fs.Symbols, info)
+		}
+
+		scored[path] = fs
+	}
+
+	// Edge walk: boost neighbors of matched files
+	for _, fs := range scored {
+		if fs.Score <= 0 {
+			continue
+		}
+
+		// Get imports (what this file depends on)
+		importEdges, err := db.GetEdges(fs.FileID, graph.EdgeImports)
+		if err == nil {
+			for _, edge := range importEdges {
+				node, err := db.GetNode(edge.Dst)
+				if err != nil || node == nil {
+					continue
+				}
+				depPath, _ := node.Payload["path"].(string)
+				if depPath == "" {
+					continue
+				}
+				fs.Imports = append(fs.Imports, depPath)
+				// Boost the neighbor
+				if neighbor, ok := scored[depPath]; ok {
+					neighbor.Score += fs.Score * 0.3
+				}
+			}
+		}
+
+		// Get dependents (what imports this file)
+		depEdges, err := db.GetEdgesToByPath(fs.Path, graph.EdgeImports)
+		if err == nil {
+			seen := make(map[string]bool)
+			for _, edge := range depEdges {
+				node, err := db.GetNode(edge.Src)
+				if err != nil || node == nil {
+					continue
+				}
+				depPath, _ := node.Payload["path"].(string)
+				if depPath == "" || seen[depPath] {
+					continue
+				}
+				seen[depPath] = true
+				fs.ImportedBy = append(fs.ImportedBy, depPath)
+				// Boost the neighbor
+				if neighbor, ok := scored[depPath]; ok {
+					neighbor.Score += fs.Score * 0.2
+				}
+			}
+		}
+
+		// Get tests
+		testEdges, err := db.GetEdgesToByPath(fs.Path, graph.EdgeTests)
+		if err == nil {
+			seen := make(map[string]bool)
+			for _, edge := range testEdges {
+				node, err := db.GetNode(edge.Src)
+				if err != nil || node == nil {
+					continue
+				}
+				testPath, _ := node.Payload["path"].(string)
+				if testPath == "" || seen[testPath] {
+					continue
+				}
+				seen[testPath] = true
+				fs.Tests = append(fs.Tests, testPath)
+			}
+		}
+	}
+
+	// Git recency boost
+	recentFiles := primeGetRecentFiles()
+	for i, path := range recentFiles {
+		if fs, ok := scored[path]; ok {
+			if i < 10 {
+				fs.Score *= 1.5
+			} else {
+				fs.Score *= 1.2
+			}
+			// If a recently-edited file has zero score from keywords,
+			// give it a small baseline so it can appear if nothing else matches
+			if fs.Score == 0 {
+				fs.Score = 0.3
+			}
+		}
+	}
+
+	// Collect files with positive scores and sort by score descending
+	var ranked []*primeFileScore
+	for _, fs := range scored {
+		if fs.Score > 0 {
+			ranked = append(ranked, fs)
+		}
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].Score > ranked[j].Score
+	})
+
+	// Pack into ~1500 tokens (~6000 chars) of structured markdown.
+	// Smaller context = less cache-creation overhead per turn.
+	const charBudget = 6000
+	var buf strings.Builder
+	buf.WriteString(fmt.Sprintf("# Kai Context: %q\n\n", query))
+
+	charsSoFar := buf.Len()
+	for _, fs := range ranked {
+		if charsSoFar >= charBudget {
+			break
+		}
+
+		var section strings.Builder
+		section.WriteString(fmt.Sprintf("## %s\n", fs.Path))
+
+		// Symbols — names and kinds only, no signatures
+		if len(fs.Symbols) > 0 {
+			shown := 0
+			const maxSymbols = 5
+			for _, sym := range fs.Symbols {
+				if shown >= maxSymbols {
+					break
+				}
+				if shown > 0 {
+					section.WriteString(", ")
+				} else {
+					section.WriteString("Symbols: ")
+				}
+				section.WriteString(sym.Name)
+				if sym.Kind != "" {
+					section.WriteString(" (" + sym.Kind + ")")
+				}
+				shown++
+			}
+			if len(fs.Symbols) > maxSymbols {
+				section.WriteString(fmt.Sprintf(" +%d more", len(fs.Symbols)-maxSymbols))
+			}
+			section.WriteString("\n")
+		}
+
+		if len(fs.Imports) > 0 {
+			imports := fs.Imports
+			if len(imports) > 3 {
+				imports = imports[:3]
+			}
+			section.WriteString("Imports: " + strings.Join(imports, ", "))
+			if len(fs.Imports) > 3 {
+				section.WriteString(fmt.Sprintf(" +%d more", len(fs.Imports)-3))
+			}
+			section.WriteString("\n")
+		}
+
+		if len(fs.ImportedBy) > 0 {
+			deps := fs.ImportedBy
+			if len(deps) > 3 {
+				deps = deps[:3]
+			}
+			section.WriteString("Used by: " + strings.Join(deps, ", "))
+			if len(fs.ImportedBy) > 3 {
+				section.WriteString(fmt.Sprintf(" +%d more", len(fs.ImportedBy)-3))
+			}
+			section.WriteString("\n")
+		}
+
+		if len(fs.Tests) > 0 {
+			tests := fs.Tests
+			if len(tests) > 2 {
+				tests = tests[:2]
+			}
+			section.WriteString("Tests: " + strings.Join(tests, ", "))
+			if len(fs.Tests) > 2 {
+				section.WriteString(fmt.Sprintf(" +%d more", len(fs.Tests)-2))
+			}
+			section.WriteString("\n")
+		}
+
+		section.WriteString("\n")
+
+		sectionStr := section.String()
+		if charsSoFar+len(sectionStr) > charBudget && charsSoFar > 100 {
+			break
+		}
+		buf.WriteString(sectionStr)
+		charsSoFar += len(sectionStr)
+	}
+
+	fmt.Print(buf.String())
 	return nil
 }
