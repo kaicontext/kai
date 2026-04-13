@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kai - The Future of Git for AI</title>
+  <title>Kai - The Future of Collaborative Coding for AI Agents</title>
   <style>
     :root {
       --bg: #0a0a0a;
@@ -143,6 +143,8 @@
       padding: 1rem 1.5rem;
       border-radius: 8px;
       border: 1px solid #262626;
+      min-width: 0;
+      overflow: hidden;
     }
     .install-option .label {
       font-size: 0.8rem;
@@ -153,6 +155,11 @@
     }
     .install-option code {
       color: var(--fg);
+      display: block;
+      word-break: break-all;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      max-width: 100%;
     }
     /* Demo section */
     .demo-container {
@@ -289,21 +296,232 @@
 </head>
 <body>
   <div class="container">
-    <header>
-      <svg class="logo" width="200" height="85" viewBox="0 0 748 318" xmlns="http://www.w3.org/2000/svg">
-        <path id="Rounded-Rectangle" fill="#f95823" fill-rule="evenodd" stroke="none" d="M 7.349242 144.650757 C -0.851768 152.851761 -0.851768 166.148239 7.349242 174.349243 L 144.150757 311.150757 C 152.351776 319.351776 165.648224 319.351776 173.849243 311.150757 L 310.650757 174.349243 C 318.851776 166.148224 318.851776 152.851776 310.650757 144.650757 L 173.849243 7.849243 C 165.648224 -0.351776 152.351776 -0.351776 144.150757 7.849243 Z"/>
-        <path id="Triangle" fill="#fbf9f5" fill-rule="evenodd" stroke="none" d="M 159 70 L 84 200 L 234 200 Z"/>
-        <path id="Triangle-copy" fill="#c4c2bf" fill-rule="evenodd" stroke="none" d="M 159 70 L 159 200 L 234 200 Z"/>
-        <path id="Shape" fill="#e5e5e5" fill-rule="evenodd" stroke="none" d="M 541.644775 211 C 543.365967 199.880295 545.224609 193.954742 546.972534 190.404175 C 548.689209 186.91716 552.159241 181.998627 554.683777 179.474106 C 557.208313 176.949585 561.574707 173.564224 564.386902 171.95108 C 567.199097 170.337936 572.200012 168.125748 575.5 167.03511 C 578.799988 165.944489 585.549988 164.34462 590.5 163.479874 C 595.450012 162.615128 607.539124 161.63205 617.364746 161.295273 L 635.229492 160.682938 L 634.806946 151.845383 C 634.433716 144.03949 634.039917 142.517639 631.433044 138.808563 C 629.738525 136.397491 626.501526 133.590271 623.831665 132.216309 C 620.56134 130.533356 616.838318 129.66272 611.283813 129.282013 C 605.921387 128.914459 600.760376 129.272675 595.207458 130.397827 C 590.709351 131.309265 583.817383 133.141571 579.892029 134.469604 C 575.966736 135.797638 569.200134 138.687988 564.855164 140.892609 L 556.955261 144.900986 L 557.227661 126.749786 L 557.5 108.598602 L 566.673035 104.871521 C 571.71814 102.821655 580.493164 99.996185 586.173035 98.592743 C 591.852844 97.189301 601.526489 95.55304 607.669983 94.956665 C 615.542236 94.192444 621.605408 94.180695 628.207214 94.91684 C 633.359253 95.491302 640.123535 96.838318 643.238892 97.910156 C 646.354309 98.982025 650.894287 101.025818 653.32782 102.451965 C 655.761292 103.878082 660.082458 107.508636 662.930298 110.519806 C 665.778137 113.531006 669.224365 118.432739 670.588623 121.412567 C 671.95282 124.392395 673.720642 129.906067 674.517151 133.665222 C 675.680908 139.15802 675.968689 151.446136 675.982666 196.25 L 676 252 L 657.135925 252 C 638.271851 252 638.271851 252 637.635925 247.360428 C 637.286194 244.80867 637 240.785095 637 238.419144 C 637 234.117432 637 234.117432 628.25 240.723267 C 623.4375 244.356461 616.61676 248.680573 613.092773 250.332382 C 609.568787 251.984177 604.168823 253.928101 601.092773 254.652206 C 598.016724 255.376312 592.349976 255.949844 588.5 255.926727 C 584.650024 255.903625 578.575012 255.120163 575 254.185715 C 571.424988 253.251266 566.28064 251.185287 563.568176 249.594635 C 560.855652 248.003998 556.709106 244.719589 554.353577 242.295944 C 551.998108 239.872314 548.671448 235.046799 546.961121 231.572586 C 545.223694 228.043396 543.364502 222.110275 542.748108 218.127899 L 541.644775 211 Z M 395 252 L 395 33 L 415.871338 33 L 436.742676 33 L 437.288635 43.75 C 437.588867 49.662506 437.734253 78.237488 437.611694 107.25 C 437.489136 136.262512 437.68634 160 438.049927 160 C 438.413513 160 450.138489 146.07402 464.105469 129.053406 L 489.5 98.106781 L 513.838867 98.053406 C 538.177795 98 538.177795 98 535.443542 101.25 C 533.939697 103.037506 520.209595 118.749359 504.93219 136.165222 L 477.155029 167.830475 L 507.991638 209.665237 L 538.828247 251.5 L 514.664124 251.777435 C 490.585449 252.053879 490.493408 252.046829 488.640503 249.781448 C 487.617798 248.531067 475.69281 231.850189 462.140503 212.71283 L 437.5 177.917603 L 437.237854 214.958801 L 436.975647 252 L 415.987854 252 L 395 252 Z M 705 252 L 705 98 L 725 98 L 745 98 L 745 175 L 745 252 L 725 252 L 705 252 Z M 605.02533 224.718475 C 611.202148 224.42157 613.661377 223.764786 618.748535 221.053329 C 622.157349 219.23645 627.208435 215.358124 629.973206 212.434814 C 635 207.11972 635 207.11972 635 196.55986 C 635 186 635 186 626.072388 186 C 621.16217 186 613.66217 186.484375 609.40564 187.076401 C 605.14917 187.668427 599.355957 189.017334 596.531799 190.073975 C 593.707703 191.130615 589.983337 193.45874 588.255554 195.247574 C 586.52771 197.036407 584.570496 200.54245 583.906128 203.038788 C 583.223511 205.603531 582.998596 209.178894 583.388855 211.259354 C 583.768738 213.284332 585.280579 216.368408 586.748413 218.112854 C 588.216309 219.857315 591.235901 222.138611 593.458618 223.182404 C 596.604797 224.659821 599.166931 225.000076 605.02533 224.718475 Z M 722.883972 77.999207 C 719.418396 77.998718 715.978577 77.245331 713.22998 75.884827 C 710.881531 74.722321 707.392212 71.939606 705.476013 69.700958 C 703.559814 67.462311 701.546326 64.026306 701.001587 62.065338 C 700.456848 60.104401 700.018555 56.25 700.027527 53.5 C 700.03656 50.75 700.879089 46.700012 701.899841 44.5 C 702.920593 42.299988 705.273254 39.062958 707.127869 37.30658 C 708.982544 35.550201 712.525024 33.197571 715 32.078552 C 717.474976 30.959503 721.332336 30.034027 723.571838 30.021973 C 725.811401 30.009888 729.709656 30.703918 732.23468 31.564301 C 734.759644 32.424652 738.495911 34.750793 740.537415 36.733459 C 742.578918 38.716156 745.083313 42.174744 746.102661 44.419189 C 747.227112 46.894958 747.964722 50.834045 747.978027 54.434265 C 747.992859 58.444855 747.323181 61.766693 745.912109 64.68161 C 744.763733 67.053772 742.067139 70.498596 739.919678 72.336761 C 737.772156 74.174927 734.272034 76.201141 732.141541 76.839447 C 730.011108 77.477753 725.845154 77.999634 722.883972 77.999207 Z"/>
-      </svg>
+    <!-- Animated Hero -->
+    <div id="hero" style="position:relative;width:100vw;margin-left:calc(-50vw + 50%);height:100vh;min-height:600px;overflow:hidden;background:#0A0A0B;margin-bottom:3rem;">
+      <div style="position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at center,#111114 0%,transparent 60%)"></div>
+      <!-- Header text -->
+      <div style="position:absolute;top:3rem;left:50%;transform:translateX(-50%);text-align:center;z-index:10;animation:heroFadeIn 0.6s ease-out;">
+        <div style="font-size:48px;font-weight:300;color:#F8F8F8;letter-spacing:0.05em;">Kai</div>
+        <div style="font-size:16px;color:#666672;margin-top:4px;">The future of collaborative code.</div>
+      </div>
+      <!-- Laptops container -->
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:5rem 1rem 0;">
+        <div style="position:relative;width:100%;max-width:1400px;height:600px;display:flex;align-items:center;justify-content:center;">
+          <!-- Left laptop -->
+          <div id="laptop-left" style="position:absolute;left:0;top:50%;transform:translateY(-50%);">
+            <div style="position:absolute;top:-40px;left:50%;transform:translateX(-50%);padding:4px 12px;border-radius:999px;background:#1E1E28;border:1px solid #2E2E3E;font-size:14px;color:#8888AA;white-space:nowrap;">&#x1F1EC;&#x1F1E7; London</div>
+            <div style="position:relative;width:480px;background:#1A1A1F;border:1px solid #2A2A32;border-radius:8px;overflow:hidden;transform:perspective(1200px) rotateY(8deg);">
+              <div style="padding:12px;">
+                <div style="width:100%;height:320px;border-radius:4px;overflow:hidden;position:relative;background:#0D0D10;display:flex;flex-direction:column;">
+                  <div style="padding:6px 16px;border-bottom:1px solid #2A2A32;background:#0A0A0B;flex-shrink:0;">
+                    <div style="font-size:12px;color:#8888AA;font-family:'JetBrains Mono',monospace;">auth.ts</div>
+                  </div>
+                  <div id="editor-left" style="padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;flex:1;overflow:auto;"></div>
+                  <div id="dot-left" style="display:none;position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#7B7BF8;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Right laptop -->
+          <div id="laptop-right" style="position:absolute;right:0;top:50%;transform:translateY(-50%);">
+            <div style="position:absolute;top:-40px;left:50%;transform:translateX(-50%);padding:4px 12px;border-radius:999px;background:#1E1E28;border:1px solid #2E2E3E;font-size:14px;color:#8888AA;white-space:nowrap;">&#x1F1FA;&#x1F1F8; New York</div>
+            <div style="position:relative;width:480px;background:#1A1A1F;border:1px solid #2A2A32;border-radius:8px;overflow:hidden;transform:perspective(1200px) rotateY(-8deg);">
+              <div style="padding:12px;">
+                <div style="width:100%;height:320px;border-radius:4px;overflow:hidden;position:relative;background:#0D0D10;display:flex;flex-direction:column;">
+                  <div style="padding:6px 16px;border-bottom:1px solid #2A2A32;background:#0A0A0B;flex-shrink:0;">
+                    <div style="font-size:12px;color:#8888AA;font-family:'JetBrains Mono',monospace;">auth.ts</div>
+                  </div>
+                  <div id="editor-right" style="padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;flex:1;overflow:auto;"></div>
+                  <div id="dot-right" style="display:none;position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#4FC8A0;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Sync pulses -->
+          <div id="pulse-left" style="display:none;position:absolute;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#7B7BF8;box-shadow:0 0 12px #7B7BF8;z-index:5;"></div>
+          <div id="pulse-right" style="display:none;position:absolute;top:50%;transform:translateY(-50%);width:12px;height:12px;border-radius:50%;background:#4FC8A0;box-shadow:0 0 12px #4FC8A0;z-index:5;"></div>
+          <!-- Merge label -->
+          <div id="merge-label" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:12px;background:#0D1810;border:1px solid #2A4A3A;border-radius:8px;padding:16px 20px;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+              <div style="position:relative;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4FC8A0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+                <div id="merge-check" style="display:none;position:absolute;top:-4px;right:-4px;background:#4FC8A0;border-radius:50%;padding:2px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0A0A0B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+              </div>
+              <div style="text-align:center;">
+                <div style="font-size:14px;font-weight:500;color:#C8C8D8;margin-bottom:4px;">Semantic merge</div>
+                <div style="font-size:12px;color:#4FC8A0;">0 conflicts</div>
+                <div id="merge-detail" style="display:none;font-size:11px;color:#666672;margin-top:8px;padding-top:8px;border-top:1px solid #2A2A32;">auth.ts &mdash; 2 functions</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- CTA below hero -->
+      <div style="position:absolute;bottom:2rem;left:50%;transform:translateX(-50%);text-align:center;z-index:10;">
+        <p style="color:#666672;font-size:0.95rem;margin-bottom:1rem;">Built by the team behind GitLab.</p>
+        <div class="cta" style="margin-top:0;">
+          <a href="https://github.com/kaicontext/kai" class="btn">GitHub</a>
+          <a href="#install" class="btn btn-secondary">Install</a>
+          <a href="#prime" class="btn btn-secondary">See the benchmark</a>
+        </div>
+      </div>
+    </div>
+    <style>
+      @keyframes heroFadeIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes cursorBlink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+      .hero-cursor { display:inline-block;width:2px;height:14px;background:#7B7BF8;margin-left:1px;animation:cursorBlink 1s step-end infinite; }
+      .hero-line { display:flex;gap:16px;min-height:18px;width:100%;transition:background-color 0.3s; }
+      .hero-line-num { color:#333345;user-select:none;width:16px;text-align:right;flex-shrink:0;font-size:11px; }
+      .hero-line-code { color:#C8C8D8;white-space:nowrap;font-family:'JetBrains Mono',monospace;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis; }
+      .hero-kw { color:#7B7BF8; }
+      .hero-type { color:#4FC8A0; }
+      .hero-highlight { background-color:#1D3A2E; }
+      @media (max-width: 1100px) {
+        #hero { height: auto; min-height: auto; padding-bottom: 6rem; }
+        #hero > div:nth-child(3) { position: relative !important; padding: 8rem 1rem 2rem !important; flex-direction: column !important; }
+        #hero > div:nth-child(3) > div { position: relative !important; height: auto !important; flex-direction: column !important; align-items: center !important; gap: 3rem !important; }
+        #laptop-left, #laptop-right { position: relative !important; left: auto !important; right: auto !important; top: auto !important; transform: none !important; }
+        #laptop-left > div:last-child, #laptop-right > div:last-child { transform: none !important; width: 340px !important; }
+        #laptop-left > div:last-child > div > div, #laptop-right > div:last-child > div > div { height: 240px !important; }
+        #pulse-left, #pulse-right { display: none !important; }
+        #merge-label { position: relative !important; top: auto !important; left: auto !important; transform: none !important; }
+      }
+    </style>
+    <script>
+    (function() {
+      const londonFn = [
+        'function validateToken(token: string) {',
+        '  const decoded = jwt.verify(token);',
+        '  return decoded.exp > Date.now();',
+        '}'
+      ];
+      const nycFn = [
+        'function refreshToken(userId: string) {',
+        '  const newToken = jwt.sign({ userId });',
+        '  return newToken;',
+        '}'
+      ];
+
+      function highlight(line) {
+        if (!line) return '';
+        return line
+          .replace(/\b(function|const|return)\b/g, '<span class="hero-kw">$1</span>')
+          .replace(/:\s*(string|number|boolean)/g, ': <span class="hero-type">$1</span>');
+      }
+
+      function renderLines(el, lines, opts) {
+        opts = opts || {};
+        el.innerHTML = '';
+        lines.forEach(function(line, i) {
+          var div = document.createElement('div');
+          div.className = 'hero-line' + ((opts.highlightFrom !== undefined && i >= opts.highlightFrom && i < opts.highlightTo) ? ' hero-highlight' : '');
+          var num = document.createElement('span');
+          num.className = 'hero-line-num';
+          num.textContent = line ? (i + 1) : '';
+          var code = document.createElement('span');
+          code.className = 'hero-line-code';
+          code.innerHTML = highlight(line);
+          if (opts.cursorLine === i) code.innerHTML += '<span class="hero-cursor"></span>';
+          div.appendChild(num);
+          div.appendChild(code);
+          el.appendChild(div);
+        });
+      }
+
+      function typingLines(fn, charCount) {
+        var lines = [];
+        var rem = charCount;
+        var cursorLine = 0;
+        for (var i = 0; i < fn.length; i++) {
+          if (rem >= fn[i].length) {
+            lines.push(fn[i]);
+            rem -= fn[i].length;
+            cursorLine = i + 1;
+          } else {
+            lines.push(fn[i].substring(0, rem));
+            cursorLine = i;
+            rem = 0;
+            break;
+          }
+        }
+        while (lines.length < fn.length) lines.push('');
+        return { lines: lines, cursorLine: cursorLine < fn.length ? cursorLine : -1 };
+      }
+
+      var edL = document.getElementById('editor-left');
+      var edR = document.getElementById('editor-right');
+      var dotL = document.getElementById('dot-left');
+      var dotR = document.getElementById('dot-right');
+      var pulseL = document.getElementById('pulse-left');
+      var pulseR = document.getElementById('pulse-right');
+      var mergeLabel = document.getElementById('merge-label');
+      var mergeCheck = document.getElementById('merge-check');
+      var mergeDetail = document.getElementById('merge-detail');
+      var startTime = Date.now();
+
+      function tick() {
+        var t = ((Date.now() - startTime) / 1000) % 9;
+        var phase;
+        if (t < 3) phase = 'typing';
+        else if (t < 4) phase = 'syncing';
+        else if (t < 5.5) phase = 'merging';
+        else if (t < 7) phase = 'merged';
+        else phase = 'fading';
+
+        var opacity = phase === 'fading' ? Math.max(0, 1 - (t - 7) / 2) : 1;
+        document.getElementById('laptop-left').style.opacity = opacity;
+        document.getElementById('laptop-right').style.opacity = opacity;
+
+        if (phase === 'typing') {
+          var chars = Math.floor(t * 30);
+          var left = typingLines(londonFn, chars);
+          var right = typingLines(nycFn, chars);
+          renderLines(edL, left.lines, { cursorLine: left.cursorLine });
+          renderLines(edR, right.lines, { cursorLine: right.cursorLine });
+          dotL.style.display = 'none';
+          dotR.style.display = 'none';
+          pulseL.style.display = 'none';
+          pulseR.style.display = 'none';
+          mergeLabel.style.display = 'none';
+        } else if (phase === 'syncing') {
+          renderLines(edL, londonFn);
+          renderLines(edR, nycFn);
+          var pct = (t - 3);
+          pulseL.style.display = 'block';
+          pulseR.style.display = 'block';
+          pulseL.style.left = (pct * 50) + '%';
+          pulseR.style.right = (pct * 50) + '%';
+          mergeLabel.style.display = 'none';
+          dotL.style.display = 'none';
+          dotR.style.display = 'none';
+        } else {
+          var mergedLeft = londonFn.concat([''], nycFn);
+          var mergedRight = londonFn.concat([''], nycFn);
+          var hlFrom = londonFn.length + 1;
+          var hlTo = hlFrom + nycFn.length;
+          var hlFromR = 0;
+          var hlToR = londonFn.length;
+          var isHighlight = phase === 'merging';
+          renderLines(edL, mergedLeft, isHighlight ? { highlightFrom: hlFrom, highlightTo: hlTo } : {});
+          renderLines(edR, mergedRight, isHighlight ? { highlightFrom: hlFromR, highlightTo: hlToR } : {});
+          pulseL.style.display = 'none';
+          pulseR.style.display = 'none';
+          dotL.style.display = 'block';
+          dotR.style.display = 'block';
+          mergeLabel.style.display = 'block';
+          mergeCheck.style.display = (t > 4.2) ? 'block' : 'none';
+          mergeDetail.style.display = (t >= 5.5) ? 'block' : 'none';
+        }
+
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    })();
+    </script>
+
+    <header style="text-align:center;margin-bottom:2rem;">
       <p class="tagline">The future of collaborative coding for AI agents.</p>
       <p class="tagline" style="margin-top: 1rem;">Today, developers use Git to manage code changes. With AI, that workflow is obsolete. Kai replaces <code>git add, commit, push</code> with a live sync layer where AI agents coordinate code changes automatically — like Google Docs, but for code. Two agents in different parts of the world write simultaneously, and Kai handles the merge intelligently, semantically, in real time. No conflicts. No manual checkpoints. Just continuous, intelligent collaboration.</p>
-      <p style="color: var(--muted); margin-top: 1rem; font-size: 0.95rem;">Built by the team behind GitLab.</p>
-      <div class="cta">
-        <a href="https://github.com/kaicontext/kai" class="btn">GitHub</a>
-        <a href="#install" class="btn btn-secondary">Install</a>
-        <a href="#prime" class="btn btn-secondary">See the benchmark</a>
-      </div>
     </header>
 
     <section id="quickstart">
