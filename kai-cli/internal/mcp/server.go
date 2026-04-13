@@ -124,11 +124,14 @@ func NewServer(workDir, version string) *Server {
 	kaiDir := filepath.Join(workDir, ".kai")
 	sessionID := fmt.Sprintf("mcp_%d_%d", os.Getpid(), time.Now().UnixMilli())
 	s := &Server{
-		workDir:   workDir,
-		kaiDir:    kaiDir,
-		version:   version,
-		sessionID: sessionID,
-		cpWriter:  authorship.NewCheckpointWriter(kaiDir, sessionID),
+		workDir:        workDir,
+		kaiDir:         kaiDir,
+		version:        version,
+		sessionID:      sessionID,
+		cpWriter:       authorship.NewCheckpointWriter(kaiDir, sessionID),
+		preEditContent: make(map[string][]byte),
+		syncWritten:    make(map[string]time.Time),
+		syncLogWriter:  synclog.NewSyncLogWriter(kaiDir),
 	}
 
 	// Fast path: if .kai exists, try to open the store immediately
@@ -239,6 +242,15 @@ func (s *Server) startWatcher(db *graph.DB) {
 			agentName = "mcp-client"
 		}
 		s.syncAgentName = agentName + ":" + s.sessionID
+
+		// Auto-resume live sync if it was on before this process started.
+		if st, ok := s.loadSyncState(); ok && s.syncChannelID == "" {
+			if _, _, err := s.doSubscribeSync(st.Files); err != nil {
+				fmt.Fprintf(os.Stderr, "[kai-sync] auto-resume failed: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[kai-sync] auto-resumed from persisted state\n")
+			}
+		}
 		w.OnActivity = func(entries []watcher.ActivityEntry) {
 			var files []remote.ActivityFile
 			var editedPaths []string
@@ -2503,28 +2515,16 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 			}
 		}
 
-		resp, err := s.remoteClient.SubscribeSync(agentName, s.remoteClient.Actor, files)
+		channelID, synced, err := s.doSubscribeSync(files)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[kai-sync] subscribe failed: %v\n", err)
 			return mcp.NewToolResultError(fmt.Sprintf("subscribe failed: %v", err)), nil
 		}
-		fmt.Fprintf(os.Stderr, "[kai-sync] subscribed: channel=%s agent=%s\n", resp.ChannelID, agentName)
-
-		s.syncChannelID = resp.ChannelID
-		s.syncStopSSE = make(chan struct{})
-		s.syncBaseMu.Lock()
-		s.syncBase = make(map[string][]byte)
-		s.syncBaseMu.Unlock()
-
-		// Initial sync: pull latest snapshot and apply any files that differ locally
-		synced := s.syncInitialPull()
-
-		// Start background polling for ongoing changes
-		go s.readSSEEvents(resp.ChannelID)
+		s.saveSyncState(files)
 
 		result := map[string]interface{}{
 			"status":  "subscribed",
-			"channel": resp.ChannelID,
+			"channel": channelID,
 			"message": "Live sync active. File changes from other agents will be applied automatically.",
 		}
 		if synced > 0 {
@@ -2579,6 +2579,7 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 		s.remoteClient.UnsubscribeSync(s.syncChannelID)
 		s.syncChannelID = ""
+		s.clearSyncState()
 
 		// Auto-capture to seal pending sync log and checkpoints
 		if synclog.CountPendingSyncLogs(s.kaiDir) > 0 || authorship.CountPendingCheckpoints(s.kaiDir) > 0 {
@@ -2602,6 +2603,65 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 	default:
 		return mcp.NewToolResultError("action must be 'on', 'off', or 'status'"), nil
 	}
+}
+
+// syncStatePath returns the path to the persisted live-sync state file.
+func (s *Server) syncStatePath() string {
+	return filepath.Join(s.kaiDir, "sync-state.json")
+}
+
+type persistedSyncState struct {
+	Enabled bool     `json:"enabled"`
+	Files   []string `json:"files,omitempty"`
+}
+
+func (s *Server) saveSyncState(files []string) {
+	data, err := json.Marshal(persistedSyncState{Enabled: true, Files: files})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.syncStatePath(), data, 0644)
+}
+
+func (s *Server) clearSyncState() {
+	_ = os.Remove(s.syncStatePath())
+}
+
+func (s *Server) loadSyncState() (*persistedSyncState, bool) {
+	data, err := os.ReadFile(s.syncStatePath())
+	if err != nil {
+		return nil, false
+	}
+	var st persistedSyncState
+	if json.Unmarshal(data, &st) != nil || !st.Enabled {
+		return nil, false
+	}
+	return &st, true
+}
+
+// doSubscribeSync performs the subscribe + initial-pull + SSE-start flow.
+// Called from handleLiveSync("on") and from auto-resume in startWatcher.
+// Assumes s.remoteClient is non-nil and s.syncChannelID is empty.
+func (s *Server) doSubscribeSync(files []string) (channelID string, synced int, err error) {
+	agentName := s.agentName
+	if agentName == "" {
+		agentName = "mcp-client"
+	}
+	resp, err := s.remoteClient.SubscribeSync(agentName, s.remoteClient.Actor, files)
+	if err != nil {
+		return "", 0, err
+	}
+	fmt.Fprintf(os.Stderr, "[kai-sync] subscribed: channel=%s agent=%s\n", resp.ChannelID, agentName)
+
+	s.syncChannelID = resp.ChannelID
+	s.syncStopSSE = make(chan struct{})
+	s.syncBaseMu.Lock()
+	s.syncBase = make(map[string][]byte)
+	s.syncBaseMu.Unlock()
+
+	synced = s.syncInitialPull()
+	go s.readSSEEvents(resp.ChannelID)
+	return resp.ChannelID, synced, nil
 }
 
 // readSSEEvents connects to the SSE stream and applies incoming file changes to disk.
