@@ -9496,7 +9496,7 @@ func runBlame(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Default: show line ranges
+	// Default: git-blame-style per-line colored output
 	ranges, err := authorship.Blame(db, snapID, filePath)
 	if err != nil {
 		return err
@@ -9507,15 +9507,192 @@ func runBlame(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%s\n", filePath)
-	for _, r := range ranges {
-		agent := r.Agent
-		if agent == "" {
-			agent = "-"
+	return printBlamePretty(filePath, ranges)
+}
+
+// printBlamePretty renders git-blame-style output with colored author badges.
+// Each source line gets: line number · author pill · code.
+func printBlamePretty(filePath string, ranges []graph.AuthorshipRange) error {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		// File vanished after capture — fall back to range-only view.
+		fmt.Printf("%s  (file not readable: %v)\n", filePath, err)
+		for _, r := range ranges {
+			author := blameAuthorLabel(r)
+			fmt.Printf("  %4d-%-4d  %s\n", r.StartLine, r.EndLine, author)
 		}
-		fmt.Printf("  %4d-%-4d  %-6s  %s\n", r.StartLine, r.EndLine, r.AuthorType, agent)
+		return nil
 	}
+	lines := strings.Split(string(content), "\n")
+	// Trim trailing empty line from split on trailing newline.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Build a per-line map: line → AuthorshipRange (last writer wins).
+	lineAuthor := make(map[int]graph.AuthorshipRange, len(lines))
+	for _, r := range ranges {
+		for ln := r.StartLine; ln <= r.EndLine; ln++ {
+			lineAuthor[ln] = r
+		}
+	}
+
+	// Compute author column width (cap at 20).
+	authorWidth := 6 // minimum, fits "human"
+	for _, r := range ranges {
+		if w := len(blameAuthorLabel(r)); w > authorWidth {
+			authorWidth = w
+		}
+	}
+	if authorWidth > 20 {
+		authorWidth = 20
+	}
+
+	// Compute line-number column width.
+	lnWidth := len(fmt.Sprintf("%d", len(lines)))
+	if lnWidth < 3 {
+		lnWidth = 3
+	}
+
+	// Header: file, AI %, dominant agents.
+	aiLines, humanLines, agentSet := 0, 0, map[string]bool{}
+	for _, r := range ranges {
+		n := r.EndLine - r.StartLine + 1
+		if r.AuthorType == "ai" {
+			aiLines += n
+			label := blameAuthorLabel(r)
+			if label != "" && label != "ai" {
+				agentSet[label] = true
+			}
+		} else {
+			humanLines += n
+		}
+	}
+	total := len(lines)
+	var pct float64
+	if total > 0 {
+		pct = float64(aiLines) / float64(total) * 100
+	}
+
+	var agentList []string
+	for a := range agentSet {
+		agentList = append(agentList, a)
+	}
+	sort.Strings(agentList)
+
+	c := newBlameColorer()
+	fmt.Println()
+	fmt.Printf("  %s  %s %.0f%% AI  %s (%d lines)\n",
+		c.bold(filePath),
+		c.dim("·"),
+		pct,
+		c.dim(fmt.Sprintf("%d AI / %d human", aiLines, humanLines)),
+		total,
+	)
+	if len(agentList) > 0 {
+		fmt.Printf("  %s  %s\n", c.dim("agents:"), strings.Join(agentList, c.dim(", ")))
+	}
+	fmt.Println()
+
+	// Per-line rows.
+	for i, code := range lines {
+		ln := i + 1
+		r, hasAttr := lineAuthor[ln]
+		var badge string
+		if hasAttr {
+			badge = blameAuthorLabel(r)
+		} else {
+			badge = "original"
+		}
+		badgeDisplay := padOrTruncate(badge, authorWidth)
+		coloredBadge := c.agent(r, hasAttr, badgeDisplay)
+
+		fmt.Printf("  %s %s %s %s\n",
+			c.dim(fmt.Sprintf("%*d", lnWidth, ln)),
+			c.dim("│"),
+			coloredBadge,
+			code,
+		)
+	}
+	fmt.Println()
 	return nil
+}
+
+// blameAuthorLabel returns a short human-readable label for an attribution.
+// Prefers the model (e.g. "claude-opus-4-6"), falls back to agent name, then "human".
+func blameAuthorLabel(r graph.AuthorshipRange) string {
+	if r.AuthorType == "human" {
+		return "human"
+	}
+	if r.Model != "" {
+		return r.Model
+	}
+	if r.Agent != "" {
+		return r.Agent
+	}
+	return "ai"
+}
+
+func padOrTruncate(s string, w int) string {
+	if len(s) > w {
+		if w <= 1 {
+			return s[:w]
+		}
+		return s[:w-1] + "…"
+	}
+	return s + strings.Repeat(" ", w-len(s))
+}
+
+// blameColorer emits ANSI codes when stdout is a TTY and NO_COLOR is unset.
+// Agent colors roughly match the homepage animation palette.
+type blameColorer struct {
+	enabled bool
+}
+
+func newBlameColorer() *blameColorer {
+	if os.Getenv("NO_COLOR") != "" {
+		return &blameColorer{enabled: false}
+	}
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return &blameColorer{enabled: false}
+	}
+	return &blameColorer{enabled: (fi.Mode() & os.ModeCharDevice) != 0}
+}
+
+func (c *blameColorer) wrap(code, s string) string {
+	if !c.enabled {
+		return s
+	}
+	return "\033[" + code + "m" + s + "\033[0m"
+}
+
+func (c *blameColorer) dim(s string) string  { return c.wrap("38;5;244", s) }
+func (c *blameColorer) bold(s string) string { return c.wrap("1", s) }
+
+// agent colors the author badge by attribution type/agent.
+// Claude-family → purple, Cursor → teal, Copilot → blue, human → orange,
+// other AI → dim cyan, unknown/original → dim gray.
+func (c *blameColorer) agent(r graph.AuthorshipRange, hasAttr bool, s string) string {
+	if !hasAttr {
+		return c.wrap("38;5;240", s)
+	}
+	if r.AuthorType == "human" {
+		return c.wrap("38;5;172;1", s) // orange, bold
+	}
+	key := strings.ToLower(r.Agent + " " + r.Model)
+	switch {
+	case strings.Contains(key, "claude"):
+		return c.wrap("38;5;99;1", s) // purple, bold
+	case strings.Contains(key, "cursor"):
+		return c.wrap("38;5;36;1", s) // teal, bold
+	case strings.Contains(key, "copilot") || strings.Contains(key, "github"):
+		return c.wrap("38;5;75;1", s) // blue, bold
+	case strings.Contains(key, "codex") || strings.Contains(key, "gpt") || strings.Contains(key, "openai"):
+		return c.wrap("38;5;42;1", s) // green, bold
+	default:
+		return c.wrap("38;5;109;1", s) // dim cyan, bold (generic MCP agent)
+	}
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
@@ -9549,19 +9726,72 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Println("Project authorship:")
-	fmt.Printf("  Total lines:    %d\n", stats.TotalLines)
-	fmt.Printf("  AI-authored:    %d (%.1f%%)\n", stats.AILines, stats.AIPct)
-	fmt.Printf("  Human-authored: %d (%.1f%%)\n", stats.HumanLines, 100-stats.AIPct)
+	c := newBlameColorer()
+
+	// Build a color-aware proportional bar: AI block then human block.
+	barWidth := 40
+	aiBarLen := int(float64(barWidth) * stats.AIPct / 100)
+	if aiBarLen < 0 {
+		aiBarLen = 0
+	}
+	if aiBarLen > barWidth {
+		aiBarLen = barWidth
+	}
+	humanBarLen := barWidth - aiBarLen
+	bar := c.wrap("38;5;99", strings.Repeat("█", aiBarLen)) +
+		c.wrap("38;5;172", strings.Repeat("█", humanBarLen))
+
+	fmt.Println()
+	fmt.Printf("  %s  %s  %s\n",
+		c.bold("Project authorship"),
+		c.dim("·"),
+		c.dim(fmt.Sprintf("%d lines", stats.TotalLines)),
+	)
+	fmt.Printf("  %s\n", bar)
+	fmt.Printf("  %s %s   %s %s\n",
+		c.wrap("38;5;99;1", "■"),
+		fmt.Sprintf("AI %.1f%% (%d)", stats.AIPct, stats.AILines),
+		c.wrap("38;5;172;1", "■"),
+		fmt.Sprintf("Human %.1f%% (%d)", 100-stats.AIPct, stats.HumanLines),
+	)
 
 	if len(stats.ByAgent) > 0 {
 		fmt.Println()
-		fmt.Println("By agent:")
-		for agent, lines := range stats.ByAgent {
-			pct := float64(lines) / float64(stats.TotalLines) * 100
-			fmt.Printf("  %-30s %d lines (%.1f%%)\n", agent, lines, pct)
+		fmt.Printf("  %s\n", c.dim("By agent"))
+
+		// Sort for stable output — biggest first.
+		type agentRow struct {
+			name  string
+			lines int
+		}
+		rows := make([]agentRow, 0, len(stats.ByAgent))
+		for a, n := range stats.ByAgent {
+			rows = append(rows, agentRow{a, n})
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].lines > rows[j].lines })
+
+		nameW := 0
+		for _, row := range rows {
+			if len(row.name) > nameW {
+				nameW = len(row.name)
+			}
+		}
+		if nameW > 28 {
+			nameW = 28
+		}
+
+		for _, row := range rows {
+			p := float64(row.lines) / float64(stats.TotalLines) * 100
+			fake := graph.AuthorshipRange{AuthorType: "ai", Agent: row.name, Model: row.name}
+			colored := c.agent(fake, true, padOrTruncate(row.name, nameW))
+			fmt.Printf("  %s  %s %s\n",
+				colored,
+				fmt.Sprintf("%6d lines", row.lines),
+				c.dim(fmt.Sprintf("(%.1f%%)", p)),
+			)
 		}
 	}
+	fmt.Println()
 
 	return nil
 }
