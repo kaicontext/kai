@@ -2613,10 +2613,33 @@ func (s *Server) syncStatePath() string {
 type persistedSyncState struct {
 	Enabled bool     `json:"enabled"`
 	Files   []string `json:"files,omitempty"`
+	LastSeq int64    `json:"last_seq,omitempty"` // tip of sync_events the client has caught up through
 }
 
 func (s *Server) saveSyncState(files []string) {
-	data, err := json.Marshal(persistedSyncState{Enabled: true, Files: files})
+	// Preserve LastSeq if already persisted — callers of saveSyncState
+	// only know about enable/disable, not replay progress.
+	var lastSeq int64
+	if prev, ok := s.loadSyncState(); ok {
+		lastSeq = prev.LastSeq
+	}
+	data, err := json.Marshal(persistedSyncState{Enabled: true, Files: files, LastSeq: lastSeq})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.syncStatePath(), data, 0644)
+}
+
+// saveSyncSeq advances the persisted last_seq after the client has applied
+// replay events up to that point. Kept separate from saveSyncState so the
+// replay phase doesn't have to reconstruct files list.
+func (s *Server) saveSyncSeq(seq int64) {
+	prev, _ := s.loadSyncState()
+	state := persistedSyncState{Enabled: true, LastSeq: seq}
+	if prev != nil {
+		state.Files = prev.Files
+	}
+	data, err := json.Marshal(state)
 	if err != nil {
 		return
 	}
@@ -2660,6 +2683,44 @@ func (s *Server) doSubscribeSync(files []string) (channelID string, synced int, 
 	s.syncBaseMu.Unlock()
 
 	synced = s.syncInitialPull()
+
+	// Replay durable sync events we missed while offline. Reads sinceSeq
+	// from persisted state (0 for first-time subscribers), applies events
+	// with a seq > sinceSeq via applySyncContent, and persists the new tip.
+	// Best-effort: if the server doesn't have the replay endpoint yet or
+	// the call fails, fall back to SSE-only behavior.
+	var replaySeq int64
+	if prev, ok := s.loadSyncState(); ok {
+		replaySeq = prev.LastSeq
+	}
+	if replayResp, err := s.remoteClient.SyncReplaySince(replaySeq, s.syncAgentName, 500); err != nil {
+		fmt.Fprintf(os.Stderr, "[kai-sync] replay skipped (since=%d): %v\n", replaySeq, err)
+	} else if replayResp != nil {
+		applied := 0
+		for _, ev := range replayResp.Events {
+			if ev.File == "" || ev.Content == "" {
+				continue
+			}
+			raw, decErr := base64.StdEncoding.DecodeString(ev.Content)
+			if decErr != nil || len(raw) == 0 {
+				continue
+			}
+			localPath := fromGitRelativePath(s.workDir, ev.File)
+			absPath := filepath.Join(s.workDir, localPath)
+			if !strings.HasPrefix(absPath, s.workDir) {
+				continue
+			}
+			s.applySyncContent(localPath, absPath, raw, ev.Agent)
+			applied++
+		}
+		if applied > 0 {
+			fmt.Fprintf(os.Stderr, "[kai-sync] replay applied %d event(s), tip=%d\n", applied, replayResp.LatestSeq)
+		}
+		if replayResp.LatestSeq > replaySeq {
+			s.saveSyncSeq(replayResp.LatestSeq)
+		}
+	}
+
 	go s.readSSEEvents(resp.ChannelID)
 	return resp.ChannelID, synced, nil
 }

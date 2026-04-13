@@ -1932,6 +1932,59 @@ func (c *Client) SubscribeSync(agent, actor string, files []string) (*SyncSubscr
 	return &result, nil
 }
 
+// SyncReplayEvent is one durable sync event returned by the replay endpoint.
+type SyncReplayEvent struct {
+	Seq       int64  `json:"seq"`
+	ParentSeq int64  `json:"parent_seq,omitempty"`
+	File      string `json:"file"`
+	Digest    string `json:"digest,omitempty"`
+	Content   string `json:"content,omitempty"` // base64
+	Agent     string `json:"agent"`
+	Channel   string `json:"channel,omitempty"`
+	Reason    string `json:"reason"`
+	Label     string `json:"label,omitempty"`
+	Time      int64  `json:"time"`
+}
+
+// SyncReplaySinceResponse is the response from /v1/sync/events/replay.
+type SyncReplaySinceResponse struct {
+	Events    []SyncReplayEvent `json:"events"`
+	LatestSeq int64             `json:"latest_seq"`
+}
+
+// SyncReplaySince fetches durable sync events with seq > sinceSeq from the
+// server's append-only sync_events log. Used by late-joining subscribers
+// to catch up on pushes that happened before they subscribed. Pass
+// excludeAgent to skip replaying the caller's own pushes.
+func (c *Client) SyncReplaySince(sinceSeq int64, excludeAgent string, limit int) (*SyncReplaySinceResponse, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	url := fmt.Sprintf("%s%s/v1/sync/events/replay?since=%d&agent=%s&limit=%d",
+		c.BaseURL, c.repoPath(), sinceSeq, excludeAgent, limit)
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sync replay request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sync replay failed: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out SyncReplaySinceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("sync replay decode: %w", err)
+	}
+	return &out, nil
+}
+
 // UnsubscribeSync removes a live sync subscription.
 func (c *Client) UnsubscribeSync(channelID string) error {
 	httpReq, err := http.NewRequest("DELETE", c.BaseURL+c.repoPath()+"/v1/sync/subscribe/"+channelID, nil)
