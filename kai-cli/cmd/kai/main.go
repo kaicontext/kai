@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.97"
+var Version = "0.9.98"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -878,6 +878,44 @@ Examples:
   kai stats                # Overall percentages
   kai stats --json         # Machine-readable output`,
 	RunE: runStats,
+}
+
+var (
+	checkpointAgent string
+	checkpointModel string
+	checkpointFile  string
+	checkpointLines string
+)
+
+var checkpointCmd = &cobra.Command{
+	Use:   "checkpoint",
+	Short: "Record an AI edit event (called from Claude Code PostToolUse hook)",
+	Long: `Records a line-level authorship checkpoint for an edit that came through
+an AI coding assistant's tool runner (Claude Code Edit/Write/MultiEdit,
+Cursor compose, etc.). This is the honest replacement for the session-
+presence heuristic: only edits the agent actually made are attributed,
+human keystrokes stay human.
+
+Normally invoked from a Claude Code PostToolUse hook:
+
+  ~/.claude/settings.local.json:
+  {
+    "hooks": {
+      "PostToolUse": [{
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [{"type": "command", "command": "kai checkpoint --agent claude-code"}]
+      }]
+    }
+  }
+
+The hook pipes JSON to this command's stdin containing the tool name,
+input (file path + old/new strings), and response. kai parses that
+payload, computes the exact changed line range in the post-edit file,
+and writes a checkpoint that kai capture will consolidate on next run.
+
+Flags override what can be inferred from stdin — useful for manual
+invocation or other AI clients.`,
+	RunE: runCheckpoint,
 }
 
 var diffCmd = &cobra.Command{
@@ -2843,8 +2881,13 @@ func init() {
 	blameCmd.Flags().BoolVar(&blameSummary, "summary", false, "Show summary percentages only")
 	blameCmd.Flags().BoolVar(&blameJSON, "json", false, "Output as JSON")
 	statsCmd.Flags().BoolVar(&statsJSON, "json", false, "Output as JSON")
+	checkpointCmd.Flags().StringVar(&checkpointAgent, "agent", "", "Agent name (default: read from stdin or session file)")
+	checkpointCmd.Flags().StringVar(&checkpointModel, "model", "", "Model name (optional)")
+	checkpointCmd.Flags().StringVar(&checkpointFile, "file", "", "Edited file (default: read from stdin tool input)")
+	checkpointCmd.Flags().StringVar(&checkpointLines, "lines", "", "Line range 'start-end' (default: computed from stdin tool input)")
 	rootCmd.AddCommand(blameCmd)
 	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(checkpointCmd)
 
 	// CI & Testing
 	ciCmd.GroupID = groupCI
@@ -4477,7 +4520,15 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	// NOTE: this runs regardless of `skipAnalysis` — in fact, `skipAnalysis`
 	// is *usually* true during an active MCP session (watcher did the work),
 	// which is the exact case we want to attribute.
-	autoAttributeFromMCPSession(kaiDir, capturePath)
+	// NOTE: autoAttributeFromMCPSession was a session-presence heuristic
+	// that attributed every changed file to the active MCP agent whenever
+	// kai capture ran. That's wrong — users type comments while Claude is
+	// idle, and those keystrokes were being silently labeled as AI work.
+	// The honest replacement is the PostToolUse hook → `kai checkpoint`
+	// path, which only records edits that actually flowed through an AI
+	// client's tool runner. The heuristic function is kept below purely
+	// so old deployments compile; it is intentionally never called.
+	_ = autoAttributeFromMCPSession
 
 	// Step 4: Consolidate authorship checkpoints.
 	// We run this even when there are zero new checkpoints so that authorship
@@ -9824,6 +9875,245 @@ func runStats(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// hookToolInput is the shape of the JSON Claude Code pipes to PostToolUse hooks.
+// We only care about tool_name and tool_input — the rest is ignored so the
+// struct stays resilient if the schema grows.
+type hookToolInput struct {
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		// Edit / Write / MultiEdit: file_path is common
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string,omitempty"`
+		NewString string `json:"new_string,omitempty"`
+		Content   string `json:"content,omitempty"` // Write tool
+		Edits     []struct {
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		} `json:"edits,omitempty"` // MultiEdit tool
+	} `json:"tool_input"`
+}
+
+// runCheckpoint is invoked by the Claude Code PostToolUse hook.
+// It reads the tool-use JSON from stdin, figures out which lines were
+// actually written by the agent, and drops a checkpoint file that the
+// next `kai capture` will consolidate into authorship_ranges.
+//
+// Unlike the old session-presence heuristic, this only attributes lines
+// that came through the AI's tool runner — user keystrokes in the
+// editor (including comments the user types while Claude is idle) never
+// fire this hook and therefore never get attributed to the agent.
+func runCheckpoint(cmd *cobra.Command, args []string) error {
+	// Resolve project dir from cwd (kaiDir is relative to it).
+	workDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	kd := filepath.Join(workDir, kaiDir)
+	if _, err := os.Stat(kd); os.IsNotExist(err) {
+		// Not in a kai-init'd repo — silently succeed so we don't break
+		// the user's editor when they're working in unrelated directories.
+		return nil
+	}
+
+	// Read optional stdin payload (present when invoked as a hook).
+	var payload hookToolInput
+	var stdinData []byte
+	if stat, _ := os.Stdin.Stat(); stat != nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		stdinData, _ = io.ReadAll(os.Stdin)
+		if len(stdinData) > 0 {
+			_ = json.Unmarshal(stdinData, &payload)
+		}
+	}
+
+	// File path: flag wins, then stdin.
+	file := checkpointFile
+	if file == "" {
+		file = payload.ToolInput.FilePath
+	}
+	if file == "" {
+		return fmt.Errorf("no file path given (pass --file or pipe a PostToolUse JSON payload)")
+	}
+	// Make file path relative to workDir so it matches git paths.
+	if filepath.IsAbs(file) {
+		if rel, err := filepath.Rel(workDir, file); err == nil {
+			file = rel
+		}
+	}
+	// Guard against editor buffers for files outside the kai project.
+	if strings.HasPrefix(file, "..") {
+		return nil
+	}
+
+	absFile := filepath.Join(workDir, file)
+	newContent, err := os.ReadFile(absFile)
+	if err != nil {
+		return nil // file vanished or unreadable — nothing to checkpoint
+	}
+
+	// Agent name: flag > env > session file > "mcp-client".
+	agent := checkpointAgent
+	if agent == "" {
+		agent = os.Getenv("KAI_CHECKPOINT_AGENT")
+	}
+	if agent == "" {
+		agent = readAgentFromSessionFile(kd)
+	}
+	if agent == "" {
+		agent = "mcp-client"
+	}
+	model := checkpointModel
+
+	// Compute the edited line range.
+	// Strategy depends on which tool fired the hook:
+	//   Write / MultiEdit without a file on disk before → whole file
+	//   Edit with new_string → find new_string in the current file
+	//   MultiEdit with edits → one checkpoint per edit
+	//   Fallback (manual invocation with --lines) → use the flag as-is
+	var ranges []authorship.LineRange
+	switch {
+	case checkpointLines != "":
+		if r, ok := parseLineRange(checkpointLines); ok {
+			ranges = append(ranges, r)
+		}
+	case payload.ToolName == "Write":
+		// Whole file attribution — everything in the new content is AI.
+		total := bytes.Count(newContent, []byte("\n"))
+		if len(newContent) > 0 && newContent[len(newContent)-1] != '\n' {
+			total++
+		}
+		if total < 1 {
+			total = 1
+		}
+		ranges = append(ranges, authorship.LineRange{Start: 1, End: total})
+	case payload.ToolName == "MultiEdit" && len(payload.ToolInput.Edits) > 0:
+		for _, e := range payload.ToolInput.Edits {
+			if r, ok := locateNewString([]byte(e.NewString), newContent); ok {
+				ranges = append(ranges, r)
+			}
+		}
+	case payload.ToolInput.NewString != "":
+		if r, ok := locateNewString([]byte(payload.ToolInput.NewString), newContent); ok {
+			ranges = append(ranges, r)
+		}
+	default:
+		// No tool input and no --lines — fall back to entire file so
+		// manual `kai checkpoint --file foo.go --agent me` still works.
+		total := bytes.Count(newContent, []byte("\n"))
+		if len(newContent) > 0 && newContent[len(newContent)-1] != '\n' {
+			total++
+		}
+		if total < 1 {
+			total = 1
+		}
+		ranges = append(ranges, authorship.LineRange{Start: 1, End: total})
+	}
+
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	// Grab a session id so multiple checkpoints in one session group together.
+	sessionID := os.Getenv("KAI_CHECKPOINT_SESSION")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("hook_%d", time.Now().UnixNano())
+	}
+	writer := authorship.NewCheckpointWriter(kd, sessionID)
+	now := time.Now().UnixMilli()
+	for _, r := range ranges {
+		writer.Write(authorship.CheckpointRecord{
+			File:       file,
+			StartLine:  r.Start,
+			EndLine:    r.End,
+			Action:     "modify",
+			AuthorType: "ai",
+			Agent:      agent,
+			Model:      model,
+			SessionID:  sessionID,
+			Timestamp:  now,
+		})
+	}
+	return nil
+}
+
+// locateNewString finds where `needle` currently sits in `haystack` and
+// returns its line range. If the needle appears more than once we pick the
+// first occurrence — by convention Claude Code's Edit tool requires unique
+// old_strings, so the first-match choice is safe in practice.
+func locateNewString(needle, haystack []byte) (authorship.LineRange, bool) {
+	if len(needle) == 0 {
+		return authorship.LineRange{}, false
+	}
+	idx := bytes.Index(haystack, needle)
+	if idx < 0 {
+		return authorship.LineRange{}, false
+	}
+	// Count newlines up to idx → start line (1-indexed).
+	start := 1 + bytes.Count(haystack[:idx], []byte("\n"))
+	// Count newlines inside the needle → end line.
+	span := bytes.Count(needle, []byte("\n"))
+	end := start + span
+	return authorship.LineRange{Start: start, End: end}, true
+}
+
+// parseLineRange accepts "start-end" or just "N" (single line).
+func parseLineRange(s string) (authorship.LineRange, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return authorship.LineRange{}, false
+	}
+	if dash := strings.Index(s, "-"); dash >= 0 {
+		startStr := strings.TrimSpace(s[:dash])
+		endStr := strings.TrimSpace(s[dash+1:])
+		start, err1 := strconv.Atoi(startStr)
+		end, err2 := strconv.Atoi(endStr)
+		if err1 != nil || err2 != nil || start < 1 || end < start {
+			return authorship.LineRange{}, false
+		}
+		return authorship.LineRange{Start: start, End: end}, true
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return authorship.LineRange{}, false
+	}
+	return authorship.LineRange{Start: n, End: n}, true
+}
+
+// readAgentFromSessionFile returns the agent name from the most recently
+// updated mcp-session-*.json in .kai/, or "" if none.
+func readAgentFromSessionFile(kaiDir string) string {
+	entries, err := os.ReadDir(kaiDir)
+	if err != nil {
+		return ""
+	}
+	var best map[string]interface{}
+	var bestAt float64
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "mcp-session-") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(kaiDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var s map[string]interface{}
+		if json.Unmarshal(data, &s) != nil {
+			continue
+		}
+		u, _ := s["updatedAt"].(float64)
+		if u > bestAt {
+			best = s
+			bestAt = u
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	if a, ok := best["agent"].(string); ok {
+		return a
+	}
+	return ""
 }
 
 func openDB() (*graph.DB, error) {

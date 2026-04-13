@@ -219,7 +219,12 @@
       "Bash(go run:*)",
       "mcp__kai__kai_grep",
       "Bash(kai bench:*)",
-      "Bash(/usr/bin/git push:*)"
+      "Bash(/usr/bin/git push:*)",
+      "Bash(touch /Users/jacobschatz/projects/kai/kai-server/kailab-control/frontend/src/routes/blame/+page.svelte)",
+      "Read(//Users/jacobschatz/projects/kai/kai-server/**)",
+      "Bash(docker compose:*)",
+      "Bash(script -q /tmp/blame-demo.txt kai blame kai-cli/internal/authorship/demo_example.go)",
+      "Read(//tmp/**)"
     ],
     "deny": [],
     "ask": []
@@ -227,5 +232,18 @@
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "kai"
-  ]
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kai checkpoint --agent claude-code --model claude-opus-4-6"
+          }
+        ]
+      }
+    ]
+  }
 }
