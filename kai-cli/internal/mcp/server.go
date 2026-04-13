@@ -78,6 +78,9 @@ type Server struct {
 	// Authorship tracking
 	sessionID    string                       // unique per MCP process lifetime
 	agentName    string                       // detected from MCP client (e.g. "claude-code")
+	clientMu     sync.RWMutex                 // guards clientName/clientVersion
+	clientName   string                       // populated from initialize handshake
+	clientVersion string                      // populated from initialize handshake
 	cpWriter     *authorship.CheckpointWriter // checkpoint file writer
 	// Live graph watcher
 	fileWatcher  *watcher.Watcher
@@ -173,15 +176,42 @@ func (s *Server) Serve(ctx context.Context) error {
 	if version == "" {
 		version = "0.0.0-dev"
 	}
+
+	// Register an after-initialize hook to capture the MCP client identity
+	// (e.g. "claude-code 2.0.0", "cursor 0.42.1"). This is used by
+	// authorship auto-attribution so checkpoints record the real agent
+	// name instead of the generic "mcp-client" fallback.
+	hooks := &server.Hooks{}
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, res *mcp.InitializeResult) {
+		if msg == nil {
+			return
+		}
+		name := strings.TrimSpace(msg.Params.ClientInfo.Name)
+		ver := strings.TrimSpace(msg.Params.ClientInfo.Version)
+		if name == "" {
+			return
+		}
+		s.clientMu.Lock()
+		s.clientName = name
+		s.clientVersion = ver
+		s.clientMu.Unlock()
+		// Rewrite the session file now that we know who's talking to us.
+		s.writeSessionFile()
+	})
+
 	srv := server.NewMCPServer(
 		"kai",
 		version,
 		server.WithToolCapabilities(true),
+		server.WithHooks(hooks),
 	)
 
 	s.registerTools(srv)
 
-	// Write MCP session file so kai capture can detect active AI sessions
+	// Write MCP session file so kai capture can detect active AI sessions.
+	// The initial write uses the "mcp-client" fallback; the after-initialize
+	// hook rewrites it with the real client identity as soon as the
+	// handshake completes.
 	s.writeSessionFile()
 	defer s.removeSessionFile()
 
@@ -352,13 +382,27 @@ func (s *Server) startWatcher(db *graph.DB) {
 // writeSessionFile records that an MCP session is active.
 // kai capture reads this to auto-attribute changes to the AI agent.
 // Uses PID in filename to avoid conflicts when multiple Claude windows are open.
+//
+// Called twice during a normal session: once at server start (with the
+// generic "mcp-client" fallback) and again from the after-initialize hook
+// once the MCP client has introduced itself.
 func (s *Server) writeSessionFile() {
+	agent := "mcp-client"
+	var clientVersion string
+	s.clientMu.RLock()
+	if s.clientName != "" {
+		agent = s.clientName
+	}
+	clientVersion = s.clientVersion
+	s.clientMu.RUnlock()
+
 	sessionData := map[string]interface{}{
-		"pid":       os.Getpid(),
-		"sessionId": s.sessionID,
-		"startedAt": time.Now().UnixMilli(),
-		"updatedAt": time.Now().UnixMilli(),
-		"agent":     "mcp-client",
+		"pid":           os.Getpid(),
+		"sessionId":     s.sessionID,
+		"startedAt":     time.Now().UnixMilli(),
+		"updatedAt":     time.Now().UnixMilli(),
+		"agent":         agent,
+		"clientVersion": clientVersion,
 	}
 	data, _ := json.Marshal(sessionData)
 	os.MkdirAll(s.kaiDir, 0755)
@@ -370,6 +414,7 @@ func (s *Server) sessionFilePath() string {
 }
 
 // touchSessionFile updates the timestamp to show the session is still active.
+// Preserves the client identity if we learned it from an earlier handshake.
 func (s *Server) touchSessionFile() {
 	path := s.sessionFilePath()
 	data, err := os.ReadFile(path)
@@ -379,6 +424,12 @@ func (s *Server) touchSessionFile() {
 	var session map[string]interface{}
 	if json.Unmarshal(data, &session) == nil {
 		session["updatedAt"] = time.Now().UnixMilli()
+		s.clientMu.RLock()
+		if s.clientName != "" {
+			session["agent"] = s.clientName
+			session["clientVersion"] = s.clientVersion
+		}
+		s.clientMu.RUnlock()
 		updated, _ := json.Marshal(session)
 		os.WriteFile(path, updated, 0644)
 	}
