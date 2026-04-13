@@ -9,12 +9,17 @@ type CheckpointRecord struct {
 	File       string `json:"file"`
 	StartLine  int    `json:"start_line"`
 	EndLine    int    `json:"end_line"`
-	Action     string `json:"action"`      // insert, modify, delete
+	Action     string `json:"action"`      // insert, modify, delete, conflict
 	AuthorType string `json:"author_type"` // ai, human
 	Agent      string `json:"agent"`       // e.g. "claude-code", "cursor"
 	Model      string `json:"model"`       // e.g. "claude-opus-4-6"
 	SessionID  string `json:"session_id"`
 	Timestamp  int64  `json:"ts"`
+	// PeerOrigin is true when this checkpoint was written from a live-sync
+	// receive, i.e. the author is a remote peer and we only observed the edit
+	// as incoming file content. Distinguishes peer-attributed lines from
+	// locally-observed tool-call edits.
+	PeerOrigin bool `json:"peer_origin,omitempty"`
 }
 
 // FileSummary holds attribution stats for a single file.

@@ -2820,6 +2820,10 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 				s.syncConflicts = s.syncConflicts[len(s.syncConflicts)-10:]
 			}
 			s.syncConflictsMu.Unlock()
+			// Record a conflict-style peer checkpoint: the lines the peer
+			// would have changed from our local view. Surfaces in
+			// kai blame --conflicts without actually landing the peer's edit.
+			s.writePeerCheckpoint(relPath, local, incoming, agent, "conflict")
 			s.syncBaseMu.Lock()
 			if s.syncBase != nil {
 				s.syncBase[relPath] = incoming
@@ -2838,12 +2842,46 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 	// Mark as sync-written so the watcher doesn't push it back
 	s.markSyncWritten(relPath)
 
+	// Emit peer-attribution checkpoints so kai blame reflects who actually
+	// wrote each line *now*, without waiting for kai capture on this side.
+	// Use local→toWrite: the lines that changed on disk, which are the lines
+	// the peer contributed (either whole-file apply or the peer's portion of
+	// an auto-merge).
+	s.writePeerCheckpoint(relPath, local, toWrite, agent, "modify")
+
 	s.syncBaseMu.Lock()
 	if s.syncBase != nil {
 		s.syncBase[relPath] = incoming
 	}
 	s.syncBaseMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[kai-sync] applied %s from %s\n", relPath, agent)
+}
+
+// writePeerCheckpoint records an authorship checkpoint attributing the line
+// ranges that changed from old→new to the given peer agent. Used by the
+// live-sync receive path so peer-originated edits appear in kai blame
+// immediately, without waiting for kai capture on the receiving side.
+func (s *Server) writePeerCheckpoint(relPath string, old, new []byte, agent, action string) {
+	if s.cpWriter == nil || agent == "" {
+		return
+	}
+	ranges := authorship.DiffLineRanges(old, new)
+	if len(ranges) == 0 {
+		return
+	}
+	ts := time.Now().UnixMilli()
+	for _, r := range ranges {
+		s.cpWriter.Write(authorship.CheckpointRecord{
+			File:       relPath,
+			StartLine:  r.Start,
+			EndLine:    r.End,
+			Action:     action,
+			AuthorType: "ai",
+			Agent:      agent,
+			Timestamp:  ts,
+			PeerOrigin: true,
+		})
+	}
 }
 
 func (s *Server) connectSSE(url, channelID string) {
