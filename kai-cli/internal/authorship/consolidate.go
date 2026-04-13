@@ -11,13 +11,20 @@ import (
 
 // Consolidate reads pending checkpoints and writes authorship ranges to the DB.
 // Called as Step 4 of kai capture.
-func Consolidate(db *graph.DB, snapshotID []byte, kaiDir string) error {
+//
+// If previousSnapshotID is non-nil, carries authorship history forward from
+// the previous snapshot: files untouched in this capture keep their ranges as-is,
+// and for files that were edited, old ranges outside the edited region are
+// copied forward so the attribution "memory" survives across captures.
+func Consolidate(db *graph.DB, snapshotID, previousSnapshotID []byte, kaiDir string) error {
 	checkpoints, err := ReadPendingCheckpoints(kaiDir)
 	if err != nil {
 		return fmt.Errorf("reading checkpoints: %w", err)
 	}
-	if len(checkpoints) == 0 {
-		return nil // nothing to consolidate
+	// We still want to forward-port previous authorship even if there are no
+	// new checkpoints — otherwise every capture zeroes out history.
+	if len(checkpoints) == 0 && previousSnapshotID == nil {
+		return nil
 	}
 
 	tx, err := db.BeginTx()
@@ -34,6 +41,36 @@ func Consolidate(db *graph.DB, snapshotID []byte, kaiDir string) error {
 		byFile[cp.File] = append(byFile[cp.File], cp)
 	}
 
+	// --- Forward-port from previous snapshot ---
+	//
+	// For every file that had authorship in the previous snapshot:
+	//   (a) if it is NOT being modified in this capture, copy its ranges
+	//       verbatim — line numbers still match.
+	//   (b) if it IS being modified, copy only the ranges that don't
+	//       intersect the lines being (re)attributed by this capture.
+	//       The new checkpoint ranges will cover the overlapping lines.
+	//
+	// This is deliberately simple: we don't try to shift line numbers when
+	// insertions/deletions happen. INSERT OR REPLACE lets new ranges win on
+	// exact-start-line collisions; callers of `kai blame` should treat the
+	// ranges as best-effort attribution, not surveillance-grade truth.
+	if previousSnapshotID != nil {
+		prevRanges, err := db.GetAllAuthorshipRanges(previousSnapshotID)
+		if err != nil {
+			return fmt.Errorf("reading previous authorship: %w", err)
+		}
+		for _, pr := range prevRanges {
+			// Skip ranges that overlap the current capture's re-attributed lines.
+			if overlapsAny(pr, byFile[pr.FilePath]) {
+				continue
+			}
+			if err := db.InsertAuthorshipRange(tx, snapshotID, pr); err != nil {
+				return fmt.Errorf("forward-porting authorship range: %w", err)
+			}
+		}
+	}
+
+	// --- Apply new checkpoints on top ---
 	for filePath, cps := range byFile {
 		// Merge overlapping/adjacent ranges from the same agent
 		merged := mergeRanges(cps)
@@ -152,6 +189,21 @@ func mergeRanges(cps []CheckpointRecord) []CheckpointRecord {
 
 func sameAttribution(a, b *CheckpointRecord) bool {
 	return a.AuthorType == b.AuthorType && a.Agent == b.Agent && a.Model == b.Model
+}
+
+// overlapsAny reports whether `pr` (a previous authorship range) overlaps the
+// line span of any checkpoint in `cps` on the same file. Used during
+// forward-port to skip old ranges that the current capture is rewriting.
+func overlapsAny(pr graph.AuthorshipRange, cps []CheckpointRecord) bool {
+	for _, c := range cps {
+		if c.File != pr.FilePath {
+			continue
+		}
+		if c.StartLine <= pr.EndLine && pr.StartLine <= c.EndLine {
+			return true
+		}
+	}
+	return false
 }
 
 func collectAgents(cps []CheckpointRecord) []string {

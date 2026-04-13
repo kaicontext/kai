@@ -3868,12 +3868,12 @@ func autoAttributeFromMCPSession(kaiDir, workDir string) {
 	if agentName == "" {
 		agentName = "ai-agent"
 	}
+	modelName, _ := session["model"].(string)
 	sessionID, _ := session["sessionId"].(string)
 
-	// Get changed files from git (staged changes about to be committed)
+	// Get changed files from git (staged first, then unstaged-vs-HEAD).
 	changedOutput, err := exec.Command("git", "-C", workDir, "diff", "--cached", "--name-only").Output()
-	if err != nil {
-		// Try unstaged changes
+	if err != nil || strings.TrimSpace(string(changedOutput)) == "" {
 		changedOutput, err = exec.Command("git", "-C", workDir, "diff", "--name-only", "HEAD").Output()
 		if err != nil {
 			return
@@ -3894,22 +3894,39 @@ func autoAttributeFromMCPSession(kaiDir, workDir string) {
 		if file == "" {
 			continue
 		}
-		// Count lines in the file for the range
-		content, err := os.ReadFile(filepath.Join(workDir, file))
+		// Read current working-copy content.
+		newContent, err := os.ReadFile(filepath.Join(workDir, file))
 		if err != nil {
 			continue
 		}
-		lineCount := strings.Count(string(content), "\n") + 1
-		writer.Write(authorship.CheckpointRecord{
-			File:       file,
-			StartLine:  1,
-			EndLine:    lineCount,
-			Action:     "modify",
-			AuthorType: "ai",
-			Agent:      agentName,
-			SessionID:  sessionID,
-			Timestamp:  time.Now().UnixMilli(),
-		})
+
+		// Read previous content from git HEAD. If the file is new (not in HEAD),
+		// oldContent is nil and DiffLineRanges will attribute the whole thing.
+		var oldContent []byte
+		oldBytes, gitErr := exec.Command("git", "-C", workDir, "show", "HEAD:"+file).Output()
+		if gitErr == nil {
+			oldContent = oldBytes
+		}
+
+		ranges := authorship.DiffLineRanges(oldContent, newContent)
+		if len(ranges) == 0 {
+			// No meaningful change (e.g., pure deletions). Nothing to attribute.
+			continue
+		}
+
+		for _, r := range ranges {
+			writer.Write(authorship.CheckpointRecord{
+				File:       file,
+				StartLine:  r.Start,
+				EndLine:    r.End,
+				Action:     "modify",
+				AuthorType: "ai",
+				Agent:      agentName,
+				Model:      modelName,
+				SessionID:  sessionID,
+				Timestamp:  time.Now().UnixMilli(),
+			})
+		}
 	}
 }
 
@@ -4457,15 +4474,27 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	// Auto-detect AI authorship: if an MCP session is active, attribute
 	// changed files to the AI agent without requiring kai_checkpoint calls.
-	if !skipAnalysis {
-		autoAttributeFromMCPSession(kaiDir, capturePath)
-	}
+	// NOTE: this runs regardless of `skipAnalysis` — in fact, `skipAnalysis`
+	// is *usually* true during an active MCP session (watcher did the work),
+	// which is the exact case we want to attribute.
+	autoAttributeFromMCPSession(kaiDir, capturePath)
 
-	// Step 4: Consolidate authorship checkpoints (if any exist)
-	if authorship.CountPendingCheckpoints(kaiDir) > 0 {
+	// Step 4: Consolidate authorship checkpoints.
+	// We run this even when there are zero new checkpoints so that authorship
+	// history is forward-ported from the previous snapshot — otherwise files
+	// the agent didn't touch would drop their attribution on every capture.
+	//
+	// At this point snap.latest still points at the PREVIOUS snapshot
+	// (it gets rewritten lower in this function), so we grab its ID here
+	// and pass it into Consolidate.
+	var prevSnapForAuthorship []byte
+	if prev, _ := ref.NewRefManager(db).Get("snap.latest"); prev != nil {
+		prevSnapForAuthorship = prev.TargetID
+	}
+	if authorship.CountPendingCheckpoints(kaiDir) > 0 || prevSnapForAuthorship != nil {
 		debugf("Step 4: Consolidating authorship checkpoints...")
 		phaseStart = time.Now()
-		if err := authorship.Consolidate(db, snapshotID, kaiDir); err != nil {
+		if err := authorship.Consolidate(db, snapshotID, prevSnapForAuthorship, kaiDir); err != nil {
 			debugf("warning: authorship consolidation: %v", err)
 		} else {
 			debugf("Authorship checkpoints consolidated")
