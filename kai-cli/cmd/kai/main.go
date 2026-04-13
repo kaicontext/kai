@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.9.95"
+var Version = "0.9.96"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -9594,7 +9594,8 @@ func printBlamePretty(filePath string, ranges []graph.AuthorshipRange) error {
 	}
 	fmt.Println()
 
-	// Per-line rows.
+	// Per-line rows. Each line gets a colored left bar + colored line number
+	// matching the author. Blocks of same-agent code read as solid color stripes.
 	for i, code := range lines {
 		ln := i + 1
 		r, hasAttr := lineAuthor[ln]
@@ -9606,10 +9607,12 @@ func printBlamePretty(filePath string, ranges []graph.AuthorshipRange) error {
 		}
 		badgeDisplay := padOrTruncate(badge, authorWidth)
 		coloredBadge := c.agent(r, hasAttr, badgeDisplay)
+		coloredBar := c.agentBar(r, hasAttr)
+		coloredLine := c.agentLineNo(r, hasAttr, fmt.Sprintf("%*d", lnWidth, ln))
 
 		fmt.Printf("  %s %s %s %s\n",
-			c.dim(fmt.Sprintf("%*d", lnWidth, ln)),
-			c.dim("│"),
+			coloredLine,
+			coloredBar,
 			coloredBadge,
 			code,
 		)
@@ -9670,29 +9673,56 @@ func (c *blameColorer) wrap(code, s string) string {
 func (c *blameColorer) dim(s string) string  { return c.wrap("38;5;244", s) }
 func (c *blameColorer) bold(s string) string { return c.wrap("1", s) }
 
-// agent colors the author badge by attribution type/agent.
-// Claude-family → purple, Cursor → teal, Copilot → blue, human → orange,
-// other AI → dim cyan, unknown/original → dim gray.
-func (c *blameColorer) agent(r graph.AuthorshipRange, hasAttr bool, s string) string {
+// agentColorCode returns the 256-color code for a given attribution.
+// Consolidates the lookup so badge, bar, and line number all stay in sync.
+func agentColorCode(r graph.AuthorshipRange, hasAttr bool) string {
 	if !hasAttr {
-		return c.wrap("38;5;240", s)
+		return "240" // dim gray
 	}
 	if r.AuthorType == "human" {
-		return c.wrap("38;5;172;1", s) // orange, bold
+		return "172" // orange
 	}
 	key := strings.ToLower(r.Agent + " " + r.Model)
 	switch {
 	case strings.Contains(key, "claude"):
-		return c.wrap("38;5;99;1", s) // purple, bold
+		return "99" // purple
 	case strings.Contains(key, "cursor"):
-		return c.wrap("38;5;36;1", s) // teal, bold
+		return "36" // teal
 	case strings.Contains(key, "copilot") || strings.Contains(key, "github"):
-		return c.wrap("38;5;75;1", s) // blue, bold
+		return "75" // blue
 	case strings.Contains(key, "codex") || strings.Contains(key, "gpt") || strings.Contains(key, "openai"):
-		return c.wrap("38;5;42;1", s) // green, bold
+		return "42" // green
 	default:
-		return c.wrap("38;5;109;1", s) // dim cyan, bold (generic MCP agent)
+		return "109" // cyan (generic MCP agent)
 	}
+}
+
+// agent colors the author badge by attribution type/agent, bold.
+func (c *blameColorer) agent(r graph.AuthorshipRange, hasAttr bool, s string) string {
+	code := agentColorCode(r, hasAttr)
+	if !hasAttr {
+		return c.wrap("38;5;"+code, s)
+	}
+	return c.wrap("38;5;"+code+";1", s)
+}
+
+// agentBar returns a solid colored block character for the left gutter,
+// rendered in the author color. Two characters wide so it reads as a real bar
+// even on narrow terminals.
+func (c *blameColorer) agentBar(r graph.AuthorshipRange, hasAttr bool) string {
+	code := agentColorCode(r, hasAttr)
+	return c.wrap("38;5;"+code, "▌▌")
+}
+
+// agentLineNo colors the line number in the author color — dim for
+// unattributed, bright+bold for attributed. Matches the bar's hue so blocks
+// of same-agent lines form a solid color stripe down the left.
+func (c *blameColorer) agentLineNo(r graph.AuthorshipRange, hasAttr bool, s string) string {
+	code := agentColorCode(r, hasAttr)
+	if !hasAttr {
+		return c.wrap("38;5;244", s) // dim gray for originals
+	}
+	return c.wrap("38;5;"+code, s)
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
