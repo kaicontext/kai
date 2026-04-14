@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"kai-core/cas"
@@ -1320,5 +1321,148 @@ func TestClient_SyncEdges_Empty(t *testing.T) {
 	}
 	if len(resp.Entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(resp.Entries))
+	}
+}
+
+// --- SyncReplaySince ---
+
+func TestClient_SyncReplaySince_BuildsURLAndDecodes(t *testing.T) {
+	var gotPath, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events": []map[string]interface{}{
+				{
+					"seq":     int64(7),
+					"file":    "src/main.go",
+					"digest":  "abc123",
+					"content": "aGVsbG8=", // "hello"
+					"agent":   "agent-A",
+					"channel": "ch_xyz",
+					"reason":  "live_push",
+					"time":    int64(1234567890),
+				},
+				{
+					"seq":        int64(8),
+					"parent_seq": int64(7),
+					"file":       "src/main.go",
+					"digest":     "def456",
+					"content":    "d29ybGQ=", // "world"
+					"agent":      "agent-B",
+					"channel":    "ch_xyz",
+					"reason":     "live_push",
+					"time":       int64(1234567891),
+				},
+			},
+			"latest_seq": int64(8),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncReplaySince(3, "agent-X", 100)
+	if err != nil {
+		t.Fatalf("SyncReplaySince failed: %v", err)
+	}
+
+	// URL is the new Cloudflare-friendly /v1/sync/replay path, not the old
+	// /v1/sync/events/replay (which Cloudflare's SSE prefix rule mangles).
+	if gotPath != "/test/repo/v1/sync/replay" {
+		t.Errorf("expected path /test/repo/v1/sync/replay, got %q", gotPath)
+	}
+	// Query carries since, agent, limit.
+	if !strings.Contains(gotQuery, "since=3") {
+		t.Errorf("expected since=3 in query %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "agent=agent-X") {
+		t.Errorf("expected agent=agent-X in query %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "limit=100") {
+		t.Errorf("expected limit=100 in query %q", gotQuery)
+	}
+
+	if len(resp.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(resp.Events))
+	}
+	if resp.LatestSeq != 8 {
+		t.Errorf("expected latest_seq=8, got %d", resp.LatestSeq)
+	}
+
+	e0 := resp.Events[0]
+	if e0.Seq != 7 || e0.Agent != "agent-A" || e0.File != "src/main.go" {
+		t.Errorf("unexpected event[0]: %+v", e0)
+	}
+	if e0.Content != "aGVsbG8=" {
+		t.Errorf("expected base64 content 'aGVsbG8=', got %q", e0.Content)
+	}
+	if e0.ParentSeq != 0 {
+		t.Errorf("expected event[0] parent_seq=0 (omitted), got %d", e0.ParentSeq)
+	}
+
+	e1 := resp.Events[1]
+	if e1.ParentSeq != 7 {
+		t.Errorf("expected event[1] parent_seq=7, got %d", e1.ParentSeq)
+	}
+}
+
+func TestClient_SyncReplaySince_Empty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events":     []interface{}{},
+			"latest_seq": int64(42),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	resp, err := client.SyncReplaySince(42, "", 0)
+	if err != nil {
+		t.Fatalf("SyncReplaySince failed: %v", err)
+	}
+	if len(resp.Events) != 0 {
+		t.Errorf("expected 0 events, got %d", len(resp.Events))
+	}
+	// Even with empty events, latest_seq advances the cursor so the caller
+	// doesn't re-poll the same range.
+	if resp.LatestSeq != 42 {
+		t.Errorf("expected latest_seq=42, got %d", resp.LatestSeq)
+	}
+}
+
+func TestClient_SyncReplaySince_DefaultLimit(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"events": []interface{}{}, "latest_seq": int64(0)})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	if _, err := client.SyncReplaySince(0, "", 0); err != nil {
+		t.Fatalf("SyncReplaySince failed: %v", err)
+	}
+	// limit=0 should be replaced with the default (500) before sending.
+	if !strings.Contains(gotQuery, "limit=500") {
+		t.Errorf("expected limit=500 default in query %q", gotQuery)
+	}
+}
+
+func TestClient_SyncReplaySince_HTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test", "repo")
+	_, err := client.SyncReplaySince(0, "", 10)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("expected HTTP 500 in error, got %v", err)
 	}
 }
