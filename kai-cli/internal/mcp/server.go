@@ -1055,6 +1055,14 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 		),
 		log("kai_live_sync", s.handleLiveSync), false,
 	)
+
+	add(
+		mcp.NewTool("kai_checkpoint_now",
+			mcp.WithDescription("Mark the current moment as a semantic checkpoint in the live-sync log. Use this when you've finished a coherent piece of work (feature complete, tests passing, a good place to stop) so reviewers can use the label as a compaction boundary. Does NOT run kai capture — it only writes a marker into sync_events that kai review --live and future compaction can key off of."),
+			mcp.WithString("label", mcp.Required(), mcp.Description("Human-readable description of what this checkpoint represents, e.g. 'authentication refactor complete' or 'tests passing'")),
+		),
+		log("kai_checkpoint_now", s.handleCheckpointNow), false,
+	)
 }
 
 // --- Snapshot Resolution ---
@@ -2631,6 +2639,56 @@ func (s *Server) handleLiveSync(ctx context.Context, req mcp.CallToolRequest) (*
 }
 
 // syncStatePath returns the path to the persisted live-sync state file.
+// handleCheckpointNow writes an agent-milestone marker into sync_events so
+// the live-sync log has a semantic boundary the reviewer / compactor can
+// key off of. Does not run kai capture — that's intentional. The marker
+// travels alongside normal sync pushes (same endpoint, same channel) but
+// with reason="agent_milestone" and a caller-provided label.
+//
+// Phase 2c: lays the foundation for kai review --live (phase 2d) and
+// Compact(from_seq, to_seq) (phase 2e) to use named checkpoints as
+// natural boundaries.
+func (s *Server) handleCheckpointNow(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	label, err := req.RequireString("label")
+	if err != nil {
+		return mcp.NewToolResultError("missing required parameter 'label'"), nil
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return mcp.NewToolResultError("label must not be empty"), nil
+	}
+
+	if s.remoteClient == nil {
+		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
+	}
+
+	agentName := s.syncAgentName
+	if agentName == "" {
+		agentName = s.agentName
+		if agentName == "" {
+			agentName = "mcp-client"
+		}
+	}
+
+	// A marker is a zero-content push with a fixed sentinel file path. It
+	// still lands in sync_events with a real seq, so late joiners / replay
+	// see it in-order with real file pushes. The sentinel path makes it
+	// easy to filter out from "files touched" views.
+	const markerFile = ".kai/checkpoint"
+	if err := s.remoteClient.SyncPushFileReason(agentName, s.syncChannelID, markerFile, "", "", "agent_milestone", label); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("checkpoint push failed: %v", err)), nil
+	}
+
+	fmt.Fprintf(os.Stderr, "[kai-sync] checkpoint: agent=%s label=%q\n", agentName, label)
+
+	return jsonResult(map[string]interface{}{
+		"status": "marked",
+		"reason": "agent_milestone",
+		"label":  label,
+		"agent":  agentName,
+	})
+}
+
 func (s *Server) syncStatePath() string {
 	return filepath.Join(s.kaiDir, "sync-state.json")
 }
