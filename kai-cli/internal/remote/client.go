@@ -1835,13 +1835,27 @@ type SyncSubscribeResponse struct {
 }
 
 // SyncPushFile pushes a file change with content to the live sync channel.
+// Uses reason="live_push" by default. For semantic checkpoints emitted by
+// kai_checkpoint_now or similar, use SyncPushFileReason to override.
 func (c *Client) SyncPushFile(agent, channelID, filePath, digest, contentBase64 string) error {
+	return c.SyncPushFileReason(agent, channelID, filePath, digest, contentBase64, "", "")
+}
+
+// SyncPushFileReason is SyncPushFile with explicit reason/label fields.
+// reason="" means the server will default to "live_push".
+func (c *Client) SyncPushFileReason(agent, channelID, filePath, digest, contentBase64, reason, label string) error {
 	req := map[string]interface{}{
 		"agent":   agent,
 		"channel": channelID,
 		"file":    filePath,
 		"digest":  digest,
 		"content": contentBase64,
+	}
+	if reason != "" {
+		req["reason"] = reason
+	}
+	if label != "" {
+		req["label"] = label
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -1930,6 +1944,57 @@ func (c *Client) SubscribeSync(agent, actor string, files []string) (*SyncSubscr
 	var result SyncSubscribeResponse
 	json.NewDecoder(resp.Body).Decode(&result)
 	return &result, nil
+}
+
+// SyncLiveSummary is the response from /v1/sync/live: a rollup of how far
+// ahead the uncompacted sync state is from the last snapshot, without
+// transferring file content.
+type SyncLiveSummary struct {
+	TipSeq       int64    `json:"tip_seq"`
+	SinceSeq     int64    `json:"since_seq"`
+	EventCount   int64    `json:"event_count"`
+	FileCount    int64    `json:"file_count"`
+	AgentCount   int64    `json:"agent_count"`
+	FirstEventTs int64    `json:"first_event_ts"`
+	LastEventTs  int64    `json:"last_event_ts"`
+	SnapLatest   string   `json:"snap_latest"`
+	Files        []string `json:"files"`
+}
+
+// GetSyncLive fetches the live-state summary for the current repo. Read-only;
+// does not transfer content. Useful for "how far ahead am I right now?"
+// checks before deciding to kai capture or review --live.
+func (c *Client) GetSyncLive(sinceSeq int64, includeFiles bool, limit int) (*SyncLiveSummary, error) {
+	filesParam := "true"
+	if !includeFiles {
+		filesParam = "false"
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	url := fmt.Sprintf("%s%s/v1/sync/live?since=%d&files=%s&limit=%d",
+		c.BaseURL, c.repoPath(), sinceSeq, filesParam, limit)
+	httpReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("sync live request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sync live failed: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out SyncLiveSummary
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("sync live decode: %w", err)
+	}
+	return &out, nil
 }
 
 // SyncReplayEvent is one durable sync event returned by the replay endpoint.

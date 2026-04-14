@@ -1644,6 +1644,75 @@ Examples:
 	RunE: runUsage,
 }
 
+var liveCmd = &cobra.Command{
+	Use:   "live",
+	Short: "Query the live sync state (agents pushing through sync_events)",
+	Long: `Live sync commands surface the append-only sync_events log that
+tracks every live-sync push from every agent. This is the state between
+the last 'kai capture' and what's actually on everyone's disk right now.
+
+Examples:
+  kai live status             # How far ahead of the last snapshot are we?
+  kai live status --since 42  # Only count events after seq 42`,
+}
+
+var liveStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show uncompacted sync state summary",
+	Long: `Print a rollup of the live sync state for the current repo:
+- tip_seq: latest sync_events sequence
+- event_count / file_count / agent_count since the given seq (default 0)
+- snap_latest: the current snap.latest ref target (what the last full
+  snapshot was pinned to)
+- files: the files touched in the uncompacted window
+
+Reads the remote sync_events log via GET /v1/sync/live. Does not
+transfer file content, only metadata — safe to run repeatedly.`,
+	RunE: runLiveStatus,
+}
+
+func runLiveStatus(cmd *cobra.Command, args []string) error {
+	sinceFlag, _ := cmd.Flags().GetInt64("since")
+	limitFlag, _ := cmd.Flags().GetInt("limit")
+	noFiles, _ := cmd.Flags().GetBool("no-files")
+
+	client, err := remote.NewClientForRemote("origin")
+	if err != nil {
+		return fmt.Errorf("loading remote: %w", err)
+	}
+
+	summary, err := client.GetSyncLive(sinceFlag, !noFiles, limitFlag)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Repo:          %s\n", client.RepoPath())
+	fmt.Printf("Remote:        %s\n", client.BaseURL)
+	fmt.Printf("Tip seq:       %d\n", summary.TipSeq)
+	fmt.Printf("Since seq:     %d\n", summary.SinceSeq)
+	if summary.SnapLatest != "" {
+		fmt.Printf("Last snapshot: %s\n", summary.SnapLatest)
+	} else {
+		fmt.Printf("Last snapshot: (none)\n")
+	}
+	fmt.Printf("Events:        %d\n", summary.EventCount)
+	fmt.Printf("Files:         %d\n", summary.FileCount)
+	fmt.Printf("Agents:        %d\n", summary.AgentCount)
+	if summary.EventCount > 0 {
+		firstTs := time.UnixMilli(summary.FirstEventTs).Format(time.RFC3339)
+		lastTs := time.UnixMilli(summary.LastEventTs).Format(time.RFC3339)
+		fmt.Printf("First event:   %s\n", firstTs)
+		fmt.Printf("Last event:    %s\n", lastTs)
+	}
+	if len(summary.Files) > 0 {
+		fmt.Printf("\nFiles touched (most-recently-pushed first):\n")
+		for _, f := range summary.Files {
+			fmt.Printf("  %s\n", f)
+		}
+	}
+	return nil
+}
+
 // Review commands
 var reviewCmd = &cobra.Command{
 	Use:   "review",
@@ -2910,6 +2979,13 @@ func init() {
 	rootCmd.AddCommand(cloneCmd)
 	rootCmd.AddCommand(updateCmd)
 	updateCmd.Flags().Bool("check", false, "Check for updates without installing")
+
+	liveCmd.GroupID = groupRemote
+	liveCmd.AddCommand(liveStatusCmd)
+	liveStatusCmd.Flags().Int64("since", 0, "Only count sync_events with seq greater than this")
+	liveStatusCmd.Flags().Int("limit", 100, "Max files listed")
+	liveStatusCmd.Flags().Bool("no-files", false, "Skip listing touched files (summary only)")
+	rootCmd.AddCommand(liveCmd)
 
 	// Advanced (low-level/plumbing commands)
 	snapshotCmd.GroupID = groupAdvanced
