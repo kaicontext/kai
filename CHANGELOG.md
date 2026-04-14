@@ -2,6 +2,17 @@
 
 All notable changes to Kai are documented here.
 
+## [0.10.2] — 2026-04-14
+
+### CLI — Git hooks can no longer block git
+- **Hooks are now best-effort and never block git.** The previous `pre-commit` / `pre-push` scripts ended with `kai capture` / `kai push` as the last command, so any failure (missing kai binary, deleted `.kai` directory, capture error) propagated as the hook's exit code and could block `git commit` / `git push`. The new `v2` hook scripts check for kai-on-PATH and `.kai/`, run capture/push silently, swallow any failure with `|| true`, and unconditionally `exit 0`. There is no execution path that returns nonzero.
+- **Self-heal on every kai invocation.** `PersistentPreRun` now calls `selfHealHooks()` which silently rewrites any kai-managed (`# kai-managed-hook`) hook that isn't at the current `v2` version. Users with the old dangerous hook get healed the moment they run any `kai` command — no manual upgrade step required.
+- **`kai hook install` always upgrades kai-managed hooks in place.** Previously bailed with "already installed". Foreign (non-kai) hooks are still left untouched, but with a warning instead of a hard error — init no longer aborts in repos with husky/lefthook setups.
+
+### CLI — New `kai doctor` command
+- **`kai doctor`** audits local Kai state: kai binary on PATH, `.kai/` present, git hooks (kai-managed vs foreign, current vs stale), kaicontext.com auth, configured remote.
+- **`kai doctor --fix`** applies automatic repairs — currently upgrades any stale kai-managed git hook to the current safe version.
+
 ## [0.10.1] — 2026-04-14
 
 ### CLI — `kai init` is now one-shot and low-friction

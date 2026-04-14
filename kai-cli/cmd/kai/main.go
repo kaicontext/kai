@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.10.1"
+var Version = "0.10.2"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2418,13 +2418,15 @@ var hookCmd = &cobra.Command{
 
 var hookInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install git pre-commit hook that runs kai capture",
-	Long: `Installs a git pre-commit hook that automatically updates the Kai
-semantic graph when you commit. This ensures committed code always has
-a matching graph state.
+	Short: "Install git hooks that update the Kai graph on commit and push",
+	Long: `Installs git pre-commit and pre-push hooks that update the Kai
+semantic graph automatically.
 
-The hook runs 'kai capture' before each commit. If capture fails,
-the commit is aborted.`,
+The hooks are best-effort: they will NEVER block git. If kai is missing,
+.kai is gone, or capture/push fails for any reason, the hook silently
+no-ops and git proceeds normally.
+
+Re-running this command upgrades existing kai-managed hooks in place.`,
 	RunE: runHookInstall,
 }
 
@@ -2434,7 +2436,179 @@ var hookUninstallCmd = &cobra.Command{
 	RunE:  runHookUninstall,
 }
 
+var doctorFix bool
+var doctorCmd = &cobra.Command{
+	Use:   "doctor",
+	Short: "Audit local Kai state and offer fixes",
+	Long: `Checks the health of your local Kai installation:
+
+  - kai binary is on PATH
+  - .kai directory exists in the current repo
+  - git hooks (if installed) are at the current safe version
+  - kaicontext.com auth is configured
+  - origin remote is configured
+
+Run 'kai doctor --fix' to apply automatic repairs (currently: upgrade
+out-of-date kai-managed git hooks).`,
+	RunE: runDoctor,
+}
+
 const kaiHookMarker = "# kai-managed-hook"
+const kaiHookVersion = "v2"
+
+// preCommitHookScript is a best-effort post-commit/pre-commit script.
+// CRITICAL: this script MUST NEVER block git. Every failure mode (missing kai
+// binary, missing .kai dir, failed capture) silently no-ops with exit 0.
+// Users who deleted .kai or uninstalled kai must still be able to commit.
+const preCommitHookScript = `#!/bin/sh
+` + kaiHookMarker + ` ` + kaiHookVersion + `
+# Auto-installed by 'kai init' / 'kai hook install'.
+# Best-effort: never blocks git. Remove with: kai hook uninstall
+
+if ! command -v kai >/dev/null 2>&1; then
+  exit 0
+fi
+if [ ! -d .kai ]; then
+  exit 0
+fi
+kai capture >/dev/null 2>&1 || true
+exit 0
+`
+
+// prePushHookScript is the same defensive shape as preCommitHookScript.
+const prePushHookScript = `#!/bin/sh
+` + kaiHookMarker + ` ` + kaiHookVersion + `
+# Auto-installed by 'kai init' / 'kai hook install'.
+# Best-effort: never blocks git push. Remove with: kai hook uninstall
+
+if ! command -v kai >/dev/null 2>&1; then
+  exit 0
+fi
+if [ ! -d .kai ]; then
+  exit 0
+fi
+kai push >/dev/null 2>&1 || true
+exit 0
+`
+
+// runDoctor audits local Kai state and reports findings. With --fix, it
+// applies automatic repairs (currently just hook upgrades). Doctor must
+// never error: every check is independent and logged inline.
+func runDoctor(cmd *cobra.Command, args []string) error {
+	ok := "  ✓"
+	warn := "  !"
+	bad := "  ✗"
+
+	fmt.Println()
+	fmt.Println("Kai doctor")
+	fmt.Println()
+
+	// kai binary
+	if path, err := exec.LookPath("kai"); err == nil {
+		fmt.Printf("%s kai binary: %s\n", ok, path)
+	} else {
+		fmt.Printf("%s kai binary not on PATH (you're running it somehow, but child processes may not find it)\n", warn)
+	}
+
+	// .kai directory
+	if _, err := os.Stat(".kai"); err == nil {
+		fmt.Printf("%s .kai directory present\n", ok)
+	} else {
+		fmt.Printf("%s .kai directory missing — run 'kai init'\n", bad)
+	}
+
+	// git repo + hooks
+	if _, err := os.Stat(".git"); err == nil {
+		fmt.Printf("%s git repository detected\n", ok)
+		checkHook("pre-commit", preCommitHookScript)
+		checkHook("pre-push", prePushHookScript)
+	} else {
+		fmt.Printf("%s not a git repository (hook checks skipped)\n", warn)
+	}
+
+	// auth
+	if token, err := remote.GetValidAccessToken(); err == nil && token != "" {
+		email, _, _ := remote.GetAuthStatus()
+		fmt.Printf("%s kaicontext.com auth: logged in as %s\n", ok, email)
+	} else {
+		fmt.Printf("%s kaicontext.com auth: not logged in (run 'kai auth login')\n", warn)
+	}
+
+	// remote
+	if entry, err := remote.GetRemote("origin"); err == nil && entry != nil {
+		fmt.Printf("%s remote 'origin': %s/%s\n", ok, entry.Tenant, entry.Repo)
+	} else {
+		fmt.Printf("%s remote 'origin' not configured\n", warn)
+	}
+
+	fmt.Println()
+	if doctorFix {
+		fmt.Println("Fixes applied (if any) above. Re-run 'kai doctor' to verify.")
+	} else {
+		fmt.Println("Run 'kai doctor --fix' to upgrade out-of-date kai-managed git hooks.")
+	}
+	return nil
+}
+
+// checkHook reports the status of one git hook and, if --fix is set and the
+// hook is a stale kai-managed script, upgrades it in place.
+func checkHook(hookName, currentScript string) {
+	path := filepath.Join(".git", "hooks", hookName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("  - %s hook: not installed\n", hookName)
+		return
+	}
+	s := string(data)
+	if !strings.Contains(s, kaiHookMarker) {
+		fmt.Printf("  - %s hook: present but not managed by Kai (left untouched)\n", hookName)
+		return
+	}
+	currentTag := kaiHookMarker + " " + kaiHookVersion
+	if strings.Contains(s, currentTag) {
+		fmt.Printf("  ✓ %s hook: kai-managed, %s (safe)\n", hookName, kaiHookVersion)
+		return
+	}
+	if doctorFix {
+		if err := os.WriteFile(path, []byte(currentScript), 0755); err != nil {
+			fmt.Printf("  ✗ %s hook: stale kai-managed hook, upgrade FAILED: %v\n", hookName, err)
+			return
+		}
+		fmt.Printf("  ✓ %s hook: upgraded to %s\n", hookName, kaiHookVersion)
+		return
+	}
+	fmt.Printf("  ! %s hook: STALE kai-managed hook (could block git on failure). Run 'kai doctor --fix'\n", hookName)
+}
+
+// selfHealHooks silently upgrades any old (v1) kai-managed git hook to the
+// current safe version. Called from PersistentPreRun on every kai invocation.
+// Must be cheap, must never panic, must never print anything.
+func selfHealHooks() {
+	defer func() { _ = recover() }()
+	if _, err := os.Stat(".git"); err != nil {
+		return
+	}
+	upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "pre-commit"), preCommitHookScript)
+	upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "pre-push"), prePushHookScript)
+}
+
+// upgradeIfOldKaiHook overwrites a kai-managed hook in place if it isn't at
+// the current version. Foreign hooks are left untouched.
+func upgradeIfOldKaiHook(path, newScript string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	s := string(data)
+	if !strings.Contains(s, kaiHookMarker) {
+		return // not ours
+	}
+	currentTag := kaiHookMarker + " " + kaiHookVersion
+	if strings.Contains(s, currentTag) {
+		return // already current
+	}
+	_ = os.WriteFile(path, []byte(newScript), 0755)
+}
 
 func runHookInstall(cmd *cobra.Command, args []string) error {
 	hookPath := filepath.Join(".git", "hooks", "pre-commit")
@@ -2450,57 +2624,47 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating hooks directory: %w", err)
 	}
 
-	// Check for existing hook
+	// pre-commit
 	if data, err := os.ReadFile(hookPath); err == nil {
-		content := string(data)
-		if strings.Contains(content, kaiHookMarker) {
-			fmt.Println("Kai pre-commit hook already installed.")
-			return nil
-		}
-		// There's an existing non-kai hook — don't overwrite
-		return fmt.Errorf("pre-commit hook already exists (not managed by Kai). Remove it first or add 'kai capture' manually")
-	}
-
-	hookContent := `#!/bin/sh
-` + kaiHookMarker + `
-# Automatically update Kai semantic graph before commit.
-# Installed by: kai hook install
-# Remove with:  kai hook uninstall
-
-kai capture
-`
-
-	if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
-		return fmt.Errorf("writing hook: %w", err)
-	}
-
-	fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
-
-	// Also install pre-push hook for kai push
-	pushHookPath := filepath.Join(".git", "hooks", "pre-push")
-	if data, err := os.ReadFile(pushHookPath); err == nil {
-		if strings.Contains(string(data), kaiHookMarker) {
-			fmt.Println("Kai pre-push hook already installed.")
+		if !strings.Contains(string(data), kaiHookMarker) {
+			// Foreign hook — don't touch it. User can compose manually.
+			fmt.Println("Note: pre-commit hook already exists (not managed by Kai). Skipping.")
 		} else {
-			fmt.Println("Note: pre-push hook already exists. Add 'kai push' manually if desired.")
+			// Always upgrade kai-managed hooks to the current safe version.
+			if err := os.WriteFile(hookPath, []byte(preCommitHookScript), 0755); err != nil {
+				fmt.Printf("Warning: could not upgrade pre-commit hook: %v\n", err)
+			} else {
+				fmt.Println("Upgraded pre-commit hook: .git/hooks/pre-commit")
+			}
 		}
 	} else {
-		pushHookContent := `#!/bin/sh
-` + kaiHookMarker + `
-# Automatically push Kai semantic graph when you git push.
-# Installed by: kai hook install
-# Remove with:  kai hook uninstall
+		if err := os.WriteFile(hookPath, []byte(preCommitHookScript), 0755); err != nil {
+			return fmt.Errorf("writing pre-commit hook: %w", err)
+		}
+		fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
+	}
 
-kai push
-`
-		if err := os.WriteFile(pushHookPath, []byte(pushHookContent), 0755); err != nil {
+	// pre-push
+	pushHookPath := filepath.Join(".git", "hooks", "pre-push")
+	if data, err := os.ReadFile(pushHookPath); err == nil {
+		if !strings.Contains(string(data), kaiHookMarker) {
+			fmt.Println("Note: pre-push hook already exists (not managed by Kai). Skipping.")
+		} else {
+			if err := os.WriteFile(pushHookPath, []byte(prePushHookScript), 0755); err != nil {
+				fmt.Printf("Warning: could not upgrade pre-push hook: %v\n", err)
+			} else {
+				fmt.Println("Upgraded pre-push hook: .git/hooks/pre-push")
+			}
+		}
+	} else {
+		if err := os.WriteFile(pushHookPath, []byte(prePushHookScript), 0755); err != nil {
 			fmt.Printf("Warning: could not install pre-push hook: %v\n", err)
 		} else {
 			fmt.Println("Installed pre-push hook: .git/hooks/pre-push")
 		}
 	}
 
-	fmt.Println("Kai will automatically capture on commit and push on git push.")
+	fmt.Println("Kai hooks are best-effort and will never block git.")
 	return nil
 }
 
@@ -2538,6 +2702,9 @@ func init() {
 		}
 		printUpdateNotice()
 		backgroundUpdateCheck()
+		// Silently upgrade old (dangerous v1) kai-managed git hooks if present.
+		// Heals users who installed hooks on an older release.
+		selfHealHooks()
 	}
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
 		_ = telemetry.FlushIfNeeded()
@@ -3054,6 +3221,9 @@ func init() {
 	hookCmd.AddCommand(hookInstallCmd)
 	hookCmd.AddCommand(hookUninstallCmd)
 	rootCmd.AddCommand(hookCmd)
+
+	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Apply automatic repairs (currently: upgrade stale kai-managed git hooks)")
+	rootCmd.AddCommand(doctorCmd)
 
 	// Add auth subcommands
 	authLoginCmd.Flags().StringVar(&authLoginToken, "token", "", "Access token for non-interactive login (CI)")
