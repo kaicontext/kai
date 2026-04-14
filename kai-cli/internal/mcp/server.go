@@ -308,7 +308,11 @@ func (s *Server) startWatcher(db *graph.DB) {
 				// Push file content if live sync is active
 				if s.syncChannelID != "" {
 					for _, path := range editedPaths {
-						// Skip files written by sync to avoid feedback loop
+						// Skip files written by sync to avoid feedback loop.
+						// isSyncWritten has a 60s TTL — the second guard below
+						// (syncBase equality) catches the longer-lived case
+						// where a file stayed in the watcher's activity log
+						// past the TTL but still has nothing new to push.
 						if s.isSyncWritten(path) {
 							s.syncLogWriter.Write(synclog.SyncLogEntry{
 								Event:     synclog.EventSkip,
@@ -323,6 +327,27 @@ func (s *Server) startWatcher(db *graph.DB) {
 						absPath := filepath.Join(s.workDir, path)
 						content, err := os.ReadFile(absPath)
 						if err != nil || len(content) > 512*1024 { // skip files > 512KB
+							continue
+						}
+						// Skip if current content matches last-known sync state.
+						// syncBase is updated by both push (after success) and
+						// receive (after applySyncContent). If it equals the
+						// current on-disk content, there is literally nothing
+						// new to tell the server — suppress the push. This is
+						// what breaks the watcher-activity-log / 60s-TTL race
+						// that caused perpetual resonance between peers.
+						s.syncBaseMu.RLock()
+						base := s.syncBase[path]
+						s.syncBaseMu.RUnlock()
+						if base != nil && bytes.Equal(base, content) {
+							s.syncLogWriter.Write(synclog.SyncLogEntry{
+								Event:     synclog.EventSkip,
+								File:      path,
+								Agent:     s.syncAgentName,
+								Channel:   s.syncChannelID,
+								Timestamp: time.Now().UnixMilli(),
+								Detail:    "no change since last sync",
+							})
 							continue
 						}
 						// Convert path to git-relative so all clones use the same paths
@@ -2839,11 +2864,19 @@ func (s *Server) pollSyncChanges(agentName string) {
 	}
 }
 
+// applySyncContent is the single path by which peer-originated file bytes
+// land on local disk. Called from:
+//   - the SSE real-time handler (handleSyncFileChange)
+//   - the /v1/sync/replay catch-up loop in doSubscribeSync
+//   - the legacy polling fallback (pollSyncChanges)
+//
+// All three must share this path so the guards (feedback-loop suppression,
+// peer-attribution checkpoints, synclog audit entries) can't diverge.
 func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agent string) {
 	local, localErr := os.ReadFile(absPath)
 
 	if localErr == nil && bytes.Equal(local, incoming) {
-		return // identical
+		return // identical — nothing to do and nothing to record
 	}
 
 	s.syncBaseMu.RLock()
@@ -2864,6 +2897,15 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 				if merged, ok := mergeResult.Files["file"]; ok {
 					toWrite = merged
 					fmt.Fprintf(os.Stderr, "[kai-sync] merged %s (auto-resolved)\n", relPath)
+					s.syncLogWriter.Write(synclog.SyncLogEntry{
+						Event:     synclog.EventMerge,
+						File:      relPath,
+						Agent:     s.syncAgentName,
+						PeerAgent: agent,
+						Channel:   s.syncChannelID,
+						Timestamp: time.Now().UnixMilli(),
+						Detail:    "3-way merge auto-resolved",
+					})
 				}
 			}
 		}
@@ -2881,6 +2923,15 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 				s.syncConflicts = s.syncConflicts[len(s.syncConflicts)-10:]
 			}
 			s.syncConflictsMu.Unlock()
+			s.syncLogWriter.Write(synclog.SyncLogEntry{
+				Event:     synclog.EventConflict,
+				File:      relPath,
+				Agent:     s.syncAgentName,
+				PeerAgent: agent,
+				Channel:   s.syncChannelID,
+				Timestamp: time.Now().UnixMilli(),
+				Detail:    "local edits preserved",
+			})
 			// Record a conflict-style peer checkpoint: the lines the peer
 			// would have changed from our local view. Surfaces in
 			// kai blame --conflicts without actually landing the peer's edit.
@@ -2900,7 +2951,9 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 		return
 	}
 
-	// Mark as sync-written so the watcher doesn't push it back
+	// Mark as sync-written so the watcher doesn't push it back (feedback
+	// loop prevention). Without this the watcher's next tick picks up the
+	// write and pushes it straight back to the server.
 	s.markSyncWritten(relPath)
 
 	// Emit peer-attribution checkpoints so kai blame reflects who actually
@@ -2915,6 +2968,14 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 		s.syncBase[relPath] = incoming
 	}
 	s.syncBaseMu.Unlock()
+	s.syncLogWriter.Write(synclog.SyncLogEntry{
+		Event:     synclog.EventReceive,
+		File:      relPath,
+		Agent:     s.syncAgentName,
+		PeerAgent: agent,
+		Channel:   s.syncChannelID,
+		Timestamp: time.Now().UnixMilli(),
+	})
 	fmt.Fprintf(os.Stderr, "[kai-sync] applied %s from %s\n", relPath, agent)
 }
 
@@ -3027,7 +3088,13 @@ func (s *Server) connectSSE(url, channelID string) {
 }
 
 // handleSyncFileChange applies a received file change to disk.
-// Uses 3-way merge when the local file has diverged from the base.
+// handleSyncFileChange is the SSE real-time receive handler. Decodes the
+// event payload and delegates to applySyncContent — the single receive
+// path shared with replay and polling. Historically this contained its
+// own duplicated 3-way-merge implementation which drifted out of sync
+// with applySyncContent and notably was missing markSyncWritten, causing
+// a feedback loop where the watcher would re-push every received file
+// on every 30s tick.
 func (s *Server) handleSyncFileChange(data string) {
 	var event struct {
 		Agent   string `json:"agent"`
@@ -3047,97 +3114,16 @@ func (s *Server) handleSyncFileChange(data string) {
 		return
 	}
 
-	absPath := filepath.Join(s.workDir, event.File)
+	// Convert git-relative path from the event to local workDir-relative.
+	localPath := fromGitRelativePath(s.workDir, event.File)
+	absPath := filepath.Join(s.workDir, localPath)
 
-	// Safety: don't write outside workDir
+	// Safety: don't write outside workDir.
 	if !strings.HasPrefix(absPath, s.workDir) {
 		return
 	}
 
-	// Read current local content
-	local, localErr := os.ReadFile(absPath)
-
-	// Skip if identical
-	if localErr == nil && bytes.Equal(local, incoming) {
-		return
-	}
-
-	// Get the base version (last synced content)
-	s.syncBaseMu.RLock()
-	base := s.syncBase[event.File]
-	s.syncBaseMu.RUnlock()
-
-	var toWrite []byte
-
-	if localErr != nil || base == nil {
-		// No local file or no base — just write incoming (new file or first sync)
-		toWrite = incoming
-	} else if bytes.Equal(local, base) {
-		// Local unchanged since last sync — safe to overwrite with incoming
-		toWrite = incoming
-	} else {
-		// Local diverged from base — attempt semantic 3-way merge
-		lang := detectSyncLang(event.File)
-		if lang != "" {
-			mergeResult, mergeErr := merge.Merge3Way(base, local, incoming, lang)
-			if mergeErr == nil && mergeResult.Success {
-				if merged, ok := mergeResult.Files["file"]; ok {
-					toWrite = merged
-					fmt.Fprintf(os.Stderr, "[kai-sync] merged %s (auto-resolved)\n", event.File)
-					s.syncLogWriter.Write(synclog.SyncLogEntry{
-						Event:     synclog.EventMerge,
-						File:      event.File,
-						Agent:     s.syncAgentName,
-						PeerAgent: event.Agent,
-						Channel:   s.syncChannelID,
-						Timestamp: time.Now().UnixMilli(),
-						Detail:    "3-way merge auto-resolved",
-					})
-				}
-			}
-		}
-
-		if toWrite == nil {
-			// Merge failed or unsupported language — skip write, don't clobber
-			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n",
-				event.File, event.Agent)
-			s.syncLogWriter.Write(synclog.SyncLogEntry{
-				Event:     synclog.EventConflict,
-				File:      event.File,
-				Agent:     s.syncAgentName,
-				PeerAgent: event.Agent,
-				Channel:   s.syncChannelID,
-				Timestamp: time.Now().UnixMilli(),
-				Detail:    "local edits preserved",
-			})
-			// Still update base so next incoming change can merge against the latest remote
-			s.syncBaseMu.Lock()
-			s.syncBase[event.File] = incoming
-			s.syncBaseMu.Unlock()
-			return
-		}
-	}
-
-	// Ensure parent directory exists
-	os.MkdirAll(filepath.Dir(absPath), 0755)
-
-	if err := os.WriteFile(absPath, toWrite, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "[kai-sync] failed to write %s: %v\n", event.File, err)
-		return
-	}
-
-	// Update base to the incoming content (the shared state)
-	s.syncBaseMu.Lock()
-	s.syncBase[event.File] = incoming
-	s.syncBaseMu.Unlock()
-	s.syncLogWriter.Write(synclog.SyncLogEntry{
-		Event:     synclog.EventReceive,
-		File:      event.File,
-		Agent:     s.syncAgentName,
-		PeerAgent: event.Agent,
-		Channel:   s.syncChannelID,
-		Timestamp: time.Now().UnixMilli(),
-	})
+	s.applySyncContent(localPath, absPath, incoming, event.Agent)
 }
 
 // syncInitialPull compares the remote snapshot against local files
