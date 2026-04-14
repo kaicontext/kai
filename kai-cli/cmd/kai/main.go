@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.10.0"
+var Version = "0.10.1"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3618,30 +3618,20 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		fmt.Println("  Git repository detected.")
 		fmt.Println()
 
-		// Offer to import git history (only for small repos — large repos are too slow)
+		// Auto-import git history. runGitImport caps at importMaxCommits (default 50)
+		// so large repos only import the most recent slice.
 		if countOut, err := exec.Command("git", "rev-list", "--count", "HEAD").Output(); err == nil {
-			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 && count <= 1000 {
-				fmt.Print("  Import git history as semantic snapshots? [y/N]: ")
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(strings.ToLower(input))
-				if input == "y" || input == "yes" {
-					fmt.Println()
-					if err := runGitImport(db); err != nil {
-						fmt.Printf("  Warning: import failed: %v\n", err)
-					}
+			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 {
+				fmt.Println("  Importing git history as semantic snapshots...")
+				if err := runGitImport(db); err != nil {
+					fmt.Printf("  Warning: import failed: %v\n", err)
 				}
 			}
 		}
 
 		// ── Step 3: Install hooks (auto-capture on commit, auto-push on git push) ──
-		fmt.Println()
-		fmt.Print("  Install git hooks? (auto-capture on commit, auto-push on git push) [Y/n]: ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "" || input == "y" || input == "yes" {
-			if err := runHookInstall(cmd, nil); err != nil {
-				debugf("hook install: %v", err)
-			}
+		if err := runHookInstall(cmd, nil); err != nil {
+			debugf("hook install: %v", err)
 		}
 	}
 
@@ -3652,86 +3642,46 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		fmt.Printf("  Warning: capture failed: %v\n", captureErr)
 	}
 
-	// ── Step 5: Detect AI tools, install MCP, offer bench ──
+	// ── Step 5: Detect AI tools, auto-install MCP if missing ──
 	hasClaude := detectClaudeCode()
 	hasCodex := func() bool { _, err := exec.LookPath("codex"); return err == nil }()
 
-	if hasClaude || hasCodex {
+	if hasClaude {
 		fmt.Println()
-		if hasClaude {
-			fmt.Println("  Claude Code detected.")
-			fmt.Print("  Install Kai MCP server for Claude Code? [Y/n]: ")
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input == "" || input == "y" || input == "yes" {
-				mcpCmd := exec.Command("claude", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
-				mcpCmd.Stdout = os.Stdout
-				mcpCmd.Stderr = os.Stderr
-				if err := mcpCmd.Run(); err != nil {
-					fmt.Printf("  Warning: MCP install failed: %v\n", err)
-					fmt.Println("  You can install manually: claude mcp add kai -- kai mcp serve")
-				} else {
-					fmt.Println("  ✓ Kai MCP server installed for Claude Code")
-				}
+		if mcpAlreadyInstalled("claude") {
+			fmt.Println("  ✓ Kai MCP server already configured for Claude Code")
+		} else {
+			fmt.Println("  Installing Kai MCP server for Claude Code...")
+			mcpCmd := exec.Command("claude", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
+			mcpCmd.Stdout = os.Stdout
+			mcpCmd.Stderr = os.Stderr
+			if err := mcpCmd.Run(); err != nil {
+				fmt.Printf("  Warning: MCP install failed: %v\n", err)
+				fmt.Println("  You can install manually: claude mcp add kai -- kai mcp serve")
+			} else {
+				fmt.Println("  ✓ Kai MCP server installed for Claude Code")
 			}
 		}
-		if hasCodex {
-			fmt.Println()
-			fmt.Println("  Codex detected.")
-			fmt.Print("  Install Kai MCP server for Codex? [Y/n]: ")
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input == "" || input == "y" || input == "yes" {
-				mcpCmd := exec.Command("codex", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
-				mcpCmd.Stdout = os.Stdout
-				mcpCmd.Stderr = os.Stderr
-				if err := mcpCmd.Run(); err != nil {
-					fmt.Printf("  Warning: MCP install failed: %v\n", err)
-					fmt.Println("  You can install manually: codex mcp add kai -- kai mcp serve")
-				} else {
-					fmt.Println("  ✓ Kai MCP server installed for Codex")
-				}
+	}
+	if hasCodex {
+		fmt.Println()
+		if mcpAlreadyInstalled("codex") {
+			fmt.Println("  ✓ Kai MCP server already configured for Codex")
+		} else {
+			fmt.Println("  Installing Kai MCP server for Codex...")
+			mcpCmd := exec.Command("codex", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
+			mcpCmd.Stdout = os.Stdout
+			mcpCmd.Stderr = os.Stderr
+			if err := mcpCmd.Run(); err != nil {
+				fmt.Printf("  Warning: MCP install failed: %v\n", err)
+				fmt.Println("  You can install manually: codex mcp add kai -- kai mcp serve")
+			} else {
+				fmt.Println("  ✓ Kai MCP server installed for Codex")
 			}
-		}
-
-		// Offer bench if Claude is available
-		if hasClaude {
-			fmt.Println()
-			fmt.Println("  Kai can benchmark how much it saves on tokens and cost")
-			fmt.Println("  when AI explores your codebase.")
-			fmt.Println()
-			fmt.Print("  Run kai bench now? [Y/n]: ")
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input == "" || input == "y" || input == "yes" {
-				fmt.Println()
-				benchTask = "find the main entry point and explain the architecture"
-				if benchErr := runBench(cmd, nil); benchErr != nil {
-					fmt.Printf("  Bench failed: %v\n", benchErr)
-				}
-				benchTask = "" // reset
-			}
-			fmt.Println()
-			fmt.Println("  You can run benchmarks anytime with: kai bench")
 		}
 	}
 
-	// ── Step 3: Offer to set up kaicontext.com ──
-	fmt.Println()
-	fmt.Println("  Sync your semantic graph to kaicontext.com (free) for shared")
-	fmt.Println("  reviews, team code intelligence, and history across machines.")
-	fmt.Println()
-	fmt.Print("  Would you like to set that up? [y/N]: ")
-	{
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("  No problem! You can set up later with: kai auth login")
-			printInitFinish(isGitRepo, hasClaude)
-			return nil
-		}
-	}
-
+	// ── Step 6: Sign up / log in to kaicontext.com ──
 	serverURL := os.Getenv("KAI_SERVER")
 	if serverURL == "" {
 		serverURL = remote.DefaultServer
@@ -3739,6 +3689,9 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 
 	token, authErr := remote.GetValidAccessToken()
 	if authErr != nil || token == "" {
+		fmt.Println()
+		fmt.Println("  Let's connect this repo to kaicontext.com (free) for shared")
+		fmt.Println("  reviews, team code intelligence, and history across machines.")
 		fmt.Println()
 		fmt.Print("  Enter your email: ")
 		email, _ := reader.ReadString('\n')
@@ -3818,22 +3771,16 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 
 		if err == nil {
 			if len(orgs) == 0 {
-				// This shouldn't happen (server auto-creates personal org)
-				// but handle it just in case
+				// Safety net — server normally auto-creates a personal org.
+				// Derive the slug from the email local-part silently.
 				creds, _ := remote.LoadCredentials()
-				defaultSlug := "my-org"
+				slug := "my-org"
 				if creds != nil && creds.Email != "" {
 					if idx := strings.Index(creds.Email, "@"); idx > 0 {
-						defaultSlug = strings.ToLower(strings.ReplaceAll(creds.Email[:idx], ".", "-"))
+						slug = strings.ToLower(strings.ReplaceAll(creds.Email[:idx], ".", "-"))
 					}
 				}
-				fmt.Printf("  Choose a username [%s]: ", defaultSlug)
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(input)
-				if input == "" {
-					input = defaultSlug
-				}
-				newOrg, err := ctrl.CreateOrg(input, input)
+				newOrg, err := ctrl.CreateOrg(slug, slug)
 				if err != nil {
 					fmt.Printf("  Warning: could not create org: %v\n", err)
 				} else {
@@ -3865,12 +3812,6 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		if selectedOrg != nil {
 			projectName := remote.DetectProjectName()
 			fmt.Println()
-			fmt.Printf("  Repository name [%s]: ", projectName)
-			repoInput, _ := reader.ReadString('\n')
-			repoInput = strings.TrimSpace(repoInput)
-			if repoInput != "" {
-				projectName = repoInput
-			}
 			fmt.Printf("  Creating repo '%s/%s' on kaicontext.com...\n", selectedOrg.Slug, projectName)
 			_, err := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
 			if err != nil {
@@ -3893,19 +3834,14 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				debugf("setting remote: %v", err)
 			}
 
-			// Offer to push
+			// Push the semantic graph automatically
 			fmt.Println()
-			fmt.Print("  Push your semantic graph now? [Y/n]: ")
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-			if input == "" || input == "y" || input == "yes" {
-				fmt.Println("  Pushing...")
-				if pushErr := runPush(cmd, []string{"origin"}); pushErr != nil {
-					fmt.Printf("  Push failed: %v\n", pushErr)
-					fmt.Println("  You can push later with: kai push")
-				} else {
-					fmt.Println("  ✓ Pushed to kaicontext.com")
-				}
+			fmt.Println("  Pushing semantic graph to kaicontext.com...")
+			if pushErr := runPush(cmd, []string{"origin"}); pushErr != nil {
+				fmt.Printf("  Push failed: %v\n", pushErr)
+				fmt.Println("  You can push later with: kai push")
+			} else {
+				fmt.Println("  ✓ Pushed to kaicontext.com")
 			}
 		}
 	}
@@ -4078,6 +4014,16 @@ func printInitFinish(isGitRepo, hasClaude bool) {
 func detectClaudeCode() bool {
 	_, err := exec.LookPath("claude")
 	return err == nil
+}
+
+// mcpAlreadyInstalled checks if `kai` is already registered as an MCP server
+// for the given tool CLI (e.g. "claude" or "codex") via its `mcp list` output.
+func mcpAlreadyInstalled(toolCmd string) bool {
+	out, err := exec.Command(toolCmd, "mcp", "list").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "kai")
 }
 
 // detectAndOfferMCP detects AI coding tools and offers to install the Kai MCP server.

@@ -2,6 +2,20 @@
 
 All notable changes to Kai are documented here.
 
+## [0.10.1] — 2026-04-14
+
+### CLI — `kai init` is now one-shot and low-friction
+- **Git history import is automatic** — previously gated behind a `[y/N]` prompt and a `≤1000` commit limit. Now runs unconditionally; `runGitImport` already caps at `importMaxCommits` (default 50), so large repos get their most recent 50 commits silently.
+- **Git hooks install without prompting** — post-commit + pre-push hooks are set up automatically in any git repo.
+- **MCP server install is auto-detected** — if Claude Code or Codex is on `PATH`, init runs `<tool> mcp list`; if `kai` isn't already registered, it's installed automatically. If it is, init says so and moves on. No prompt either way.
+- **kaicontext.com signup is the default path** — the "Would you like to set that up?" gate is gone. Init proceeds straight to asking for an email, sends the magic link, exchanges the token, and signs you in.
+- **Already-logged-in users skip signup entirely** — `GetValidAccessToken` is checked first; if valid, the signup copy and email prompt are suppressed.
+- **Personal org + repo + first push are fully automatic** — after login, init uses the server-auto-created personal org (or derives a slug from the email local-part as a safety net), calls `DetectProjectName()` for the repo name, creates the repo, wires up `origin`, and pushes. The previous `Repository name [...]:` and `Push your semantic graph now? [Y/n]:` prompts are removed.
+- **`kai bench` offer removed from init** — run `kai bench` manually anytime.
+
+### Docs
+- **README** — `Quick Start` section rewritten to describe the new one-shot init flow (graph → history → hooks → MCP → account + org + repo + push).
+
 ## [0.9.11] — 2026-03-18
 
 ### CLI

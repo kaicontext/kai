@@ -27,16 +27,27 @@ brew install kaicontext/kai/kai
 ## Quick Start
 
 ```bash
-kai init                      # Detects git, offers history import + auto-sync
+kai init                      # One-shot setup: graph, MCP, account, remote
 kai capture -m "Initial"      # Snapshot your code with a message
 kai push                      # Push to kaicontext.com
 kai diff                      # Semantic change impact
 ```
 
-In a git repo, `kai init` will:
-1. Offer to **import git history** as semantic snapshots
-2. Install a **post-commit hook** for automatic capture on each commit
-3. Generate a **GitHub Actions / GitLab CI** workflow to keep Kai in sync
+`kai init` runs a single, low-friction setup flow:
+
+1. **Creates the semantic graph** in `.kai/` and builds the first capture.
+2. **Imports git history** automatically (for repos with ≤1000 commits) — no prompt.
+3. **Installs git hooks** for auto-capture on commit and auto-push on `git push`.
+4. **Installs the Kai MCP server** for any detected AI coding tool (Claude Code,
+   Codex). If the `kai` MCP is already registered, it's left alone; otherwise it's
+   added automatically — no prompt.
+5. **Signs you up for kaicontext.com** in-place: asks for your email, emails you
+   a login link, you paste the token back, and Kai creates a personal org named
+   after you plus a repo for the current directory. Your first push goes out at
+   the end of init.
+
+Every step runs by default. Press `Ctrl+C` to skip the account step if you'd
+rather stay local; everything else is automatic.
 
 For full command reference, see [docs/cli-reference.md](docs/cli-reference.md).
 
