@@ -1960,7 +1960,7 @@ func (c *Client) SyncReplaySince(sinceSeq int64, excludeAgent string, limit int)
 	if limit <= 0 {
 		limit = 500
 	}
-	url := fmt.Sprintf("%s%s/v1/sync/events/replay?since=%d&agent=%s&limit=%d",
+	url := fmt.Sprintf("%s%s/v1/sync/replay?since=%d&agent=%s&limit=%d",
 		c.BaseURL, c.repoPath(), sinceSeq, excludeAgent, limit)
 	httpReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
