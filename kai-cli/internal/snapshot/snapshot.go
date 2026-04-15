@@ -91,18 +91,17 @@ func (c *Creator) CreateSnapshot(source filesource.FileSource) ([]byte, error) {
 				fileID, string(graph.KindFile), string(payloadJSON), cas.NowMs())
 		} else {
 			// File changed or new.
-			// Only write the blob to object store if the file is parseable
-			// (will be read back during Analyze). Non-parseable files (json,
-			// yaml, md, html, css, etc.) only need the digest for the node ID.
-			// Content is available from disk via git for kai clone/pull.
-			if isParseableLang(file.Lang) {
-				var err error
-				digest, err = c.db.WriteObject(file.Content)
-				if err != nil {
-					return nil, fmt.Errorf("writing object: %w", err)
-				}
-			} else {
-				digest = cas.Blake3HashHex(file.Content)
+			// Always persist the blob in the local object store. Parseable
+			// files need it for Analyze; non-parseable files (md/json/yaml/
+			// html/css/...) need it for kai resolve, kai diff -p, and any
+			// other operation that reconstructs content without falling
+			// back to git. The object store is content-addressed via blake3
+			// so storing twice does not double space; cost is bounded by
+			// total unique file content.
+			var werr error
+			digest, werr = c.db.WriteObject(file.Content)
+			if werr != nil {
+				return nil, fmt.Errorf("writing object: %w", werr)
 			}
 
 			filePayload := map[string]interface{}{
@@ -1717,20 +1716,6 @@ func normalizeLang(v interface{}) string {
 		return "ts"
 	}
 	return lang
-}
-
-// isParseableLang returns true for languages that tree-sitter can parse
-// and that produce symbols/calls during Analyze. Files in other languages
-// still get tracked in snapshots but don't need their content stored in
-// the object store.
-func isParseableLang(lang string) bool {
-	switch lang {
-	case "go", "golang", "py", "python", "rb", "ruby", "rs", "rust",
-		"js", "ts", "jsx", "tsx", "javascript", "typescript",
-		"sql", "php", "csharp", "cs":
-		return true
-	}
-	return false
 }
 
 func isBinaryOrImageFile(filename string) bool {
