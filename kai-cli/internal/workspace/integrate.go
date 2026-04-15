@@ -20,6 +20,19 @@ type IntegrateResult struct {
 
 // Integrate merges a workspace's changes into a target snapshot.
 func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*IntegrateResult, error) {
+	return m.integrateInternal(nameOrID, targetSnapshotID, nil)
+}
+
+// IntegrateWithResolutions merges a workspace's changes into a target snapshot,
+// using the provided resolutions for conflicting paths. Paths in the resolutions
+// map contain the resolved file content and will be used instead of reporting a conflict.
+func (m *Manager) IntegrateWithResolutions(nameOrID string, targetSnapshotID []byte, resolutions map[string][]byte) (*IntegrateResult, error) {
+	return m.integrateInternal(nameOrID, targetSnapshotID, resolutions)
+}
+
+// integrateInternal is the shared implementation for Integrate and IntegrateWithResolutions.
+// If resolutions is non-nil, conflicting paths with matching entries use the provided content.
+func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, resolutions map[string][]byte) (*IntegrateResult, error) {
 	ws, err := m.Get(nameOrID)
 	if err != nil {
 		return nil, err
@@ -53,7 +66,7 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 	baseHex := util.BytesToHex(ws.BaseSnapshot)
 	targetHex := util.BytesToHex(targetSnapshotID)
 
-	if baseHex == targetHex {
+	if baseHex == targetHex && resolutions == nil {
 		// Fast-forward: target hasn't changed since we branched
 		// The workspace head becomes the new target
 		return &IntegrateResult{
@@ -120,6 +133,14 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 	for path := range wsModified {
 		if !targetModified[path] {
 			continue
+		}
+
+		// Check if the user provided a resolution for this path
+		if resolutions != nil {
+			if content, ok := resolutions[path]; ok {
+				semanticMerged[path] = content
+				continue
+			}
 		}
 
 		baseDigest := baseFiles[path]
@@ -199,6 +220,9 @@ func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*Integrat
 	}
 
 	if len(conflicts) > 0 {
+		// Save conflict state so `kai resolve` can pick it up
+		m.SaveConflictState(ws.ID, targetSnapshotID, conflicts)
+
 		return &IntegrateResult{
 			Conflicts: conflicts,
 		}, nil

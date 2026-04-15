@@ -468,7 +468,7 @@ func TestCommandHelp(t *testing.T) {
 	commands := []*cobra.Command{
 		rootCmd, initCmd, snapshotCmd, analyzeCmd, changesetCmd,
 		intentCmd, dumpCmd, listCmd, logCmd, statusCmd, diffCmd,
-		wsCmd, integrateCmd, checkoutCmd, refCmd, pickCmd,
+		wsCmd, integrateCmd, resolveCmd, checkoutCmd, refCmd, pickCmd,
 		completionCmd, remoteCmd, pushCmd, fetchCmd, cloneCmd,
 		remoteLogCmd, authCmd,
 	}

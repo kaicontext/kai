@@ -3104,6 +3104,10 @@ func init() {
 	checkoutCmd.GroupID = groupAdvanced
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
+
+	resolveCmd.Flags().BoolVar(&resolveContinue, "continue", false, "Apply user-edited resolutions from .kai/conflicts/<workspace>/")
+	resolveCmd.Flags().BoolVar(&resolveAbort, "abort", false, "Discard pending conflict state for the workspace")
+	rootCmd.AddCommand(resolveCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
 
@@ -11884,6 +11888,8 @@ func runIntegrate(cmd *cobra.Command, args []string) error {
 		for _, c := range result.Conflicts {
 			fmt.Printf("  %s: %s\n", c.Path, c.Description)
 		}
+		fmt.Println()
+		fmt.Printf("Run 'kai resolve %s' to address them.\n", wsName)
 		return fmt.Errorf("resolve conflicts before integration")
 	}
 
