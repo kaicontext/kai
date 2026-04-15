@@ -90,8 +90,10 @@ OLDHOOK
 chmod +x .git/hooks/pre-commit
 grep -q "kai-managed-hook v2" .git/hooks/pre-commit && fail "test setup wrong: hook is still v2"
 
-# Any kai invocation should trigger selfHealHooks in PersistentPreRun
-kai --version >/dev/null 2>&1
+# Invoke a real subcommand so cobra runs PersistentPreRun (and thus
+# selfHealHooks). `kai --version` and `kai --help` short-circuit in
+# cobra and do NOT run PreRun hooks — don't use them for this test.
+kai doctor >/dev/null 2>&1 || true
 
 grep -q "kai-managed-hook v2" .git/hooks/pre-commit || fail "selfHealHooks did not upgrade v1 -> v2"
 echo "  hook upgraded to v2 after kai invocation"
