@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.10.2"
+var Version = "0.10.3"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -4653,8 +4653,17 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	// Check if snapshot is identical to previous — skip analysis if nothing changed.
 	// Snapshot IDs are content-addressed, so same ID = same files = same symbols/graph.
+	// BUT: only skip if analysis actually ran on the previous snapshot. kai init's
+	// git-history import creates snapshots without analysis, so the first real
+	// capture must still analyze even though the IDs match.
 	existingLatestRef, _ := ref.NewRefManager(db).Get("snap.latest")
 	skipAnalysis := existingLatestRef != nil && bytes.Equal(snapshotID, existingLatestRef.TargetID)
+	if skipAnalysis {
+		definesEdges, _ := db.GetEdgesByContext(snapshotID, graph.EdgeDefinesIn)
+		if len(definesEdges) == 0 {
+			skipAnalysis = false
+		}
+	}
 
 	// Also skip analysis if the MCP file watcher is active — it already
 	// updated symbols and edges incrementally. This makes kai capture a
