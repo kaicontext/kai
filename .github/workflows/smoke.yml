@@ -1,0 +1,34 @@
+name: Smoke
+
+# Runs the kai init smoke test against the staging kai-server.
+# Starts ungated (workflow_dispatch only) so we can iterate without blocking
+# releases. Once green 3 runs in a row, add `needs: [smoke]` to release-kai-cli
+# in ci.yml to gate the GitHub Release artifact publishing.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      KAI_SERVER: https://staging.kaicontext.com
+      KAI_STAGING_RESET_TOKEN: ${{ secrets.KAI_STAGING_RESET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build kai CLI from source
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go build -o /usr/local/bin/kai ./cmd/kai
+          kai --version
+
+      - name: Run smoke test
+        run: scripts/smoke-init.sh
