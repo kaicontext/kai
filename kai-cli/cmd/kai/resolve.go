@@ -106,13 +106,18 @@ func resolveMaterializeFlow(db dbHandle, wsArg string, state *workspace.Conflict
 	for _, c := range state.Conflicts {
 		safeName := pathToFilename(c.Path)
 
-		if err := writeDigestFile(db, conflictDir, safeName+".HEAD", c.HeadDigest); err != nil {
+		// HEAD: prefer the working-tree copy (kai's working tree IS the
+		// workspace head's state). Fall back to ReadObject, then marker.
+		if err := writeHeadFile(db, conflictDir, safeName+".HEAD", c.Path, c.HeadDigest); err != nil {
 			return err
 		}
-		if err := writeDigestFile(db, conflictDir, safeName+".TARGET", c.NewDigest); err != nil {
+		// TARGET and BASE are references the user only reads, so a missing-
+		// content marker is fine (kai doesn't store blob content for non-
+		// parseable file types like .md/.json/.yaml).
+		if err := writeRefFile(db, conflictDir, safeName+".TARGET", "target", c.NewDigest); err != nil {
 			return err
 		}
-		if err := writeDigestFile(db, conflictDir, safeName+".BASE", c.BaseDigest); err != nil {
+		if err := writeRefFile(db, conflictDir, safeName+".BASE", "common ancestor", c.BaseDigest); err != nil {
 			return err
 		}
 
@@ -203,18 +208,53 @@ type dbHandle interface {
 	ReadObject(digest string) ([]byte, error)
 }
 
-// writeDigestFile reads an object by digest and writes it to <dir>/<name>.
-// If digest is empty (file added/deleted), writes an empty file.
-func writeDigestFile(db dbHandle, dir, name, digest string) error {
+// writeHeadFile materializes the workspace HEAD version of a conflict file.
+// Strategy: working-tree copy (most accurate, always populated for tracked
+// files) → ReadObject(digest) (works for parseable file types kai stores
+// blobs for) → empty file. Never fatal — the user always gets something
+// editable.
+func writeHeadFile(db dbHandle, dir, name, repoPath, digest string) error {
+	dst := filepath.Join(dir, name)
+	// 1. Working tree copy (kai's working tree == workspace head for tracked files).
+	if content, err := os.ReadFile(repoPath); err == nil {
+		return os.WriteFile(dst, content, 0644)
+	}
+	// 2. Object store fallback.
+	if digest != "" {
+		if content, err := db.ReadObject(digest); err == nil {
+			return os.WriteFile(dst, content, 0644)
+		}
+	}
+	// 3. Empty file with a marker comment so the user knows to fill it in.
+	marker := fmt.Sprintf(
+		"# Workspace HEAD content for %s was not in the working tree or kai object store.\n"+
+			"# Digest: %s\n"+
+			"# Replace this entire file with the resolved content, then run --continue.\n",
+		repoPath, digest,
+	)
+	return os.WriteFile(dst, []byte(marker), 0644)
+}
+
+// writeRefFile materializes a TARGET or BASE reference file. These are
+// read-only references for the user to consult; a missing-content marker
+// is fine because kai does not persist blob content for non-parseable
+// file types (.md/.json/.yaml/.html/.css/...).
+func writeRefFile(db dbHandle, dir, name, label, digest string) error {
 	dst := filepath.Join(dir, name)
 	if digest == "" {
-		return os.WriteFile(dst, nil, 0644)
+		return os.WriteFile(dst, []byte(fmt.Sprintf("# %s: file did not exist at this snapshot\n", label)), 0644)
 	}
-	content, err := db.ReadObject(digest)
-	if err != nil {
-		return fmt.Errorf("reading %s (digest %s): %w", name, digest, err)
+	if content, err := db.ReadObject(digest); err == nil {
+		return os.WriteFile(dst, content, 0644)
 	}
-	return os.WriteFile(dst, content, 0644)
+	marker := fmt.Sprintf(
+		"# %s content not available — kai does not store blob content for this\n"+
+			"# file type. Digest: %s\n"+
+			"# (parseable file types like .go/.js/.ts/.py have blob storage; markup\n"+
+			"# and config files only have hashes.)\n",
+		label, digest,
+	)
+	return os.WriteFile(dst, []byte(marker), 0644)
 }
 
 // pathToFilename converts a repo path to a flat filename safe for placement
