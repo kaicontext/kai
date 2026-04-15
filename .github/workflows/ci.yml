@@ -126,10 +126,37 @@ jobs:
           name: kai-darwin-amd64
           path: kai-cli/kai-darwin-amd64.gz
 
+  # Smoke test: end-to-end kai init against staging kai-server.
+  # Gates release-kai-cli on tags so broken binaries never reach a GitHub Release.
+  # Also runs on main pushes so we catch regressions on the rolling "latest"
+  # build, but only release-kai-cli's tag-path actually depends on it.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    env:
+      KAI_SERVER: https://staging.kaicontext.com
+      KAI_STAGING_RESET_TOKEN: ${{ secrets.KAI_STAGING_RESET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build kai CLI from source
+        run: |
+          cd kai-cli
+          CGO_ENABLED=1 go build -o /usr/local/bin/kai ./cmd/kai
+          kai --version
+
+      - name: Run smoke test
+        run: scripts/smoke-init.sh
+
   # Create release with all binaries
   release-kai-cli:
     runs-on: ubuntu-latest
-    needs: [build-kai-cli-linux, build-kai-cli-darwin]
+    needs: [build-kai-cli-linux, build-kai-cli-darwin, smoke]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
