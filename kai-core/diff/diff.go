@@ -147,6 +147,19 @@ func (d *Differ) diffCode(path string, before, after []byte, lang string) ([]Uni
 				Range:      parseRangeToRange(afterSym.Range),
 				ChangeType: "API_SURFACE_CHANGED",
 			})
+		} else if (afterSym.Kind == "variable" || afterSym.Kind == "const") && afterSym.Value != beforeSym.Value {
+			// Constant/variable initializer value changed — semantically
+			// meaningful (TTLs, limits, URLs, feature flags) even though
+			// the signature is identical.
+			units = append(units, UnitDiff{
+				Kind:       symbolKindToUnitKind(afterSym.Kind),
+				Name:       name,
+				Action:     ActionModified,
+				Before:     beforeSym.Value,
+				After:      afterSym.Value,
+				Range:      parseRangeToRange(afterSym.Range),
+				ChangeType: "CONSTANT_UPDATED",
+			})
 		}
 		// Note: We could also compare function bodies if we extracted content
 	}

@@ -95,6 +95,48 @@ func TestDiffFile_CodeModifiedFunction(t *testing.T) {
 	}
 }
 
+func TestDiffFile_CodeConstantUpdated(t *testing.T) {
+	before := []byte(`const TOKEN_TTL_SECONDS = 3600;
+const MAX_RETRIES = 5;
+export function tokenTTL() { return TOKEN_TTL_SECONDS; }`)
+	after := []byte(`const TOKEN_TTL_SECONDS = 1800;
+const MAX_RETRIES = 5;
+export function tokenTTL() { return TOKEN_TTL_SECONDS; }`)
+
+	d := NewDiffer()
+	fd, err := d.DiffFile("validate.ts", before, after)
+	if err != nil {
+		t.Fatalf("DiffFile failed: %v", err)
+	}
+
+	var found *UnitDiff
+	for i, u := range fd.Units {
+		if u.Name == "TOKEN_TTL_SECONDS" {
+			found = &fd.Units[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected TOKEN_TTL_SECONDS in units, got %+v", fd.Units)
+	}
+	if found.Action != ActionModified {
+		t.Errorf("expected ActionModified, got %v", found.Action)
+	}
+	if found.ChangeType != "CONSTANT_UPDATED" {
+		t.Errorf("expected CONSTANT_UPDATED, got %q", found.ChangeType)
+	}
+	if found.Before != "3600" || found.After != "1800" {
+		t.Errorf("expected Before=3600 After=1800, got Before=%q After=%q", found.Before, found.After)
+	}
+
+	// MAX_RETRIES unchanged — must not produce a unit.
+	for _, u := range fd.Units {
+		if u.Name == "MAX_RETRIES" {
+			t.Errorf("unchanged MAX_RETRIES should not produce a unit diff, got %+v", u)
+		}
+	}
+}
+
 func TestDiffFile_JSON(t *testing.T) {
 	before := []byte(`{"timeout": 3600, "debug": false}`)
 	after := []byte(`{"timeout": 1800, "debug": false, "retries": 3}`)

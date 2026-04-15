@@ -236,12 +236,12 @@ kai status
 kai diff
 ```
 
-Expected: kai reports `CONSTANT_UPDATED` on `TOKEN_TTL_SECONDS` and
-`FUNCTION_ADDED` for `isExpired`.
+Expected: `~ TOKEN_TTL_SECONDS: 3600 -> 1800` and
+`+ function isExpired(expiry: number)` on `src/auth/validate.ts`.
 
-> **Narration**: "Git diff would tell me 7 lines changed. Kai tells me a
-> constant went from 3600 to 1800, and a new function called `isExpired` was
-> added. That's the difference between text and meaning."
+> **Narration**: "Git diff would tell me seven lines changed. Kai tells me
+> a constant went from 3600 to 1800 and a new function called `isExpired`
+> was added. That's the difference between text and meaning."
 
 ```bash
 kai diff -p | head -20

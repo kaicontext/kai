@@ -29,6 +29,10 @@ type Symbol struct {
 	Kind      string `json:"kind"` // "function", "class", "variable"
 	Range     Range  `json:"range"`
 	Signature string `json:"signature"`
+	// Value holds the initializer literal for const/let/var declarations
+	// (e.g. "3600" for `const TOKEN_TTL_SECONDS = 3600`). Empty for other
+	// kinds. Used by the semantic differ to detect constant-value updates.
+	Value string `json:"value,omitempty"`
 }
 
 // ParsedFile contains the parsed AST and extracted symbols.
@@ -304,16 +308,29 @@ func extractVariableDeclarator(node *sitter.Node, content []byte) *Symbol {
 	var name string
 	var kind = "variable"
 	var signature string
+	var value string
 
+	// variable_declarator children: identifier, type_annotation?, "=", <value>.
+	// We walk, and once we pass the "=" token, the next non-trivial child is
+	// the initializer.
+	sawEquals := false
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" {
+		t := child.Type()
+		if t == "identifier" && name == "" {
 			name = child.Content(content)
+			continue
 		}
-		// Check if it's an arrow function or function expression
-		if child.Type() == "arrow_function" || child.Type() == "function" {
+		if t == "arrow_function" || t == "function" {
 			kind = "function"
 			signature = buildFunctionSignature(child, content)
+		}
+		if t == "=" {
+			sawEquals = true
+			continue
+		}
+		if sawEquals && kind == "variable" && value == "" {
+			value = strings.TrimSpace(child.Content(content))
 		}
 	}
 
@@ -330,6 +347,7 @@ func extractVariableDeclarator(node *sitter.Node, content []byte) *Symbol {
 		Kind:      kind,
 		Range:     nodeRange(node),
 		Signature: signature,
+		Value:     value,
 	}
 }
 
