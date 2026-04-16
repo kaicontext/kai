@@ -48,3 +48,8 @@ bench/results/*/kai
 
 # MCP registry tokens
 .mcpregistry_*
+
+# Demo scripts (internal only)
+scripts/demo.md
+scripts/demo-runner.sh
+scripts/demo-reset.sh

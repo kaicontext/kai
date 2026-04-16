@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.10.4"
+var Version = "0.10.5"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -1573,6 +1573,30 @@ Examples:
 	RunE: runPrune,
 }
 
+var purgeCmd = &cobra.Command{
+	Use:   "purge <path-or-glob> [...]",
+	Short: "Remove a file from all snapshots in history",
+	Long: `Permanently remove files from every snapshot that contains them.
+
+This is the escape hatch from immutability — use it to scrub leaked
+secrets, credentials, or large files from kai history. Like git
+filter-branch / BFG, but for the semantic graph.
+
+Immutability is preserved by default. This command explicitly breaks
+it for the targeted files only. Snapshot nodes remain valid for
+navigation, but the purged file content is gone.
+
+Supports exact paths and glob patterns (including **).
+
+Examples:
+  kai purge .env                    # Preview what would be purged
+  kai purge .env --yes              # Actually purge
+  kai purge "**/*.pem" --yes        # Purge all .pem files from history
+  kai purge src/config/secrets.ts   # Preview purging a specific file`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runPurge2,
+}
+
 var remoteLogCmd = &cobra.Command{
 	Use:   "remote-log [remote]",
 	Short: "Show remote ref history log",
@@ -1889,6 +1913,10 @@ var (
 	pruneAggressive  bool
 	pruneYes         bool
 	pruneKeep        []string
+
+	// Purge flags
+	purgeDryRun bool
+	purgeYes    bool
 
 	// Review flags
 	reviewTitle       string
@@ -2835,6 +2863,10 @@ func init() {
 	pruneCmd.Flags().BoolVar(&pruneYes, "yes", false, "Actually perform the deletion (required for non-dry-run)")
 	pruneCmd.Flags().StringArrayVar(&pruneKeep, "keep", nil, "Glob patterns for paths to keep (can be repeated)")
 
+	// Purge flags
+	purgeCmd.Flags().BoolVar(&purgeDryRun, "dry-run", false, "Show what would be purged (default behavior)")
+	purgeCmd.Flags().BoolVar(&purgeYes, "yes", false, "Actually perform the purge (required)")
+
 	// Review flags
 	reviewOpenCmd.Flags().StringVarP(&reviewTitle, "title", "m", "", "Review title (auto-generated from changes if not provided)")
 	reviewOpenCmd.Flags().StringVar(&reviewDesc, "desc", "", "Review description")
@@ -3174,6 +3206,7 @@ func init() {
 	modulesCmd.GroupID = groupAdvanced
 	pickCmd.GroupID = groupAdvanced
 	pruneCmd.GroupID = groupAdvanced
+	purgeCmd.GroupID = groupAdvanced
 	completionCmd.GroupID = groupAdvanced
 	remoteLogCmd.GroupID = groupAdvanced
 	telemetryCmd.GroupID = groupAdvanced
@@ -3192,6 +3225,7 @@ func init() {
 	rootCmd.AddCommand(modulesCmd)
 	rootCmd.AddCommand(pickCmd)
 	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(purgeCmd)
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(remoteLogCmd)
 
@@ -14831,6 +14865,64 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nPrune complete. Reclaimed %.2f MiB.\n", float64(plan.BytesReclaimed)/(1024*1024))
+	return nil
+}
+
+func runPurge2(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	isDryRun := !purgeYes || purgeDryRun
+
+	plan, err := db.BuildPurgePlan(args)
+	if err != nil {
+		return fmt.Errorf("building purge plan: %w", err)
+	}
+
+	if plan.FileCount == 0 {
+		fmt.Println("No files matched. Nothing to purge.")
+		return nil
+	}
+
+	if isDryRun {
+		fmt.Println("Would purge from history:")
+	} else {
+		fmt.Println("Purging from history:")
+	}
+
+	fmt.Println()
+	fmt.Printf("  Files:     %d\n", plan.FileCount)
+	for _, p := range plan.Paths {
+		fmt.Printf("             %s\n", p)
+	}
+	if plan.SnapshotCount > 0 {
+		fmt.Printf("  Snapshots: %d (payload will be updated)\n", plan.SnapshotCount)
+	}
+	if plan.SymbolCount > 0 {
+		fmt.Printf("  Symbols:   %d\n", plan.SymbolCount)
+	}
+	if len(plan.ObjectsToDelete) > 0 {
+		fmt.Printf("  Objects:   %d (~%.2f MiB)\n", len(plan.ObjectsToDelete), float64(plan.BytesReclaimed)/(1024*1024))
+	}
+
+	if isDryRun {
+		fmt.Printf("\nRun `kai purge %s --yes` to proceed.\nThis is irreversible.\n", args[0])
+		return nil
+	}
+
+	if err := db.ExecutePurge(plan); err != nil {
+		return fmt.Errorf("executing purge: %w", err)
+	}
+
+	fmt.Printf("\nPurge complete.")
+	if plan.BytesReclaimed > 0 {
+		fmt.Printf(" Reclaimed ~%.2f MiB.", float64(plan.BytesReclaimed)/(1024*1024))
+	}
+	fmt.Println()
+	fmt.Println("Note: Run `kai push --force` to propagate to remote.")
 	return nil
 }
 

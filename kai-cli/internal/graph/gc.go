@@ -2,11 +2,14 @@
 package graph
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"kai-core/cas"
 )
 
 // GCPlan describes what would be deleted by garbage collection.
@@ -449,4 +452,266 @@ func matchGlob(pattern, path string) bool {
 	}
 
 	return false
+}
+
+// PurgePlan describes what would be removed by a file-level purge.
+type PurgePlan struct {
+	// File nodes to delete
+	FileNodes []*Node
+
+	// Paths matched (for display)
+	Paths []string
+
+	// Symbol nodes to delete (defined in purged files)
+	SymbolNodes []*Node
+
+	// Object digests to delete from disk
+	ObjectsToDelete []string
+
+	// Snapshots that need payload updates (ID -> updated payload)
+	SnapshotUpdates map[string]map[string]interface{}
+
+	// Counts for summary
+	FileCount     int
+	SymbolCount   int
+	SnapshotCount int
+	BytesReclaimed int64
+}
+
+// BuildPurgePlan computes what would be removed by purging files matching the given patterns.
+func (db *DB) BuildPurgePlan(patterns []string) (*PurgePlan, error) {
+	plan := &PurgePlan{
+		SnapshotUpdates: make(map[string]map[string]interface{}),
+	}
+
+	// Collect all matching File nodes
+	seenDigests := make(map[string]bool)
+	seenFiles := make(map[string]bool)
+
+	allFileNodes, err := db.GetNodesByKind(KindFile)
+	if err != nil {
+		return nil, fmt.Errorf("getting file nodes: %w", err)
+	}
+
+	for _, node := range allFileNodes {
+		path, _ := node.Payload["path"].(string)
+		if path == "" {
+			continue
+		}
+
+		if !matchesAnyPattern(patterns, path) {
+			continue
+		}
+
+		nodeKey := string(node.ID)
+		if seenFiles[nodeKey] {
+			continue
+		}
+		seenFiles[nodeKey] = true
+
+		plan.FileNodes = append(plan.FileNodes, node)
+		plan.Paths = append(plan.Paths, path)
+		plan.FileCount++
+
+		// Collect object digest for deletion
+		if digest, ok := node.Payload["digest"].(string); ok && digest != "" {
+			if !seenDigests[digest] {
+				seenDigests[digest] = true
+				plan.ObjectsToDelete = append(plan.ObjectsToDelete, digest)
+				objPath := filepath.Join(db.objectsDir, digest)
+				if info, err := os.Stat(objPath); err == nil {
+					plan.BytesReclaimed += info.Size()
+				}
+			}
+		}
+		// Also check contentDigest
+		if digest, ok := node.Payload["contentDigest"].(string); ok && digest != "" {
+			if !seenDigests[digest] {
+				seenDigests[digest] = true
+				plan.ObjectsToDelete = append(plan.ObjectsToDelete, digest)
+				objPath := filepath.Join(db.objectsDir, digest)
+				if info, err := os.Stat(objPath); err == nil {
+					plan.BytesReclaimed += info.Size()
+				}
+			}
+		}
+	}
+
+	if plan.FileCount == 0 {
+		return plan, nil
+	}
+
+	// Find symbols defined in purged files (DEFINES_IN edges: symbol -> file)
+	for _, fileNode := range plan.FileNodes {
+		edges, err := db.GetEdgesByDst(EdgeDefinesIn, fileNode.ID)
+		if err != nil {
+			continue
+		}
+		for _, edge := range edges {
+			symNode, err := db.GetNode(edge.Src)
+			if err != nil || symNode == nil {
+				continue
+			}
+			plan.SymbolNodes = append(plan.SymbolNodes, symNode)
+			plan.SymbolCount++
+		}
+	}
+
+	// Find snapshots referencing purged files and build updated payloads
+	fileIDSet := make(map[string]bool)
+	for _, fn := range plan.FileNodes {
+		fileIDSet[hex.EncodeToString(fn.ID)] = true
+	}
+
+	pathSet := make(map[string]bool)
+	for _, p := range plan.Paths {
+		pathSet[p] = true
+	}
+
+	allSnapshots, err := db.GetNodesByKind(KindSnapshot)
+	if err != nil {
+		return nil, fmt.Errorf("getting snapshots: %w", err)
+	}
+
+	for _, snap := range allSnapshots {
+		snapHex := hex.EncodeToString(snap.ID)
+		needsUpdate := false
+
+		// Check fileDigests array
+		if digests, ok := snap.Payload["fileDigests"].([]interface{}); ok {
+			var filtered []interface{}
+			for _, d := range digests {
+				dStr, _ := d.(string)
+				if fileIDSet[dStr] {
+					needsUpdate = true
+					continue
+				}
+				filtered = append(filtered, d)
+			}
+			if needsUpdate {
+				newPayload := copyPayload(snap.Payload)
+				newPayload["fileDigests"] = filtered
+
+				// Also filter the files metadata array
+				if files, ok := newPayload["files"].([]interface{}); ok {
+					var filteredFiles []interface{}
+					for _, f := range files {
+						fm, ok := f.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if p, ok := fm["path"].(string); ok && pathSet[p] {
+							continue
+						}
+						filteredFiles = append(filteredFiles, f)
+					}
+					newPayload["files"] = filteredFiles
+				}
+
+				// Update fileCount
+				if fc, ok := newPayload["fileCount"].(float64); ok {
+					remaining := int(fc) - (len(digests) - len(filtered))
+					if remaining < 0 {
+						remaining = 0
+					}
+					newPayload["fileCount"] = remaining
+				}
+
+				plan.SnapshotUpdates[snapHex] = newPayload
+				plan.SnapshotCount++
+			}
+		}
+	}
+
+	return plan, nil
+}
+
+// ExecutePurge performs the file-level purge according to the plan.
+func (db *DB) ExecutePurge(plan *PurgePlan) error {
+	if plan.FileCount == 0 {
+		return nil
+	}
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Delete symbol nodes and their edges
+	for _, sym := range plan.SymbolNodes {
+		tx.Exec(`DELETE FROM edges WHERE src = ?`, sym.ID)
+		tx.Exec(`DELETE FROM edges WHERE dst = ?`, sym.ID)
+		tx.Exec(`DELETE FROM nodes WHERE id = ?`, sym.ID)
+		tx.Exec(`DELETE FROM slugs WHERE target_id = ?`, sym.ID)
+	}
+
+	// 2. Delete file nodes and all their edges
+	for _, fileNode := range plan.FileNodes {
+		path, _ := fileNode.Payload["path"].(string)
+
+		tx.Exec(`DELETE FROM edges WHERE src = ?`, fileNode.ID)
+		tx.Exec(`DELETE FROM edges WHERE dst = ?`, fileNode.ID)
+		tx.Exec(`DELETE FROM nodes WHERE id = ?`, fileNode.ID)
+		tx.Exec(`DELETE FROM slugs WHERE target_id = ?`, fileNode.ID)
+		tx.Exec(`DELETE FROM logs WHERE id = ?`, fileNode.ID)
+
+		// Delete authorship ranges for this file across all snapshots
+		if path != "" {
+			tx.Exec(`DELETE FROM authorship_ranges WHERE file_path = ?`, path)
+		}
+	}
+
+	// 3. Update snapshot payloads
+	for snapHex, newPayload := range plan.SnapshotUpdates {
+		snapID, err := hex.DecodeString(snapHex)
+		if err != nil {
+			continue
+		}
+		payloadJSON, err := cas.CanonicalJSON(newPayload)
+		if err != nil {
+			continue
+		}
+		tx.Exec(`UPDATE nodes SET payload = ? WHERE id = ?`, string(payloadJSON), snapID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing purge: %w", err)
+	}
+
+	// 4. Delete object files from disk (outside transaction)
+	for _, digest := range plan.ObjectsToDelete {
+		objPath := filepath.Join(db.objectsDir, digest)
+		os.Remove(objPath)
+	}
+
+	return nil
+}
+
+// matchesAnyPattern checks if a path matches any of the given patterns.
+func matchesAnyPattern(patterns []string, path string) bool {
+	for _, pattern := range patterns {
+		// Exact match
+		if pattern == path {
+			return true
+		}
+		// Standard glob
+		if matched, _ := filepath.Match(pattern, path); matched {
+			return true
+		}
+		// Extended glob with ** support
+		if matchGlob(pattern, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyPayload makes a shallow copy of a payload map.
+func copyPayload(src map[string]interface{}) map[string]interface{} {
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

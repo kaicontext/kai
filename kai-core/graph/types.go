@@ -16,6 +16,7 @@ const (
 	KindReviewComment NodeKind = "ReviewComment"
 	KindIntent        NodeKind = "Intent"
 	KindAuthorshipLog NodeKind = "AuthorshipLog"
+	KindSyncLog       NodeKind = "SyncLog"
 )
 
 // EdgeType represents the type of relationship between nodes.
@@ -40,6 +41,7 @@ const (
 	EdgeImports      EdgeType = "IMPORTS"       // File -> File (import dependency)
 	EdgeTests        EdgeType = "TESTS"         // File -> File (test file tests source file)
 	EdgeAttributedIn EdgeType = "ATTRIBUTED_IN" // Snapshot -> AuthorshipLog
+	EdgeHasSyncLog   EdgeType = "HAS_SYNC_LOG"  // Snapshot -> SyncLog
 )
 
 // Node represents a node in the graph.
