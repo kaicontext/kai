@@ -1378,6 +1378,35 @@ func (c *ControlClient) CreateOrg(slug, name string) (*OrgInfo, error) {
 	return &result, nil
 }
 
+// ListRepos lists repositories in an organization.
+func (c *ControlClient) ListRepos(orgSlug string) ([]RepoInfo, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/orgs/"+orgSlug+"/repos", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var result []RepoInfo
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result, nil
+}
+
 // CreateRepo creates a new repository in an organization.
 func (c *ControlClient) CreateRepo(orgSlug, name, visibility string) (*RepoInfo, error) {
 	body, _ := json.Marshal(map[string]string{"name": name, "visibility": visibility})
@@ -1419,6 +1448,7 @@ type CIRun struct {
 	TriggerEvent string `json:"trigger_event"`
 	TriggerRef   string `json:"trigger_ref"`
 	TriggerSHA   string `json:"trigger_sha"`
+	SnapshotID   string `json:"snapshot_id,omitempty"` // Kai snapshot ID (hex), set when CI was triggered by a push
 	Status       string `json:"status"`
 	Conclusion   string `json:"conclusion"`
 	CreatedAt    string `json:"created_at"`
@@ -1897,6 +1927,52 @@ func (c *Client) SyncPushFileReason(agent, channelID, filePath, digest, contentB
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("sync push failed: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// SyncPushMilestone pushes an agent milestone event with optional trust assertions.
+// Used by kai_checkpoint_now. Separate from SyncPushFileReason to avoid signature churn.
+func (c *Client) SyncPushMilestone(agent, channelID, label, assert, planHash string) error {
+	req := map[string]interface{}{
+		"agent":   agent,
+		"channel": channelID,
+		"file":    ".kai/checkpoint",
+		"digest":  "",
+		"content": "",
+		"reason":  "agent_milestone",
+	}
+	if label != "" {
+		req["label"] = label
+	}
+	if assert != "" {
+		req["assert"] = assert
+	}
+	if planHash != "" {
+		req["plan_hash"] = planHash
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+c.repoPath()+"/v1/sync/push", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("milestone push failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
 }

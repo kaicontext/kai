@@ -30,7 +30,8 @@ const (
 	KindSymbol        = coregraph.KindSymbol
 	KindSnapshot      = coregraph.KindSnapshot
 	KindChangeSet     = coregraph.KindChangeSet
-	KindChangeType    = coregraph.KindChangeType
+	KindChangeType     = coregraph.KindChangeType
+	KindClassification = coregraph.KindClassification
 	KindWorkspace     = coregraph.KindWorkspace
 	KindReview        = coregraph.KindReview
 	KindReviewComment = coregraph.KindReviewComment
@@ -55,7 +56,12 @@ const (
 	EdgeImports      = coregraph.EdgeImports
 	EdgeTests        = coregraph.EdgeTests
 	EdgeAttributedIn = coregraph.EdgeAttributedIn
+	EdgeHasSyncLog   = coregraph.EdgeHasSyncLog
+	EdgeHasCIRun     = coregraph.EdgeHasCIRun
 )
+
+// ValidAssertions is the set of allowed trust assertion values for checkpoint_now milestones.
+var ValidAssertions = coregraph.ValidAssertions
 
 // DB wraps the SQLite database connection.
 type DB struct {

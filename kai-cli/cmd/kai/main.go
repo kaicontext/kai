@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.10.5"
+var Version = "0.11.0"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2656,12 +2656,16 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 	if data, err := os.ReadFile(hookPath); err == nil {
 		if !strings.Contains(string(data), kaiHookMarker) {
 			// Foreign hook — don't touch it. User can compose manually.
-			fmt.Println("Note: pre-commit hook already exists (not managed by Kai). Skipping.")
+			if !initMode {
+				fmt.Println("Note: pre-commit hook already exists (not managed by Kai). Skipping.")
+			}
 		} else {
 			// Always upgrade kai-managed hooks to the current safe version.
 			if err := os.WriteFile(hookPath, []byte(preCommitHookScript), 0755); err != nil {
-				fmt.Printf("Warning: could not upgrade pre-commit hook: %v\n", err)
-			} else {
+				if !initMode {
+					fmt.Printf("Warning: could not upgrade pre-commit hook: %v\n", err)
+				}
+			} else if !initMode {
 				fmt.Println("Upgraded pre-commit hook: .git/hooks/pre-commit")
 			}
 		}
@@ -2669,30 +2673,40 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(hookPath, []byte(preCommitHookScript), 0755); err != nil {
 			return fmt.Errorf("writing pre-commit hook: %w", err)
 		}
-		fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
+		if !initMode {
+			fmt.Println("Installed pre-commit hook: .git/hooks/pre-commit")
+		}
 	}
 
 	// pre-push
 	pushHookPath := filepath.Join(".git", "hooks", "pre-push")
 	if data, err := os.ReadFile(pushHookPath); err == nil {
 		if !strings.Contains(string(data), kaiHookMarker) {
-			fmt.Println("Note: pre-push hook already exists (not managed by Kai). Skipping.")
+			if !initMode {
+				fmt.Println("Note: pre-push hook already exists (not managed by Kai). Skipping.")
+			}
 		} else {
 			if err := os.WriteFile(pushHookPath, []byte(prePushHookScript), 0755); err != nil {
-				fmt.Printf("Warning: could not upgrade pre-push hook: %v\n", err)
-			} else {
+				if !initMode {
+					fmt.Printf("Warning: could not upgrade pre-push hook: %v\n", err)
+				}
+			} else if !initMode {
 				fmt.Println("Upgraded pre-push hook: .git/hooks/pre-push")
 			}
 		}
 	} else {
 		if err := os.WriteFile(pushHookPath, []byte(prePushHookScript), 0755); err != nil {
-			fmt.Printf("Warning: could not install pre-push hook: %v\n", err)
-		} else {
+			if !initMode {
+				fmt.Printf("Warning: could not install pre-push hook: %v\n", err)
+			}
+		} else if !initMode {
 			fmt.Println("Installed pre-push hook: .git/hooks/pre-push")
 		}
 	}
 
-	fmt.Println("Kai hooks are best-effort and will never block git.")
+	if !initMode {
+		fmt.Println("Kai hooks are best-effort and will never block git.")
+	}
 	return nil
 }
 
@@ -3039,6 +3053,7 @@ func init() {
 	ciAuthorshipCmd.Flags().BoolVar(&ciAuthorshipDryRun, "dry-run", false, "Print comment to stdout instead of posting")
 
 	// Remote CI commands (per protocol spec docs/protocol.md section 3)
+	ciCmd.AddCommand(ciStatusCmd)
 	ciCmd.AddCommand(ciRunsCmd)
 	ciCmd.AddCommand(ciRunCmd)
 	ciCmd.AddCommand(ciLogsCmd)
@@ -3320,7 +3335,135 @@ func debugf(format string, args ...any) {
 var skipModulesFile bool
 var initExplain bool
 
+// initMode suppresses chatty output from sub-commands called during kai init
+var initMode bool
+
+// ANSI color helpers for init output. Respect NO_COLOR and non-TTY stderr.
+var stderrColor bool
+
+func initColors() {
+	if os.Getenv("NO_COLOR") != "" {
+		return
+	}
+	if fi, err := os.Stderr.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+		stderrColor = true
+	}
+}
+
+func cBold(s string) string {
+	if !stderrColor {
+		return s
+	}
+	return "\033[1m" + s + "\033[0m"
+}
+
+func cGreen(s string) string {
+	if !stderrColor {
+		return s
+	}
+	return "\033[32m" + s + "\033[0m"
+}
+
+func cRed(s string) string {
+	if !stderrColor {
+		return s
+	}
+	return "\033[31m" + s + "\033[0m"
+}
+
+func cDim(s string) string {
+	if !stderrColor {
+		return s
+	}
+	return "\033[2m" + s + "\033[0m"
+}
+
+// spinner runs an animated gradient pulse on stderr while work happens.
+// A soft glow bounces across a short bar — subtle, not flashy.
+//
+//	stop := spinner("Building semantic graph")
+//	err := doWork()
+//	stop(err)
+func spinner(label string) func(error) {
+	const barWidth = 16
+	const pulseHalf = 3
+
+	// Soft blue gradient — visible but not loud
+	pulseColors := []string{"240", "246", "74", "81", "74", "246"}
+	dimColor := "238"
+
+	iabs := func(x int) int {
+		if x < 0 {
+			return -x
+		}
+		return x
+	}
+
+	renderBar := func(pos int) string {
+		var b strings.Builder
+		for i := 0; i < barWidth; i++ {
+			dist := iabs(i - pos)
+			if dist > pulseHalf {
+				if stderrColor {
+					fmt.Fprintf(&b, "\033[38;5;%sm─\033[0m", dimColor)
+				} else {
+					b.WriteRune('─')
+				}
+			} else {
+				lvl := pulseHalf - dist
+				idx := lvl * (len(pulseColors) - 1) / pulseHalf
+				if stderrColor {
+					fmt.Fprintf(&b, "\033[38;5;%sm─\033[0m", pulseColors[idx])
+				} else {
+					b.WriteRune('━')
+				}
+			}
+		}
+		return b.String()
+	}
+
+	// Render first frame immediately so it's visible even for fast tasks
+	fmt.Fprintf(os.Stderr, "\r  %s %s\033[K", renderBar(0), label)
+
+	done := make(chan struct{})
+	go func() {
+		pos := 1
+		dir := 1
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				time.Sleep(45 * time.Millisecond)
+				fmt.Fprintf(os.Stderr, "\r  %s %s\033[K", renderBar(pos), label)
+				pos += dir
+				if pos >= barWidth-1 {
+					dir = -1
+				} else if pos <= 0 {
+					dir = 1
+				}
+			}
+		}
+	}()
+
+	return func(err error) {
+		close(done)
+		time.Sleep(50 * time.Millisecond)
+
+		if err != nil {
+			errMsg := err.Error()
+			if len(errMsg) > 60 {
+				errMsg = errMsg[:57] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "\r  %s %s %s\033[K\n", cRed("✗"), label, cDim(errMsg))
+		} else {
+			fmt.Fprintf(os.Stderr, "\r  %s %s\033[K\n", cGreen("✓"), label)
+		}
+	}
+}
+
 func runInit(cmd *cobra.Command, args []string) error {
+	initColors()
 	te := telemetry.NewEvent("init")
 	defer te.Finish()
 
@@ -3813,9 +3956,8 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		return fmt.Errorf("committing schema: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Println("  ✓ Initialized Kai in .kai/")
-	fmt.Println()
+	initMode = true
+	defer func() { initMode = false }()
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -3823,17 +3965,14 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	isGitRepo := false
 	if _, err := os.Stat(".git"); err == nil {
 		isGitRepo = true
-		fmt.Println("  Git repository detected.")
-		fmt.Println()
 
 		// Auto-import git history. runGitImport caps at importMaxCommits (default 50)
 		// so large repos only import the most recent slice.
 		if countOut, err := exec.Command("git", "rev-list", "--count", "HEAD").Output(); err == nil {
 			if count, _ := strconv.Atoi(strings.TrimSpace(string(countOut))); count > 0 {
-				fmt.Println("  Importing git history as semantic snapshots...")
-				if err := runGitImport(db); err != nil {
-					fmt.Printf("  Warning: import failed: %v\n", err)
-				}
+				stop := spinner("Importing git history")
+				importErr := runGitImport(db)
+				stop(importErr)
 			}
 		}
 
@@ -3844,47 +3983,27 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	}
 
 	// ── Step 4: Run first capture to build the semantic graph ──
-	fmt.Println()
-	fmt.Println("  Building semantic graph...")
-	if captureErr := runCapture(cmd, []string{"."}); captureErr != nil {
-		fmt.Printf("  Warning: capture failed: %v\n", captureErr)
-	}
+	stop := spinner("Building semantic graph")
+	captureErr := runCapture(cmd, []string{"."})
+	stop(captureErr)
 
 	// ── Step 5: Detect AI tools, auto-install MCP if missing ──
 	hasClaude := detectClaudeCode()
 	hasCodex := func() bool { _, err := exec.LookPath("codex"); return err == nil }()
 
 	if hasClaude {
-		fmt.Println()
-		if mcpAlreadyInstalled("claude") {
-			fmt.Println("  ✓ Kai MCP server already configured for Claude Code")
-		} else {
-			fmt.Println("  Installing Kai MCP server for Claude Code...")
+		if !mcpAlreadyInstalled("claude") {
 			mcpCmd := exec.Command("claude", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
-			mcpCmd.Stdout = os.Stdout
-			mcpCmd.Stderr = os.Stderr
 			if err := mcpCmd.Run(); err != nil {
-				fmt.Printf("  Warning: MCP install failed: %v\n", err)
-				fmt.Println("  You can install manually: claude mcp add kai -- kai mcp serve")
-			} else {
-				fmt.Println("  ✓ Kai MCP server installed for Claude Code")
+				fmt.Fprintf(os.Stderr, "%s MCP install for Claude Code failed: %v\n", cRed("Warning:"), err)
 			}
 		}
 	}
 	if hasCodex {
-		fmt.Println()
-		if mcpAlreadyInstalled("codex") {
-			fmt.Println("  ✓ Kai MCP server already configured for Codex")
-		} else {
-			fmt.Println("  Installing Kai MCP server for Codex...")
+		if !mcpAlreadyInstalled("codex") {
 			mcpCmd := exec.Command("codex", "mcp", "add", "kai", "--", "kai", "mcp", "serve")
-			mcpCmd.Stdout = os.Stdout
-			mcpCmd.Stderr = os.Stderr
 			if err := mcpCmd.Run(); err != nil {
-				fmt.Printf("  Warning: MCP install failed: %v\n", err)
-				fmt.Println("  You can install manually: codex mcp add kai -- kai mcp serve")
-			} else {
-				fmt.Println("  ✓ Kai MCP server installed for Codex")
+				fmt.Fprintf(os.Stderr, "%s MCP install for Codex failed: %v\n", cRed("Warning:"), err)
 			}
 		}
 	}
@@ -3898,25 +4017,22 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 	token, authErr := remote.GetValidAccessToken()
 	if authErr != nil || token == "" {
 		fmt.Println()
-		fmt.Println("  Let's connect this repo to kaicontext.com (free) for shared")
-		fmt.Println("  reviews, team code intelligence, and history across machines.")
-		fmt.Println()
-		fmt.Print("  Enter your email: ")
+		fmt.Fprintf(os.Stderr, "  Connect to kaicontext.com %s. Enter your email %s: ", cDim("(free)"), cDim("(or press Enter to skip)"))
 		email, _ := reader.ReadString('\n')
 		email = strings.TrimSpace(email)
 		if email == "" {
-			fmt.Println("  Skipped. You can set up later with: kai auth login")
+			fmt.Fprintf(os.Stderr, "  Skipped. Run %s later to connect.\n", cBold("kai auth login"))
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
 		}
 
 		// Use source=cli to skip the approval gate
 		authClient := remote.NewAuthClient(serverURL)
-		fmt.Printf("  Sending login link to %s...\n", email)
+		fmt.Fprintf(os.Stderr, "  Sending login link to %s...\n", email)
 		mlResult, err := authClient.SendMagicLinkWithSource(email, "cli")
 		if err != nil {
-			fmt.Printf("  Failed: %v\n", err)
-			fmt.Println("  You can try again later with: kai auth login")
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", cRed("Failed"), err)
+			fmt.Fprintf(os.Stderr, "  You can try again later with: %s\n", cBold("kai auth login"))
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
 		}
@@ -3925,8 +4041,8 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		if mlResult.DevToken != "" {
 			magicToken = mlResult.DevToken
 		} else {
-			fmt.Println("  Check your email for a login link (from support@kaicontext.com).")
-			fmt.Print("  Paste the token here: ")
+			fmt.Fprintf(os.Stderr, "  Check your email for a login link %s.\n", cDim("(from support@kaicontext.com)"))
+			fmt.Fprint(os.Stderr, "  Paste the token here: ")
 			tokenInput, _ := reader.ReadString('\n')
 			tokenInput = strings.TrimSpace(tokenInput)
 			if strings.Contains(tokenInput, "token=") {
@@ -3940,14 +4056,14 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 		}
 
 		if magicToken == "" {
-			fmt.Println("  Skipped. You can set up later with: kai auth login")
+			fmt.Fprintf(os.Stderr, "  Skipped. Run %s later to connect.\n", cBold("kai auth login"))
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
 		}
 
 		tokens, err := authClient.ExchangeToken(magicToken)
 		if err != nil {
-			fmt.Printf("  Login failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", cRed("Login failed"), err)
 			printInitFinish(isGitRepo, hasClaude)
 			return nil
 		}
@@ -3960,13 +4076,12 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 			ServerURL:    serverURL,
 		}
 		if err := remote.SaveCredentials(creds); err != nil {
-			fmt.Printf("  Warning: could not save credentials: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  %s could not save credentials: %v\n", cRed("Warning:"), err)
 		}
-		fmt.Printf("  ✓ Logged in as %s\n", email)
-		fmt.Println()
+		fmt.Fprintf(os.Stderr, "  %s Logged in as %s\n", cGreen("✓"), email)
 	} else {
 		email, _, _ := remote.GetAuthStatus()
-		fmt.Printf("  Already logged in as %s\n\n", email)
+		debugf("already logged in as %s", email)
 	}
 
 	// Ensure personal org exists, create repo, offer to push
@@ -3990,14 +4105,14 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				}
 				newOrg, err := ctrl.CreateOrg(slug, slug)
 				if err != nil {
-					fmt.Printf("  Warning: could not create org: %v\n", err)
+					debugf("could not create org: %v", err)
 				} else {
 					selectedOrg = newOrg
-					fmt.Printf("  ✓ Created org: %s\n", selectedOrg.Slug)
+					debugf("created org: %s", selectedOrg.Slug)
 				}
 			} else if len(orgs) == 1 {
 				selectedOrg = &orgs[0]
-				fmt.Printf("  Using org: %s\n", selectedOrg.Slug)
+				debugf("using org: %s", selectedOrg.Slug)
 			} else {
 				fmt.Println("  Select an organization:")
 				for i, org := range orgs {
@@ -4012,44 +4127,76 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				} else {
 					selectedOrg = &orgs[0]
 				}
-				fmt.Printf("  Using org: %s\n", selectedOrg.Slug)
+				debugf("using org: %s", selectedOrg.Slug)
 			}
 		}
 
-		// Create repo for current directory
+		// Create or select repo for current directory
 		if selectedOrg != nil {
 			projectName := remote.DetectProjectName()
-			fmt.Println()
-			fmt.Printf("  Creating repo '%s/%s' on kaicontext.com...\n", selectedOrg.Slug, projectName)
-			_, err := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
-			if err != nil {
-				if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "409") {
-					fmt.Printf("  Repo %s/%s already exists.\n", selectedOrg.Slug, projectName)
-				} else {
-					fmt.Printf("  Warning: could not create repo: %v\n", err)
+
+			// Check if a repo with this name already exists
+			repoExists := false
+			if repos, listErr := ctrl.ListRepos(selectedOrg.Slug); listErr == nil {
+				for _, r := range repos {
+					if r.Name == projectName {
+						repoExists = true
+						break
+					}
+				}
+			}
+
+			if repoExists {
+				fmt.Fprintf(os.Stderr, "\n  Repo %s/%s already exists on kaicontext.com.\n", selectedOrg.Slug, cBold(projectName))
+				fmt.Fprintf(os.Stderr, "  %s\n", cDim("[1] Link to existing repo"))
+				fmt.Fprintf(os.Stderr, "  %s\n", cDim("[2] Create new repo with different name"))
+				fmt.Fprintf(os.Stderr, "  %s\n", cDim("[3] Skip"))
+				fmt.Fprint(os.Stderr, "  Enter choice [1]: ")
+				choice, _ := reader.ReadString('\n')
+				choice = strings.TrimSpace(choice)
+				if choice == "" {
+					choice = "1"
+				}
+				switch choice {
+				case "1":
+					// Link to existing — just set the remote
+				case "2":
+					fmt.Fprint(os.Stderr, "  New repo name: ")
+					newName, _ := reader.ReadString('\n')
+					newName = strings.TrimSpace(newName)
+					if newName != "" {
+						projectName = newName
+						if _, createErr := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private"); createErr != nil {
+							fmt.Fprintf(os.Stderr, "  %s could not create repo: %v\n", cRed("Warning:"), createErr)
+						}
+					}
+				case "3":
+					projectName = ""
+				default:
+					// Treat as link to existing
 				}
 			} else {
-				fmt.Printf("  ✓ Created repo: %s/%s\n", selectedOrg.Slug, projectName)
+				_, createErr := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
+				if createErr != nil {
+					debugf("could not create repo: %v", createErr)
+				}
 			}
 
-			// Set up the remote
-			remoteEntry := &remote.RemoteEntry{
-				URL:    serverURL,
-				Tenant: selectedOrg.Slug,
-				Repo:   projectName,
-			}
-			if err := remote.SetRemote("origin", remoteEntry); err != nil {
-				debugf("setting remote: %v", err)
-			}
+			if projectName != "" {
+				// Set up the remote
+				remoteEntry := &remote.RemoteEntry{
+					URL:    serverURL,
+					Tenant: selectedOrg.Slug,
+					Repo:   projectName,
+				}
+				if err := remote.SetRemote("origin", remoteEntry); err != nil {
+					debugf("setting remote: %v", err)
+				}
 
-			// Push the semantic graph automatically
-			fmt.Println()
-			fmt.Println("  Pushing semantic graph to kaicontext.com...")
-			if pushErr := runPush(cmd, []string{"origin"}); pushErr != nil {
-				fmt.Printf("  Push failed: %v\n", pushErr)
-				fmt.Println("  You can push later with: kai push")
-			} else {
-				fmt.Println("  ✓ Pushed to kaicontext.com")
+				// Push the semantic graph automatically
+				stop := spinner("Pushing to kaicontext.com")
+				pushErr := runPush(cmd, []string{"origin"})
+				stop(pushErr)
 			}
 		}
 	}
@@ -4194,28 +4341,7 @@ func autoAttributeFromMCPSession(kaiDir, workDir string) {
 }
 
 func printInitFinish(isGitRepo, hasClaude bool) {
-	fmt.Println()
-	fmt.Println("╭─────────────────────────────────────────────────────────────")
-	fmt.Println("│")
-	fmt.Println("│  ✓ You're all set!")
-	fmt.Println("│")
-	fmt.Println("│  Your project now has semantic version control.")
-	fmt.Println("│")
-	if isGitRepo {
-		fmt.Println("│  Git hooks are capturing and pushing automatically.")
-		fmt.Println("│  Just commit and push as usual — Kai rides along.")
-	} else {
-		fmt.Println("│  Next steps:")
-		fmt.Println("│    kai capture        # Snapshot your code")
-		fmt.Println("│    kai diff           # See what changed")
-		fmt.Println("│    kai push           # Push to remote")
-	}
-	if hasClaude {
-		fmt.Println("│")
-		fmt.Println("│  Run 'kai bench' anytime to measure AI token savings.")
-	}
-	fmt.Println("│")
-	fmt.Println("╰─────────────────────────────────────────────────────────────")
+	fmt.Fprintf(os.Stderr, "%s %s\n", cGreen("✓"), cBold("Kai initialized"))
 }
 
 // detectClaudeCode checks if the claude CLI is installed.
@@ -4350,11 +4476,15 @@ func runGitImport(db *graph.DB) error {
 
 	maxCommits := importMaxCommits
 	if totalCommits > maxCommits {
-		fmt.Printf("  Repository has %d commits. Importing last %d.\n", totalCommits, maxCommits)
-		fmt.Printf("  (Use 'kai import --git --all' for full history)\n")
+		if !initMode {
+			fmt.Printf("  Repository has %d commits. Importing last %d.\n", totalCommits, maxCommits)
+			fmt.Printf("  (Use 'kai import --git --all' for full history)\n")
+		}
 	} else {
 		maxCommits = totalCommits
-		fmt.Printf("  Importing %d commits...\n", maxCommits)
+		if !initMode {
+			fmt.Printf("  Importing %d commits...\n", maxCommits)
+		}
 	}
 
 	// Get commit list (oldest first)
@@ -4385,7 +4515,9 @@ func runGitImport(db *graph.DB) error {
 		msgOut, _ := exec.Command("git", "log", "-1", "--format=%s", commitHash).Output()
 		msg := strings.TrimSpace(string(msgOut))
 
-		fmt.Fprintf(os.Stderr, "\r  [%d/%d] %s %.7s", i+1, len(commits), msg, commitHash)
+		if !initMode {
+			fmt.Fprintf(os.Stderr, "\r  [%d/%d] %s %.7s", i+1, len(commits), msg, commitHash)
+		}
 
 		// Checkout this commit
 		if err := exec.Command("git", "checkout", "--quiet", commitHash).Run(); err != nil {
@@ -4413,9 +4545,11 @@ func runGitImport(db *graph.DB) error {
 		_ = refMgr
 	}
 
-	fmt.Fprintf(os.Stderr, "\r\033[K")
-	fmt.Printf("  ✓ Imported %d commits as snapshots\n", len(commits))
-	fmt.Println("  Run 'kai capture' to add full semantic analysis to the current snapshot.")
+	if !initMode {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+		fmt.Printf("  ✓ Imported %d commits as snapshots\n", len(commits))
+		fmt.Println("  Run 'kai capture' to add full semantic analysis to the current snapshot.")
+	}
 
 	return nil
 }
@@ -4617,7 +4751,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	debugf("Loading module configuration...")
 	matcher, err := loadMatcher()
 	if err != nil {
-		fmt.Println("failed")
+		if !initMode {
+			fmt.Println("failed")
+		}
 		return err
 	}
 	moduleCount := len(matcher.GetAllModules())
@@ -4638,10 +4774,14 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	cacheDir := filepath.Join(capturePath, ".kai")
 	statCache := dirio.LoadStatCache(cacheDir)
 
-	fmt.Fprintf(os.Stderr, "Scanning files...")
+	if !initMode {
+		fmt.Fprintf(os.Stderr, "Scanning files...")
+	}
 	source, err := dirio.OpenDirectory(capturePath, dirio.WithStatCache(statCache))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, " failed\n")
+		if !initMode {
+			fmt.Fprintf(os.Stderr, " failed\n")
+		}
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "dir_open"
@@ -4651,27 +4791,37 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	files, err := source.GetFiles()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, " failed\n")
+		if !initMode {
+			fmt.Fprintf(os.Stderr, " failed\n")
+		}
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "get_files"
 		}
 		return fmt.Errorf("getting files: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, " %d files\n", len(files))
+	if !initMode {
+		fmt.Fprintf(os.Stderr, " %d files\n", len(files))
+	}
 
-	fmt.Fprintf(os.Stderr, "Creating snapshot...")
+	if !initMode {
+		fmt.Fprintf(os.Stderr, "Creating snapshot...")
+	}
 	creator := snapshot.NewCreator(db, matcher)
 	snapshotID, err := creator.CreateSnapshot(source)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, " failed\n")
+		if !initMode {
+			fmt.Fprintf(os.Stderr, " failed\n")
+		}
 		if te != nil {
 			te.Result = "error"
 			te.ErrorClass = "snapshot_create"
 		}
 		return fmt.Errorf("creating snapshot: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, " done\n")
+	if !initMode {
+		fmt.Fprintf(os.Stderr, " done\n")
+	}
 	debugf("snapshot created: %s", util.BytesToHex(snapshotID))
 
 	// Persist stat cache so next capture can skip unchanged files
@@ -4731,6 +4881,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		debugf("Step 2/2: Analyzing...")
 		phaseStart = time.Now()
 		progress := func(current, total int, filename string) {
+			if initMode {
+				return
+			}
 			display := filename
 			if len(display) > 40 {
 				display = "..." + display[len(display)-37:]
@@ -4742,11 +4895,17 @@ func runCapture(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if err := creator.Analyze(snapshotID, progress); err != nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K")
+			if !initMode {
+				fmt.Fprintf(os.Stderr, "\r\033[K")
+			}
 			debugf("Analysis: warning: some files failed")
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			if !initMode {
+				fmt.Fprintf(os.Stderr, "  %v\n", err)
+			}
 		} else {
-			fmt.Fprintf(os.Stderr, "\r\033[K")
+			if !initMode {
+				fmt.Fprintf(os.Stderr, "\r\033[K")
+			}
 			debugf("Analysis: done")
 		}
 		if te != nil {
@@ -4806,10 +4965,10 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Compute change summary BEFORE updating refs (so @snap:last still points to old snapshot)
-	var changeSummary *captureSummary
+	var capSummary *captureSummary
 	if !isFirstScan {
 		debugf("Computing changes...")
-		changeSummary = computeCaptureSummary(db, snapshotID, matcher)
+		capSummary = computeCaptureSummary(db, snapshotID, matcher)
 		debugf("Computing changes: done")
 	}
 
@@ -4852,15 +5011,15 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add change summary to meta
-	if changeSummary != nil && changeSummary.hasChanges {
+	if capSummary != nil && capSummary.hasChanges {
 		if snapMeta == nil {
 			snapMeta = make(map[string]string)
 		}
-		snapMeta["changes.files"] = fmt.Sprintf("%d", changeSummary.filesChanged)
+		snapMeta["changes.files"] = fmt.Sprintf("%d", capSummary.filesChanged)
 
 		// Count changes by type for a brief summary
-		if len(changeSummary.changeTypes) > 0 {
-			buckets := bucketChangeTypes(changeSummary.changeTypes)
+		if len(capSummary.changeTypes) > 0 {
+			buckets := bucketChangeTypes(capSummary.changeTypes)
 			var parts []string
 			for _, bucket := range []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract} {
 				if paths := buckets[bucket]; len(paths) > 0 {
@@ -4881,7 +5040,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Auto-create changeset if there are changes
-	if changeSummary != nil && changeSummary.hasChanges && previousSnapID != nil {
+	if capSummary != nil && capSummary.hasChanges && previousSnapID != nil {
 		debugf("Creating changeset...")
 		_, err = createChangesetFromSnapshots(db, previousSnapID, snapshotID, "")
 		if err != nil {
@@ -4899,20 +5058,22 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 
 	// Summary — quiet by default, verbose for details
-	snapHex := util.BytesToHex(snapshotID)[:12]
-	if changeSummary != nil && changeSummary.hasChanges {
-		fmt.Printf("Captured %s (%d files, %d modified)\n", snapHex, len(files), changeSummary.filesChanged)
-	} else if isFirstScan {
-		fmt.Printf("Captured %s (%d files)\n", snapHex, len(files))
-	} else {
-		fmt.Printf("Captured %s (%d files, no changes)\n", snapHex, len(files))
+	if !initMode {
+		snapHex := util.BytesToHex(snapshotID)[:12]
+		if capSummary != nil && capSummary.hasChanges {
+			fmt.Printf("Captured %s (%d files, %d modified)\n", snapHex, len(files), capSummary.filesChanged)
+		} else if isFirstScan {
+			fmt.Printf("Captured %s (%d files)\n", snapHex, len(files))
+		} else {
+			fmt.Printf("Captured %s (%d files, no changes)\n", snapHex, len(files))
+		}
 	}
 
 	// Verbose: detailed breakdown
-	if changeSummary != nil && changeSummary.hasChanges {
-		debugf("Changes detected: %d file(s) modified", changeSummary.filesChanged)
-		if len(changeSummary.changeTypes) > 0 {
-			buckets := bucketChangeTypes(changeSummary.changeTypes)
+	if capSummary != nil && capSummary.hasChanges {
+		debugf("Changes detected: %d file(s) modified", capSummary.filesChanged)
+		if len(capSummary.changeTypes) > 0 {
+			buckets := bucketChangeTypes(capSummary.changeTypes)
 			bucketOrder := []ChangeBucket{BucketStructural, BucketBehavioral, BucketAPIContract}
 			for _, bucket := range bucketOrder {
 				paths := buckets[bucket]
@@ -4926,8 +5087,8 @@ func runCapture(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-		if len(changeSummary.modules) > 0 {
-			debugf("  Modules: %s", strings.Join(changeSummary.modules, ", "))
+		if len(capSummary.modules) > 0 {
+			debugf("  Modules: %s", strings.Join(capSummary.modules, ", "))
 		}
 	}
 
@@ -13712,7 +13873,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	debugf("Pushing to %s (%s)...", remoteName, client.BaseURL)
-	fmt.Fprintf(os.Stderr, "\rPushing to %s... negotiating", remoteName)
+	if !initMode {
+		fmt.Fprintf(os.Stderr, "\rPushing to %s... negotiating  ", remoteName)
+	}
 
 	// Skip negotiate for small pushes (< 100 objects) or force pushes
 	// Server will dedupe on ingest. This saves a round-trip.
@@ -13873,7 +14036,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 				// If adding this object would exceed limit, push current batch
 				if batchSize+objSize > maxBatchSize && len(batch) > 0 {
-					fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
+					if !initMode {
+						fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
+					}
 					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 					result, err := client.PushPack(batch)
 					if err != nil {
@@ -13893,10 +14058,14 @@ func runPush(cmd *cobra.Command, args []string) error {
 			// Push remaining batch
 			if len(batch) > 0 {
 				if totalBatches > 1 {
-					fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
+					if !initMode {
+						fmt.Fprintf(os.Stderr, "\rPushing to %s... batch %d/%d", remoteName, batchNum, totalBatches)
+					}
 					debugf("Pushing batch %d/%d (%d objects)...", batchNum, totalBatches, len(batch))
 				} else {
-					fmt.Fprintf(os.Stderr, "\rPushing to %s... %d objects", remoteName, len(batch))
+					if !initMode {
+						fmt.Fprintf(os.Stderr, "\rPushing to %s... %d objects", remoteName, len(batch))
+					}
 					debugf("Pushing %d objects...", len(batch))
 				}
 				result, err := client.PushPack(batch)
@@ -14008,7 +14177,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(edgesToPush) > 0 {
-		fmt.Fprintf(os.Stderr, "\rPushing to %s... %d edges", remoteName, len(edgesToPush))
+		if !initMode {
+			fmt.Fprintf(os.Stderr, "\rPushing to %s... %d edges", remoteName, len(edgesToPush))
+		}
 		debugf("Pushing %d edges...", len(edgesToPush))
 		result, err := client.PushEdges(edgesToPush)
 		if err != nil {
@@ -14069,8 +14240,39 @@ func runPush(cmd *cobra.Command, args []string) error {
 		refMgr.Set(remoteRefName, r.TargetID, r.TargetKind)
 	}
 
-	fmt.Fprintf(os.Stderr, "\r\033[K")
-	fmt.Printf("Pushed to %s.\n", remoteName)
+	if !initMode {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+		fmt.Printf("Pushed to %s.\n", remoteName)
+	}
+
+	// CI dedup + edge creation: check if CI runs exist for the pushed snapshot
+	if localLatest, _ := refMgr.Get("snap.latest"); localLatest != nil {
+		snapHex := util.BytesToHex(localLatest.TargetID)
+		ctrl := remote.NewControlClient(client.BaseURL)
+		if runs, _, err := ctrl.ListCIRuns(client.Tenant, client.Repo, 10); err == nil {
+			for _, r := range runs {
+				if r.SnapshotID != snapHex && r.TriggerSHA != snapHex {
+					continue
+				}
+				if r.Conclusion == "success" {
+					fmt.Fprintf(os.Stderr, "CI: prior success for this snapshot (run #%d), server will skip re-run\n", r.RunNumber)
+				}
+				// Write HAS_CI_RUN edge locally so kai ci status can query it
+				runIDBytes, _ := hex.DecodeString(r.ID)
+				if len(runIDBytes) == 0 {
+					// Run ID might not be hex — derive a deterministic ID from the run metadata
+					h := sha256.Sum256([]byte("cirun:" + r.ID))
+					runIDBytes = h[:]
+				}
+				tx, txErr := db.BeginTx()
+				if txErr == nil {
+					db.InsertEdge(tx, localLatest.TargetID, graph.EdgeHasCIRun, runIDBytes, nil)
+					tx.Commit()
+				}
+				break
+			}
+		}
+	}
 
 	// Display billing usage warnings
 	if pushUsage != nil {
@@ -14865,6 +15067,26 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nPrune complete. Reclaimed %.2f MiB.\n", float64(plan.BytesReclaimed)/(1024*1024))
+
+	// Clean up stale session refs (session.*.base) older than retention window (30 days)
+	const sessionRefRetentionDays = 30
+	refMgr := ref.NewRefManager(db)
+	allRefs, _ := refMgr.List(nil)
+	cutoff := time.Now().Add(-time.Duration(sessionRefRetentionDays) * 24 * time.Hour).UnixMilli()
+	sessionRefsPruned := 0
+	for _, r := range allRefs {
+		if !strings.HasPrefix(r.Name, "session.") || !strings.HasSuffix(r.Name, ".base") {
+			continue
+		}
+		if r.CreatedAt < cutoff {
+			refMgr.Delete(r.Name)
+			sessionRefsPruned++
+		}
+	}
+	if sessionRefsPruned > 0 {
+		fmt.Printf("Pruned %d stale session ref(s).\n", sessionRefsPruned)
+	}
+
 	return nil
 }
 
@@ -15201,12 +15423,31 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 				}
 				baseLabel = reviewBase
 			} else {
-				// Use previous snapshot as base (like git diff HEAD~1)
-				baseSnapID, err = resolveSnapshotID(db, "@snap:prev")
-				if err != nil {
-					return fmt.Errorf("resolving @snap:prev: %w (need at least 2 snapshots, run 'kai capture' twice)", err)
+				// Try session base first: find oldest session.*.base ref
+				refMgr := ref.NewRefManager(db)
+				allRefs, _ := refMgr.List(nil)
+				var sessionBaseRef *ref.Ref
+				for _, r := range allRefs {
+					if !strings.HasPrefix(r.Name, "session.") || !strings.HasSuffix(r.Name, ".base") {
+						continue
+					}
+					if sessionBaseRef == nil || r.CreatedAt < sessionBaseRef.CreatedAt {
+						sessionBaseRef = r
+					}
 				}
-				baseLabel = "@snap:prev"
+
+				if sessionBaseRef != nil {
+					baseSnapID = sessionBaseRef.TargetID
+					baseLabel = sessionBaseRef.Name
+				} else {
+					// Fall back to @snap:prev
+					baseSnapID, err = resolveSnapshotID(db, "@snap:prev")
+					if err != nil {
+						return fmt.Errorf("resolving @snap:prev: %w (need at least 2 snapshots, run 'kai capture' twice)", err)
+					}
+					baseLabel = "@snap:prev"
+					fmt.Fprintf(os.Stderr, "Note: no session base found, using %s as review base\n", baseLabel)
+				}
 			}
 
 			// Use snap.latest as head (updated by kai capture)
@@ -15304,6 +15545,17 @@ func runReviewOpen(cmd *cobra.Command, args []string) error {
 	fmt.Println("Other commands:")
 	fmt.Println("  kai ci plan              # See which tests to run")
 	fmt.Println("  kai review export <id>   # Export as markdown/HTML")
+
+	// Clean up session refs covered by this review.
+	// Session refs whose CreatedAt is ≤ now are considered reviewed.
+	// This makes "oldest remaining session ref" = "oldest unreviewed."
+	refMgr := ref.NewRefManager(db)
+	allRefs, _ := refMgr.List(nil)
+	for _, r := range allRefs {
+		if strings.HasPrefix(r.Name, "session.") && strings.HasSuffix(r.Name, ".base") {
+			refMgr.Delete(r.Name)
+		}
+	}
 
 	return nil
 }
@@ -19658,6 +19910,22 @@ var ciRunCmd = &cobra.Command{
 	RunE:  runCIRun,
 }
 
+var ciStatusCmd = &cobra.Command{
+	Use:   "status [snapshot-ref]",
+	Short: "Show trust level for a snapshot (unverified, agent-claimed, CI-verified)",
+	Long: `Shows the trust level for a snapshot based on CI evidence and agent assertions.
+
+Trust levels:
+  CI-verified     A CIRun with conclusion=success exists for this snapshot
+  Agent-claimed   An agent asserted tests-pass (via kai_checkpoint_now --assert)
+  Unverified      No CI ran and no agent assertion exists
+
+Examples:
+  kai ci status                # Check snap.latest
+  kai ci status @snap:prev     # Check previous snapshot`,
+	RunE: runCIStatus,
+}
+
 var ciLogsCmd = &cobra.Command{
 	Use:   "logs <run-id-or-number>",
 	Short: "Show logs for a CI run",
@@ -19726,6 +19994,76 @@ func resolveRunID(client *remote.ControlClient, org, repo, input string) string 
 		}
 	}
 	return input
+}
+
+func runCIStatus(cmd *cobra.Command, args []string) error {
+	db, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Resolve snapshot
+	snapRef := "snap.latest"
+	if len(args) > 0 {
+		snapRef = args[0]
+	}
+	snapID, err := resolveSnapshotID(db, snapRef)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", snapRef, err)
+	}
+	snapHex := util.BytesToHex(snapID)
+
+	// Query remote for CI runs matching this snapshot
+	baseURL, org, repo, remoteErr := getRemoteOrgRepo()
+	ciVerified := false
+	var matchingRun *remote.CIRun
+	if remoteErr == nil {
+		client := remote.NewControlClient(baseURL)
+		runs, _, err := client.ListCIRuns(org, repo, 20)
+		if err == nil {
+			for i, r := range runs {
+				// Match by SnapshotID (new field) or TriggerSHA (legacy)
+				if r.SnapshotID == snapHex || r.TriggerSHA == snapHex || r.TriggerSHA == snapHex[:12] {
+					matchingRun = &runs[i]
+					if r.Status == "completed" && r.Conclusion == "success" {
+						ciVerified = true
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Check for agent assertions (checkpoint_now with assert field)
+	// Agent assertions are stored in sync_events on the server. For now,
+	// check local session refs as a proxy — if a session.*.base ref exists
+	// whose base is ≤ this snapshot, an agent session was active.
+	// Full assertion query requires sync_events API (future).
+
+	fmt.Printf("Snapshot: %s\n", snapHex[:12])
+	fmt.Printf("Ref:      %s\n", snapRef)
+	fmt.Println()
+
+	if ciVerified && matchingRun != nil {
+		fmt.Printf("Trust:    ✓ CI-verified\n")
+		fmt.Printf("Run:      #%d %s (%s)\n", matchingRun.RunNumber, matchingRun.WorkflowName, matchingRun.Conclusion)
+	} else if matchingRun != nil {
+		status := matchingRun.Status
+		if matchingRun.Conclusion != "" {
+			status = matchingRun.Conclusion
+		}
+		fmt.Printf("Trust:    ○ CI ran but not passing\n")
+		fmt.Printf("Run:      #%d %s (%s)\n", matchingRun.RunNumber, matchingRun.WorkflowName, status)
+	} else {
+		fmt.Printf("Trust:    — Unverified\n")
+		fmt.Println("          No CI run found for this snapshot.")
+		if remoteErr != nil {
+			fmt.Println("          (no remote configured)")
+		}
+	}
+
+	return nil
 }
 
 func runCIRuns(cmd *cobra.Command, args []string) error {

@@ -218,6 +218,19 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.writeSessionFile()
 	defer s.removeSessionFile()
 
+	// Lock session base — the snapshot this session started from.
+	// Persists as a named ref so kai review open can find it after the session exits.
+	if s.db != nil && s.resolver != nil {
+		kind := ref.KindSnapshot
+		if result, err := s.resolver.Resolve("snap.latest", &kind); err == nil {
+			refMgr := ref.NewRefManager(s.db)
+			if err := refMgr.Set("session."+s.sessionID+".base", result.ID, ref.KindSnapshot); err != nil {
+				fmt.Fprintf(os.Stderr, "[kai-mcp] warning: could not write session base ref: %v\n", err)
+			}
+		}
+		// If snap.latest doesn't exist (fresh repo), skip silently — no meaningful base
+	}
+
 	return server.ServeStdio(srv)
 }
 
@@ -433,13 +446,23 @@ func (s *Server) writeSessionFile() {
 	clientVersion = s.clientVersion
 	s.clientMu.RUnlock()
 
+	// Record session base snapshot for observability (ref is source of truth)
+	var baseSnapshotHex string
+	if s.resolver != nil {
+		kind := ref.KindSnapshot
+		if result, err := s.resolver.Resolve("snap.latest", &kind); err == nil {
+			baseSnapshotHex = hex.EncodeToString(result.ID)
+		}
+	}
+
 	sessionData := map[string]interface{}{
-		"pid":           os.Getpid(),
-		"sessionId":     s.sessionID,
-		"startedAt":     time.Now().UnixMilli(),
-		"updatedAt":     time.Now().UnixMilli(),
-		"agent":         agent,
-		"clientVersion": clientVersion,
+		"pid":              os.Getpid(),
+		"sessionId":        s.sessionID,
+		"startedAt":        time.Now().UnixMilli(),
+		"updatedAt":        time.Now().UnixMilli(),
+		"agent":            agent,
+		"clientVersion":    clientVersion,
+		"baseSnapshotID":   baseSnapshotHex,
 	}
 	data, _ := json.Marshal(sessionData)
 	os.MkdirAll(s.kaiDir, 0755)
@@ -1058,8 +1081,10 @@ func (s *Server) registerTools(srv *server.MCPServer) {
 
 	add(
 		mcp.NewTool("kai_checkpoint_now",
-			mcp.WithDescription("Mark the current moment as a semantic checkpoint in the live-sync log. Use this when you've finished a coherent piece of work (feature complete, tests passing, a good place to stop) so reviewers can use the label as a compaction boundary. Does NOT run kai capture — it only writes a marker into sync_events that kai review --live and future compaction can key off of."),
+			mcp.WithDescription("Mark the current moment as a semantic checkpoint in the live-sync log. Use this when you've finished a coherent piece of work (feature complete, tests passing, a good place to stop) so reviewers can use the label as a compaction boundary. Optionally attach a structured trust assertion (e.g. tests-pass) for the review trust badge. Does NOT run kai capture."),
 			mcp.WithString("label", mcp.Required(), mcp.Description("Human-readable description of what this checkpoint represents, e.g. 'authentication refactor complete' or 'tests passing'")),
+			mcp.WithString("assert", mcp.Description("Structured trust assertion: tests-pass, types-ok, lints-clean, manual-verified")),
+			mcp.WithString("plan_hash", mcp.Description("Test plan hash for verification (optional, used with assert=tests-pass)")),
 		),
 		log("kai_checkpoint_now", s.handleCheckpointNow), false,
 	)
@@ -2658,6 +2683,32 @@ func (s *Server) handleCheckpointNow(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError("label must not be empty"), nil
 	}
 
+	// Optional structured trust assertion
+	assertVal := optString(req, "assert")
+	planHash := optString(req, "plan_hash")
+
+	if assertVal != "" {
+		valid := false
+		for _, a := range graph.ValidAssertions {
+			if a == assertVal {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"invalid assert value %q: must be one of %s",
+				assertVal, strings.Join(graph.ValidAssertions, ", "),
+			)), nil
+		}
+	}
+	if planHash != "" && assertVal == "" {
+		return mcp.NewToolResultError("plan_hash requires assert field"), nil
+	}
+	if planHash != "" && assertVal != "tests-pass" {
+		return mcp.NewToolResultError("plan_hash only valid with assert=tests-pass"), nil
+	}
+
 	if s.remoteClient == nil {
 		return mcp.NewToolResultError("no remote server configured (need git remote 'origin')"), nil
 	}
@@ -2670,23 +2721,26 @@ func (s *Server) handleCheckpointNow(ctx context.Context, req mcp.CallToolReques
 		}
 	}
 
-	// A marker is a zero-content push with a fixed sentinel file path. It
-	// still lands in sync_events with a real seq, so late joiners / replay
-	// see it in-order with real file pushes. The sentinel path makes it
-	// easy to filter out from "files touched" views.
-	const markerFile = ".kai/checkpoint"
-	if err := s.remoteClient.SyncPushFileReason(agentName, s.syncChannelID, markerFile, "", "", "agent_milestone", label); err != nil {
+	// Push milestone via dedicated method that supports assert/plan_hash fields
+	if err := s.remoteClient.SyncPushMilestone(agentName, s.syncChannelID, label, assertVal, planHash); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("checkpoint push failed: %v", err)), nil
 	}
 
-	fmt.Fprintf(os.Stderr, "[kai-sync] checkpoint: agent=%s label=%q\n", agentName, label)
+	fmt.Fprintf(os.Stderr, "[kai-sync] checkpoint: agent=%s label=%q assert=%s\n", agentName, label, assertVal)
 
-	return jsonResult(map[string]interface{}{
+	result := map[string]interface{}{
 		"status": "marked",
 		"reason": "agent_milestone",
 		"label":  label,
 		"agent":  agentName,
-	})
+	}
+	if assertVal != "" {
+		result["assert"] = assertVal
+	}
+	if planHash != "" {
+		result["plan_hash"] = planHash
+	}
+	return jsonResult(result)
 }
 
 func (s *Server) syncStatePath() string {

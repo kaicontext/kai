@@ -10,7 +10,8 @@ const (
 	KindSymbol        NodeKind = "Symbol"
 	KindSnapshot      NodeKind = "Snapshot"
 	KindChangeSet     NodeKind = "ChangeSet"
-	KindChangeType    NodeKind = "ChangeType"
+	KindChangeType     NodeKind = "ChangeType"
+	KindClassification NodeKind = KindChangeType // Alias: user-facing name for semantic change classifications
 	KindWorkspace     NodeKind = "Workspace"
 	KindReview        NodeKind = "Review"
 	KindReviewComment NodeKind = "ReviewComment"
@@ -42,7 +43,13 @@ const (
 	EdgeTests        EdgeType = "TESTS"         // File -> File (test file tests source file)
 	EdgeAttributedIn EdgeType = "ATTRIBUTED_IN" // Snapshot -> AuthorshipLog
 	EdgeHasSyncLog   EdgeType = "HAS_SYNC_LOG"  // Snapshot -> SyncLog
+	EdgeHasCIRun     EdgeType = "HAS_CI_RUN"    // Snapshot -> CIRun
 )
+
+// ValidAssertions is the set of allowed values for the assert field on
+// checkpoint_now milestones. Used by the MCP handler for validation and
+// by the UI for badge rendering.
+var ValidAssertions = []string{"tests-pass", "types-ok", "lints-clean", "manual-verified"}
 
 // Node represents a node in the graph.
 type Node struct {

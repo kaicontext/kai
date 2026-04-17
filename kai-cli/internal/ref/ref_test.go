@@ -668,3 +668,92 @@ func TestAmbiguityError(t *testing.T) {
 		t.Logf("prefix '000' returned error: %v", err)
 	}
 }
+
+func TestSessionBaseRef_OldestSelected(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	snap1 := createTestSnapshot(t, db)
+	snap2 := createTestSnapshot(t, db)
+
+	refMgr := NewRefManager(db)
+
+	// Write two session base refs — morning and afternoon
+	if err := refMgr.Set("session.mcp_1_1000.base", snap1, KindSnapshot); err != nil {
+		t.Fatalf("setting session ref 1: %v", err)
+	}
+	if err := refMgr.Set("session.mcp_2_2000.base", snap2, KindSnapshot); err != nil {
+		t.Fatalf("setting session ref 2: %v", err)
+	}
+
+	// Find oldest session base (should be snap1)
+	allRefs, err := refMgr.List(nil)
+	if err != nil {
+		t.Fatalf("listing refs: %v", err)
+	}
+
+	var oldest *Ref
+	for _, r := range allRefs {
+		if len(r.Name) > 8 && r.Name[:8] == "session." && r.Name[len(r.Name)-5:] == ".base" {
+			if oldest == nil || r.CreatedAt < oldest.CreatedAt {
+				oldest = r
+			}
+		}
+	}
+
+	if oldest == nil {
+		t.Fatal("expected to find a session base ref")
+	}
+	if util.BytesToHex(oldest.TargetID) != util.BytesToHex(snap1) {
+		t.Errorf("expected oldest session base to point to snap1, got %s", oldest.Name)
+	}
+}
+
+func TestSessionBaseRef_CleanupAfterReview(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	snap1 := createTestSnapshot(t, db)
+	snap2 := createTestSnapshot(t, db)
+
+	refMgr := NewRefManager(db)
+
+	// Write two session refs
+	refMgr.Set("session.mcp_1_1000.base", snap1, KindSnapshot)
+	refMgr.Set("session.mcp_2_2000.base", snap2, KindSnapshot)
+
+	// Simulate review creation cleanup: delete all session refs
+	allRefs, _ := refMgr.List(nil)
+	for _, r := range allRefs {
+		if len(r.Name) > 8 && r.Name[:8] == "session." && r.Name[len(r.Name)-5:] == ".base" {
+			refMgr.Delete(r.Name)
+		}
+	}
+
+	// Verify both are gone
+	allRefs, _ = refMgr.List(nil)
+	for _, r := range allRefs {
+		if len(r.Name) > 8 && r.Name[:8] == "session." {
+			t.Errorf("expected session ref to be deleted, found %s", r.Name)
+		}
+	}
+}
+
+func TestSessionBaseRef_NoSessionFallsBack(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	refMgr := NewRefManager(db)
+
+	// No session refs exist — scan should find nothing
+	allRefs, _ := refMgr.List(nil)
+	var found *Ref
+	for _, r := range allRefs {
+		if len(r.Name) > 8 && r.Name[:8] == "session." && r.Name[len(r.Name)-5:] == ".base" {
+			found = r
+		}
+	}
+	if found != nil {
+		t.Error("expected no session base ref in empty DB")
+	}
+}

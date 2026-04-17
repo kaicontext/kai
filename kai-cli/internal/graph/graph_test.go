@@ -1261,3 +1261,45 @@ func bytesToHex(b []byte) string {
 	}
 	return string(result)
 }
+
+func TestHasCIRunEdge(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a snapshot node
+	snapID, err := db.InsertNode(tx, KindSnapshot, map[string]interface{}{
+		"sourceType": "test",
+		"fileCount":  float64(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a CI run ID (simulated)
+	ciRunID := Blake3Hash([]byte("cirun:test-run-123"))
+
+	// Write HAS_CI_RUN edge
+	if err := db.InsertEdge(tx, snapID, EdgeHasCIRun, ciRunID, nil); err != nil {
+		t.Fatalf("inserting HAS_CI_RUN edge: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query the edge back
+	edges, err := db.GetEdges(snapID, EdgeHasCIRun)
+	if err != nil {
+		t.Fatalf("getting edges: %v", err)
+	}
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 HAS_CI_RUN edge, got %d", len(edges))
+	}
+	if !bytes.Equal(edges[0].Dst, ciRunID) {
+		t.Error("edge destination doesn't match CI run ID")
+	}
+}
