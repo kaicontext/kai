@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.0"
+var Version = "0.11.1"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -4179,6 +4179,8 @@ CREATE INDEX IF NOT EXISTS authorship_file ON authorship_ranges(snapshot_id, fil
 				_, createErr := ctrl.CreateRepo(selectedOrg.Slug, projectName, "private")
 				if createErr != nil {
 					debugf("could not create repo: %v", createErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "Created repo: %s/%s\n", selectedOrg.Slug, projectName)
 				}
 			}
 
