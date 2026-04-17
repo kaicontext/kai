@@ -2091,8 +2091,33 @@ func (s *Server) handleCheckpoint(ctx context.Context, req mcp.CallToolRequest) 
 	}
 	model := optString(req, "model")
 
+	// Resolve the file to an absolute path to detect cross-project edits
+	absFile := file
+	if !filepath.IsAbs(file) {
+		absFile = filepath.Join(s.workDir, file)
+	}
+	absFile = filepath.Clean(absFile)
+
+	// Determine which project owns this file and pick the right writer
+	writer := s.cpWriter
+	relFile := file
+	targetProject := s.workDir
+
+	if !strings.HasPrefix(absFile, s.workDir+string(filepath.Separator)) {
+		// File is outside our project root — find its .kai/ directory
+		if foreignKaiDir := findKaiDir(absFile); foreignKaiDir != "" {
+			foreignProject := filepath.Dir(foreignKaiDir)
+			writer = authorship.NewCheckpointWriter(foreignKaiDir, s.sessionID)
+			targetProject = foreignProject
+			// Make the file path relative to the foreign project
+			if r, err := filepath.Rel(foreignProject, absFile); err == nil {
+				relFile = r
+			}
+		}
+	}
+
 	cp := authorship.CheckpointRecord{
-		File:       file,
+		File:       relFile,
 		StartLine:  startLine,
 		EndLine:    endLine,
 		Action:     action,
@@ -2102,18 +2127,42 @@ func (s *Server) handleCheckpoint(ctx context.Context, req mcp.CallToolRequest) 
 		Timestamp:  time.Now().UnixMilli(),
 	}
 
-	seq, err := s.cpWriter.Write(cp)
+	seq, err := writer.Write(cp)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("writing checkpoint: %v", err)), nil
 	}
 
-	return jsonResult(map[string]interface{}{
+	result := map[string]interface{}{
 		"status":     "recorded",
 		"session_id": s.sessionID,
 		"seq":        seq,
-		"file":       file,
+		"file":       relFile,
 		"lines":      fmt.Sprintf("%d-%d", startLine, endLine),
-	})
+	}
+	if targetProject != s.workDir {
+		result["project"] = targetProject
+	}
+	return jsonResult(result)
+}
+
+// findKaiDir walks up from a file path looking for a .kai/ directory.
+// Returns the .kai path if found, empty string otherwise.
+func findKaiDir(absFilePath string) string {
+	dir := filepath.Dir(absFilePath)
+	for {
+		candidate := filepath.Join(dir, ".kai")
+		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+			// Verify it's a real Kai project (has db.sqlite)
+			if _, err := os.Stat(filepath.Join(candidate, "db.sqlite")); err == nil {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "" // reached filesystem root
+		}
+		dir = parent
+	}
 }
 
 func (s *Server) handleBlame(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
