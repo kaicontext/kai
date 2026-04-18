@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.3"
+var Version = "0.11.4"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -14132,6 +14132,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			Old:   oldTarget,
 			New:   r.TargetID,
 			Force: pushForce,
+			Meta:  r.Meta,
 		})
 	}
 

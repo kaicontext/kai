@@ -166,10 +166,11 @@ type RefUpdateResponse struct {
 
 // BatchRefUpdate represents a single ref update in a batch.
 type BatchRefUpdate struct {
-	Name  string `json:"name"`
-	Old   []byte `json:"old,omitempty"`
-	New   []byte `json:"new"`
-	Force bool   `json:"force,omitempty"`
+	Name  string            `json:"name"`
+	Old   []byte            `json:"old,omitempty"`
+	New   []byte            `json:"new"`
+	Force bool              `json:"force,omitempty"`
+	Meta  map[string]string `json:"meta,omitempty"`
 }
 
 // BatchRefUpdateRequest updates multiple refs atomically.
