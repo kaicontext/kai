@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.2"
+var Version = "0.11.3"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -10306,6 +10306,25 @@ type hookToolInput struct {
 // that came through the AI's tool runner — user keystrokes in the
 // editor (including comments the user types while Claude is idle) never
 // fire this hook and therefore never get attributed to the agent.
+// findForeignKaiDir walks up from a file path looking for a .kai/ directory
+// with a db.sqlite (a real Kai project). Returns the .kai path or "" if none.
+func findForeignKaiDir(absFilePath string) string {
+	dir := filepath.Dir(absFilePath)
+	for {
+		candidate := filepath.Join(dir, ".kai")
+		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(candidate, "db.sqlite")); err == nil {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 func runCheckpoint(cmd *cobra.Command, args []string) error {
 	// Resolve project dir from cwd (kaiDir is relative to it).
 	workDir, err := os.Getwd()
@@ -10337,18 +10356,34 @@ func runCheckpoint(cmd *cobra.Command, args []string) error {
 	if file == "" {
 		return fmt.Errorf("no file path given (pass --file or pipe a PostToolUse JSON payload)")
 	}
-	// Make file path relative to workDir so it matches git paths.
+	// Resolve file to absolute path for cross-project detection
+	var absFile string
 	if filepath.IsAbs(file) {
-		if rel, err := filepath.Rel(workDir, file); err == nil {
-			file = rel
+		absFile = filepath.Clean(file)
+	} else {
+		absFile = filepath.Clean(filepath.Join(workDir, file))
+	}
+
+	// Cross-project handling: if the file is outside our project root,
+	// find its own .kai/ directory and write the checkpoint there.
+	if !strings.HasPrefix(absFile, workDir+string(filepath.Separator)) {
+		if foreignKaiDir := findForeignKaiDir(absFile); foreignKaiDir != "" {
+			foreignProject := filepath.Dir(foreignKaiDir)
+			workDir = foreignProject
+			kd = foreignKaiDir
+		} else {
+			return nil // file not in any kai project — skip silently
 		}
 	}
-	// Guard against editor buffers for files outside the kai project.
+
+	// Make file path relative to the (possibly updated) workDir
+	if rel, err := filepath.Rel(workDir, absFile); err == nil {
+		file = rel
+	}
+	// Guard against editor buffers outside any kai project
 	if strings.HasPrefix(file, "..") {
 		return nil
 	}
-
-	absFile := filepath.Join(workDir, file)
 	newContent, err := os.ReadFile(absFile)
 	if err != nil {
 		return nil // file vanished or unreadable — nothing to checkpoint
