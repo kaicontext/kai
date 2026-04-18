@@ -253,6 +253,13 @@ func (m *Matcher) LoadDefaults() {
 		"vendor/",
 		".bundle/",
 
+		// Framework-generated code (regenerated on every build)
+		".svelte-kit/generated/",
+		".next/cache/",
+		".nuxt/dist/",
+		".astro/types.d.ts",
+		".angular/cache/",
+
 		// Virtual environments
 		"env/",
 		"venv/",
