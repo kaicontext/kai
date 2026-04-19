@@ -2505,9 +2505,13 @@ out-of-date kai-managed git hooks).`,
 }
 
 const kaiHookMarker = "# kai-managed-hook"
-const kaiHookVersion = "v2"
+const kaiHookVersion = "v3"
 
-// preCommitHookScript is a best-effort post-commit/pre-commit script.
+// All hook scripts early-exit when KAI_BRIDGE_INPROGRESS=1. Set by kai itself
+// when it is the one driving the git operation (e.g. milestone→commit bridge),
+// so we don't re-trigger the very hook that would re-enter kai.
+
+// preCommitHookScript is a best-effort pre-commit script.
 // CRITICAL: this script MUST NEVER block git. Every failure mode (missing kai
 // binary, missing .kai dir, failed capture) silently no-ops with exit 0.
 // Users who deleted .kai or uninstalled kai must still be able to commit.
@@ -2516,6 +2520,9 @@ const preCommitHookScript = `#!/bin/sh
 # Auto-installed by 'kai init' / 'kai hook install'.
 # Best-effort: never blocks git. Remove with: kai hook uninstall
 
+if [ "${KAI_BRIDGE_INPROGRESS:-}" = "1" ]; then
+  exit 0
+fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
@@ -2532,6 +2539,9 @@ const prePushHookScript = `#!/bin/sh
 # Auto-installed by 'kai init' / 'kai hook install'.
 # Best-effort: never blocks git push. Remove with: kai hook uninstall
 
+if [ "${KAI_BRIDGE_INPROGRESS:-}" = "1" ]; then
+  exit 0
+fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
@@ -2539,6 +2549,29 @@ if [ ! -d .kai ]; then
   exit 0
 fi
 kai push >/dev/null 2>&1 || true
+exit 0
+`
+
+// postCommitHookScript imports each new git commit as a kai snapshot. Only
+// installed when the kai↔git bridge is enabled (kai init --git-bridge).
+// Idempotent via content-addressing; skips commits that carry a Kai-Snapshot:
+// trailer (they came from kai's own milestone→commit path).
+const postCommitHookScript = `#!/bin/sh
+` + kaiHookMarker + ` ` + kaiHookVersion + `
+# Auto-installed by 'kai init --git-bridge'.
+# Best-effort: never blocks git. Remove with: kai hook uninstall
+
+if [ "${KAI_BRIDGE_INPROGRESS:-}" = "1" ]; then
+  exit 0
+fi
+if ! command -v kai >/dev/null 2>&1; then
+  exit 0
+fi
+if [ ! -d .kai ]; then
+  exit 0
+fi
+SHA=$(git rev-parse HEAD 2>/dev/null) || exit 0
+kai bridge import "$SHA" >/dev/null 2>&1 || true
 exit 0
 `
 
@@ -2573,6 +2606,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s git repository detected\n", ok)
 		checkHook("pre-commit", preCommitHookScript)
 		checkHook("pre-push", prePushHookScript)
+		if bridgeEnabled() {
+			checkHook("post-commit", postCommitHookScript)
+		}
 	} else {
 		fmt.Printf("%s not a git repository (hook checks skipped)\n", warn)
 	}
@@ -2647,7 +2683,7 @@ func checkHook(hookName, currentScript string) {
 	fmt.Printf("  ! %s hook: STALE kai-managed hook (could block git on failure). Run 'kai doctor --fix'\n", hookName)
 }
 
-// selfHealHooks silently upgrades any old (v1) kai-managed git hook to the
+// selfHealHooks silently upgrades any old kai-managed git hook to the
 // current safe version. Called from PersistentPreRun on every kai invocation.
 // Must be cheap, must never panic, must never print anything.
 func selfHealHooks() {
@@ -2657,6 +2693,140 @@ func selfHealHooks() {
 	}
 	upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "pre-commit"), preCommitHookScript)
 	upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "pre-push"), prePushHookScript)
+	if bridgeEnabled() {
+		upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "post-commit"), postCommitHookScript)
+	}
+}
+
+// bridgeEnabled reports whether the kai↔git bridge is turned on for this
+// repo. Presence of .kai/bridge-enabled is the sentinel; the file is written
+// by 'kai init --git-bridge' (or 'kai bridge enable', future).
+func bridgeEnabled() bool {
+	_, err := os.Stat(filepath.Join(".kai", "bridge-enabled"))
+	return err == nil
+}
+
+// kaiSnapshotTrailerRe matches the Kai-Snapshot trailer in a git commit
+// message. Its presence means the commit was created by kai's milestone→commit
+// path, so importing it back into kai would be a no-op loop.
+var kaiSnapshotTrailerRe = regexp.MustCompile(`(?m)^Kai-Snapshot:\s*([0-9a-fA-F]+)\s*$`)
+
+var bridgeCmd = &cobra.Command{
+	Use:   "bridge",
+	Short: "kai↔git bridge management",
+	Long: `Manage the kai↔git bridge.
+
+When enabled (via 'kai init --git-bridge'), the bridge makes kai and git
+mutually visible:
+  • Git commits authored outside kai are imported as kai snapshots
+    (via the post-commit hook running 'kai bridge import').
+  • Kai milestone checkpoints become git commits with Kai-* trailers.
+
+The bridge is re-entrancy-safe: kai-authored commits are skipped on import,
+and kai's pre-commit/pre-push hooks short-circuit when driven by the bridge.`,
+}
+
+var bridgeStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show bridge status for this repo",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if bridgeEnabled() {
+			fmt.Println("kai↔git bridge: enabled")
+		} else {
+			fmt.Println("kai↔git bridge: disabled (run 'kai init --git-bridge')")
+		}
+		return nil
+	},
+}
+
+var bridgeImportCmd = &cobra.Command{
+	Use:   "import <commit-sha>",
+	Short: "Import a git commit as a kai snapshot (called by post-commit hook)",
+	Long: `Import the named git commit as a kai snapshot.
+
+Idempotent and re-entrancy-safe:
+  • If the commit message carries a Kai-Snapshot: trailer, it was created by
+    kai's own milestone→commit path and we skip (no double-import).
+  • If a ref 'git.<short-sha>' already exists, we skip.
+  • Otherwise we run 'kai capture' and write 'git.<short-sha>' pointing at
+    the resulting snap.latest, plus a 'git.HEAD' convenience ref.
+
+Designed to be called from .git/hooks/post-commit — never errors the hook.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runBridgeImport,
+}
+
+func runBridgeImport(cmd *cobra.Command, args []string) error {
+	if !bridgeEnabled() {
+		// Hook may have been installed manually; be a no-op instead of loud.
+		return nil
+	}
+	sha := strings.TrimSpace(args[0])
+	if sha == "" {
+		return nil
+	}
+	// Normalize — accept short or full, resolve to full via git. --verify
+	// makes rev-parse reject 40-char hex strings that aren't real objects
+	// (without it, rev-parse cheerfully echoes any well-formed sha). The
+	// ^{commit} peel ensures we resolved to a commit, not a tree or tag.
+	out, err := exec.Command("git", "rev-parse", "--verify", sha+"^{commit}").Output()
+	if err != nil {
+		return nil // can't resolve; best-effort no-op
+	}
+	fullSHA := strings.TrimSpace(string(out))
+	if fullSHA == "" {
+		return nil
+	}
+	shortSHA := fullSHA
+	if len(shortSHA) > 12 {
+		shortSHA = shortSHA[:12]
+	}
+	refName := "git." + shortSHA
+
+	// Provenance check: if the commit message has a Kai-Snapshot trailer it
+	// was authored by kai itself — importing would loop.
+	msg, err := exec.Command("git", "log", "-1", "--format=%B", fullSHA).Output()
+	if err == nil && kaiSnapshotTrailerRe.Match(msg) {
+		debugf("bridge import: %s has Kai-Snapshot trailer, skipping", shortSHA)
+		return nil
+	}
+
+	// Open DB and bail early if this ref already exists (idempotent re-run).
+	db, err := openDB()
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	refMgr := ref.NewRefManager(db)
+	if existing, _ := refMgr.Get(refName); existing != nil {
+		debugf("bridge import: %s already mapped, skipping", refName)
+		return nil
+	}
+
+	// Capture current tree, then point git.<sha> at whatever snap.latest becomes.
+	// runCapture is idempotent (content-addressed) — if nothing changed since
+	// the last capture, snap.latest is unchanged and the ref just points there.
+	initMode = true
+	defer func() { initMode = false }()
+	if err := runCapture(cmd, nil); err != nil {
+		debugf("bridge import: capture failed: %v", err)
+		return nil
+	}
+	latest, _ := refMgr.Get("snap.latest")
+	if latest == nil {
+		debugf("bridge import: no snap.latest after capture; nothing to ref")
+		return nil
+	}
+	meta := map[string]string{
+		"source":     "bridge_import_git",
+		"git_commit": fullSHA,
+	}
+	if err := refMgr.SetWithMeta(refName, latest.TargetID, ref.KindSnapshot, "", meta); err != nil {
+		debugf("bridge import: writing %s: %v", refName, err)
+		return nil
+	}
+	_ = refMgr.SetWithMeta("git.HEAD", latest.TargetID, ref.KindSnapshot, "", meta)
+	return nil
 }
 
 // upgradeIfOldKaiHook overwrites a kai-managed hook in place if it isn't at
@@ -2740,6 +2910,34 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			}
 		} else if !initMode {
 			fmt.Println("Installed pre-push hook: .git/hooks/pre-push")
+		}
+	}
+
+	// post-commit — only when the kai↔git bridge is enabled for this repo
+	if bridgeEnabled() {
+		postHookPath := filepath.Join(".git", "hooks", "post-commit")
+		if data, err := os.ReadFile(postHookPath); err == nil {
+			if !strings.Contains(string(data), kaiHookMarker) {
+				if !initMode {
+					fmt.Println("Note: post-commit hook already exists (not managed by Kai). Skipping.")
+				}
+			} else {
+				if err := os.WriteFile(postHookPath, []byte(postCommitHookScript), 0755); err != nil {
+					if !initMode {
+						fmt.Printf("Warning: could not upgrade post-commit hook: %v\n", err)
+					}
+				} else if !initMode {
+					fmt.Println("Upgraded post-commit hook: .git/hooks/post-commit")
+				}
+			}
+		} else {
+			if err := os.WriteFile(postHookPath, []byte(postCommitHookScript), 0755); err != nil {
+				if !initMode {
+					fmt.Printf("Warning: could not install post-commit hook: %v\n", err)
+				}
+			} else if !initMode {
+				fmt.Println("Installed post-commit hook: .git/hooks/post-commit")
+			}
 		}
 	}
 
@@ -3166,6 +3364,7 @@ func init() {
 	initCmd.GroupID = groupStart
 	captureCmd.GroupID = groupStart
 	initCmd.Flags().BoolVar(&initExplain, "explain", false, "Show detailed explanation of what this command does")
+	initCmd.Flags().BoolVar(&initGitBridge, "git-bridge", false, "Enable the kai↔git bridge (installs post-commit hook; kai milestones become git commits)")
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(captureCmd)
 	rootCmd.AddCommand(importCmd)
@@ -3319,6 +3518,10 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Apply automatic repairs (currently: upgrade stale kai-managed git hooks)")
 	rootCmd.AddCommand(doctorCmd)
 
+	bridgeCmd.AddCommand(bridgeImportCmd)
+	bridgeCmd.AddCommand(bridgeStatusCmd)
+	rootCmd.AddCommand(bridgeCmd)
+
 	// Add auth subcommands
 	authLoginCmd.Flags().StringVar(&authLoginToken, "token", "", "Access token for non-interactive login (CI)")
 	authCmd.AddCommand(authLoginCmd)
@@ -3375,6 +3578,7 @@ func debugf(format string, args ...any) {
 // skipModulesFile is set by clone to skip creating kai.modules.yaml
 var skipModulesFile bool
 var initExplain bool
+var initGitBridge bool
 
 // initMode suppresses chatty output from sub-commands called during kai init
 var initMode bool
@@ -3523,6 +3727,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Ensure .kai is in .gitignore
 	ensureGitignore(".kai")
+
+	// --git-bridge: mark bridge enabled before runHookInstall runs so the
+	// post-commit hook gets written. Requires .git/ to actually exist.
+	if initGitBridge {
+		if _, err := os.Stat(".git"); err != nil {
+			return fmt.Errorf("--git-bridge requires a git repository (no .git directory)")
+		}
+		sentinel := filepath.Join(kaiDir, "bridge-enabled")
+		if err := os.WriteFile(sentinel, []byte("1\n"), 0644); err != nil {
+			return fmt.Errorf("enabling git bridge: %w", err)
+		}
+	}
 
 	// Create objects directory
 	objPath := filepath.Join(kaiDir, objectsDir)
