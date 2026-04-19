@@ -3069,6 +3069,25 @@ func (s *Server) applySyncContent(relPath, absPath string, incoming []byte, agen
 					})
 				}
 			}
+		} else {
+			// No semantic merger for this extension (json, yaml, md, sh, etc.).
+			// Try a naive line-based 3-way merge; if the peer and the local
+			// edited disjoint line ranges we can still apply cleanly. This
+			// covers the common case of two agents editing different sections
+			// of a package.json or config file.
+			if merged, ok := naiveLineMerge3(base, local, incoming); ok {
+				toWrite = merged
+				fmt.Fprintf(os.Stderr, "[kai-sync] line-merged %s (no semantic merger for ext)\n", relPath)
+				s.syncLogWriter.Write(synclog.SyncLogEntry{
+					Event:     synclog.EventMerge,
+					File:      relPath,
+					Agent:     s.syncAgentName,
+					PeerAgent: agent,
+					Channel:   s.syncChannelID,
+					Timestamp: time.Now().UnixMilli(),
+					Detail:    "line-based 3-way merge",
+				})
+			}
 		}
 		if toWrite == nil {
 			fmt.Fprintf(os.Stderr, "[kai-sync] conflict on %s from %s — local edits preserved\n", relPath, agent)
@@ -3566,4 +3585,93 @@ func detectSyncLang(path string) string {
 		return "rust"
 	}
 	return ""
+}
+
+// naiveLineMerge3 performs a line-based 3-way merge. It returns the merged
+// bytes and true when local and incoming edited disjoint hunks relative to
+// base. If either side modified the same base line range, it returns ok=false
+// so the caller can fall through to conflict handling.
+//
+// Algorithm: diff base→local and base→incoming. If the changed line-ranges
+// don't overlap, apply both sets of changes to base. Not a full LCS; we use
+// a simple common-prefix / common-suffix trim to isolate the changed region
+// on each side — sufficient for the common case (two agents editing different
+// sections of a package.json / yaml / markdown file).
+func naiveLineMerge3(base, local, incoming []byte) ([]byte, bool) {
+	// Fast path: one side unchanged.
+	if bytes.Equal(base, local) {
+		return incoming, true
+	}
+	if bytes.Equal(base, incoming) {
+		return local, true
+	}
+	if bytes.Equal(local, incoming) {
+		return local, true
+	}
+
+	bLines := splitLinesKeepNL(base)
+	lLines := splitLinesKeepNL(local)
+	iLines := splitLinesKeepNL(incoming)
+
+	lStart, lEnd, lNew := diffRange(bLines, lLines)
+	iStart, iEnd, iNew := diffRange(bLines, iLines)
+
+	// Disjoint hunks: local's changed base-range ends before incoming's starts,
+	// or vice versa. (Using half-open [start, end).)
+	if lEnd <= iStart {
+		// local first, then incoming
+		out := make([][]byte, 0, len(bLines)+len(lNew)+len(iNew))
+		out = append(out, bLines[:lStart]...)
+		out = append(out, lNew...)
+		out = append(out, bLines[lEnd:iStart]...)
+		out = append(out, iNew...)
+		out = append(out, bLines[iEnd:]...)
+		return bytes.Join(out, nil), true
+	}
+	if iEnd <= lStart {
+		out := make([][]byte, 0, len(bLines)+len(lNew)+len(iNew))
+		out = append(out, bLines[:iStart]...)
+		out = append(out, iNew...)
+		out = append(out, bLines[iEnd:lStart]...)
+		out = append(out, lNew...)
+		out = append(out, bLines[lEnd:]...)
+		return bytes.Join(out, nil), true
+	}
+	return nil, false
+}
+
+// splitLinesKeepNL splits bytes into lines, keeping the trailing newline on
+// each line. A final line without newline is returned as its own element.
+func splitLinesKeepNL(b []byte) [][]byte {
+	if len(b) == 0 {
+		return nil
+	}
+	var out [][]byte
+	start := 0
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\n' {
+			out = append(out, b[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(b) {
+		out = append(out, b[start:])
+	}
+	return out
+}
+
+// diffRange returns the half-open range [start, end) of base lines that were
+// changed to produce other, plus the replacement line slice. Computed by
+// trimming the common prefix and suffix.
+func diffRange(base, other [][]byte) (int, int, [][]byte) {
+	n, m := len(base), len(other)
+	prefix := 0
+	for prefix < n && prefix < m && bytes.Equal(base[prefix], other[prefix]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < n-prefix && suffix < m-prefix && bytes.Equal(base[n-1-suffix], other[m-1-suffix]) {
+		suffix++
+	}
+	return prefix, n - suffix, other[prefix : m-suffix]
 }

@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.6"
+var Version = "0.11.7"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2011,8 +2011,9 @@ var (
 	remoteRepo   string
 
 	// Clone flags
-	cloneTenant string
-	cloneRepo   string
+	cloneTenant  string
+	cloneRepo    string
+	cloneKaiOnly bool
 
 	// Pull flags
 	pullForce bool
@@ -2600,13 +2601,29 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// checkHook reports the status of one git hook and, if --fix is set and the
-// hook is a stale kai-managed script, upgrades it in place.
+// checkHook reports the status of one git hook and, if --fix is set:
+//   - installs the hook if it's missing
+//   - upgrades the hook if it's a stale kai-managed script
+//
+// Foreign hooks are left untouched either way.
 func checkHook(hookName, currentScript string) {
 	path := filepath.Join(".git", "hooks", hookName)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Printf("  - %s hook: not installed\n", hookName)
+		// Hook file doesn't exist.
+		if doctorFix {
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				fmt.Printf("  ✗ %s hook: install FAILED: %v\n", hookName, err)
+				return
+			}
+			if err := os.WriteFile(path, []byte(currentScript), 0755); err != nil {
+				fmt.Printf("  ✗ %s hook: install FAILED: %v\n", hookName, err)
+				return
+			}
+			fmt.Printf("  ✓ %s hook: installed (%s)\n", hookName, kaiHookVersion)
+			return
+		}
+		fmt.Printf("  - %s hook: not installed (run 'kai doctor --fix' to install)\n", hookName)
 		return
 	}
 	s := string(data)
@@ -2884,6 +2901,7 @@ func init() {
 	// Clone flags
 	cloneCmd.Flags().StringVar(&cloneTenant, "tenant", "", "Tenant/org name (extracted from URL if not specified)")
 	cloneCmd.Flags().StringVar(&cloneRepo, "repo", "", "Repository name (extracted from URL if not specified)")
+	cloneCmd.Flags().BoolVar(&cloneKaiOnly, "kai-only", false, "Clone from Kai only (skip git); materializes files from the latest snapshot on the remote")
 
 	// Fetch flags
 	pullCmd.Flags().BoolVar(&pullForce, "force", false, "Pull even if local has unpushed snapshots")
@@ -14712,7 +14730,233 @@ func runPull(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runCloneKaiOnly clones a repository that exists only on kaicontext.com,
+// with no git backing. Creates a bare .kai/ directory, fetches the snapshot
+// graph from the server, and materializes files from snap.main (falling back
+// to snap.latest) into the working directory.
+func runCloneKaiOnly(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("URL required")
+	}
+	rawURL := args[0]
+
+	// Parse URL into serverURL/tenant/repo.
+	// Accepts: https://kaicontext.com/org/repo
+	//          http://localhost:8080/org/repo
+	//          kaicontext.com/org/repo (scheme inferred)
+	//          org/repo (defaults to DefaultServer)
+	serverURL := remote.DefaultServer
+	var tenant, repo string
+	if cloneTenant != "" && cloneRepo != "" {
+		tenant = cloneTenant
+		repo = cloneRepo
+		if !strings.HasPrefix(rawURL, "http") && !strings.Contains(rawURL, "/") {
+			// URL was actually just a shorthand that should be used as-is
+		} else {
+			serverURL = rawURL
+		}
+	} else {
+		u := rawURL
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			if strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1") {
+				u = "http://" + u
+			} else {
+				u = "https://" + u
+			}
+		}
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return fmt.Errorf("parsing URL: %w", err)
+		}
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) < 2 {
+			return fmt.Errorf("URL must include /<tenant>/<repo>")
+		}
+		tenant, repo = parts[0], parts[1]
+		serverURL = parsed.Scheme + "://" + parsed.Host
+	}
+
+	// Determine target directory
+	dirName := repo
+	if len(args) > 1 {
+		dirName = args[1]
+	}
+	absDir, err := filepath.Abs(dirName)
+	if err != nil {
+		return fmt.Errorf("resolving target directory: %w", err)
+	}
+
+	// Refuse to overwrite an existing non-empty directory
+	if entries, err := os.ReadDir(absDir); err == nil && len(entries) > 0 {
+		return fmt.Errorf("directory %q already exists and is not empty", dirName)
+	}
+	if err := os.MkdirAll(absDir, 0755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
+	}
+
+	fmt.Printf("Cloning %s/%s from %s into %s...\n", tenant, repo, serverURL, dirName)
+
+	// Set up .kai/ directory and DB inside the target
+	kaiPath := filepath.Join(absDir, ".kai")
+	objPath := filepath.Join(kaiPath, objectsDir)
+	if err := os.MkdirAll(objPath, 0755); err != nil {
+		return fmt.Errorf("creating .kai directory: %w", err)
+	}
+	dbPath := filepath.Join(kaiPath, dbFile)
+	db, err := graph.Open(dbPath, objPath)
+	if err != nil {
+		return fmt.Errorf("opening local database: %w", err)
+	}
+	defer db.Close()
+	if err := applyDBSchema(db); err != nil {
+		return fmt.Errorf("initializing schema: %w", err)
+	}
+
+	// We need to run subsequent operations from the new directory so that
+	// "origin" remote config and fetch write to the right .kai/.
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(absDir); err != nil {
+		return fmt.Errorf("chdir %s: %w", absDir, err)
+	}
+	defer os.Chdir(origDir)
+
+	// Set the remote
+	if err := remote.ForceSetRemote("origin", &remote.RemoteEntry{
+		URL:    serverURL,
+		Tenant: tenant,
+		Repo:   repo,
+	}); err != nil {
+		return fmt.Errorf("setting remote: %w", err)
+	}
+
+	// Build remote client and verify it's reachable + that the repo exists
+	client, err := remote.NewClientForRemote("origin")
+	if err != nil {
+		return fmt.Errorf("creating client: %w", err)
+	}
+	if err := client.Health(); err != nil {
+		return fmt.Errorf("cannot connect to %s: %w", client.BaseURL, err)
+	}
+
+	// Pick the head ref: prefer snap.main, fall back to snap.latest
+	fmt.Println("Resolving head snapshot...")
+	var headRef *remote.RefEntry
+	for _, name := range []string{"snap.main", "snap.latest"} {
+		r, err := client.GetRef(name)
+		if err == nil && r != nil {
+			headRef = r
+			fmt.Printf("  Using %s -> %s\n", name, hex.EncodeToString(r.Target)[:12])
+			break
+		}
+	}
+	if headRef == nil {
+		return fmt.Errorf("no snap.main or snap.latest on remote — nothing to clone")
+	}
+
+	// Fetch the snapshot node + all file nodes and content blobs.
+	// This mirrors the pull logic (duplicated inline so we don't need to
+	// rely on refs existing in a particular order).
+	fmt.Println("Fetching snapshot...")
+	snapContent, snapKind, err := client.GetObject(headRef.Target)
+	if err != nil {
+		return fmt.Errorf("fetching snapshot object: %w", err)
+	}
+	if snapContent == nil {
+		return fmt.Errorf("snapshot not found on remote")
+	}
+	var snapPayload map[string]interface{}
+	if err := json.Unmarshal(snapContent, &snapPayload); err != nil {
+		return fmt.Errorf("parsing snapshot: %w", err)
+	}
+	tx, err := db.BeginTx()
+	if err != nil {
+		return err
+	}
+	if _, err := db.InsertNode(tx, graph.NodeKind(snapKind), snapPayload); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("inserting snapshot node: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// List files and fetch each blob
+	filesResp, err := client.ListSnapshotFiles(hex.EncodeToString(headRef.Target))
+	if err != nil {
+		return fmt.Errorf("listing files: %w", err)
+	}
+	fmt.Printf("Fetching %d files...\n", len(filesResp.Files))
+	fetched := 0
+	for _, f := range filesResp.Files {
+		fileDigest, err := hex.DecodeString(f.Digest)
+		if err != nil {
+			continue
+		}
+		// File node
+		if exists, _ := db.HasNode(fileDigest); !exists {
+			nodeContent, nodeKind, err := client.GetObject(fileDigest)
+			if err == nil && nodeContent != nil {
+				var payload map[string]interface{}
+				if err := json.Unmarshal(nodeContent, &payload); err == nil {
+					t, _ := db.BeginTx()
+					if _, err := db.InsertNode(t, graph.NodeKind(nodeKind), payload); err == nil {
+						t.Commit()
+					} else {
+						t.Rollback()
+					}
+				}
+			}
+		}
+		// Content blob — the /v1/raw/ endpoint takes the file NODE digest
+		// (not the content blob digest) and dereferences through the file
+		// node to return the raw bytes.
+		if _, err := db.ReadObject(f.ContentDigest); err != nil {
+			raw, err := client.GetRawContent(f.Digest)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: %s: %v\n", f.Path, err)
+				continue
+			}
+			if _, err := db.WriteObject(raw); err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: %s: %v\n", f.Path, err)
+				continue
+			}
+			fetched++
+		}
+		// HAS_FILE edge
+		db.InsertEdgeDirect(headRef.Target, graph.EdgeHasFile, fileDigest, nil)
+	}
+	fmt.Printf("  Fetched %d content blobs\n", fetched)
+
+	// Set local snap.latest and snap.main to the same target so subsequent
+	// commands behave as expected.
+	refMgr := ref.NewRefManager(db)
+	_ = refMgr.Set("snap.latest", headRef.Target, ref.KindSnapshot)
+	_ = refMgr.Set("snap.main", headRef.Target, ref.KindSnapshot)
+	// Also store as remote-tracking ref so kai pull recognizes no divergence
+	_ = refMgr.Set("remote/origin/snap.latest", headRef.Target, ref.KindSnapshot)
+
+	// Materialize files to disk
+	fmt.Println("Writing files...")
+	creator := snapshot.NewCreator(db, nil)
+	result, err := creator.Checkout(headRef.Target, absDir, false)
+	if err != nil {
+		return fmt.Errorf("checkout failed: %w", err)
+	}
+	fmt.Printf("  Wrote %d files\n", result.FilesWritten)
+
+	// Add .kai to .gitignore so a future `git init` plays nicely
+	ensureGitignore(".kai")
+
+	fmt.Println()
+	fmt.Printf("✓ Cloned %s/%s into %s\n", tenant, repo, dirName)
+	fmt.Println("  Run 'cd " + dirName + "' to start working.")
+	return nil
+}
+
 func runClone(cmd *cobra.Command, args []string) error {
+	if cloneKaiOnly {
+		return runCloneKaiOnly(args)
+	}
 	// Forward to git clone, then set up kai
 	gitArgs := append([]string{"clone"}, args...)
 	gitCmd := exec.Command("git", gitArgs...)
