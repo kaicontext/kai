@@ -254,16 +254,26 @@ func Disable() error {
 // FlushIfNeeded reads the spool, gzip-POSTs to the upload endpoint,
 // and clears the spool on success. Rate-limited to once per 24 hours.
 func FlushIfNeeded() error {
+	return flush(false)
+}
+
+// FlushNow uploads immediately, bypassing the 24-hour rate limit.
+// Used by `kai telemetry flush` for manual recovery.
+func FlushNow() error {
+	return flush(true)
+}
+
+func flush(force bool) error {
 	if !IsEnabled() {
-		return nil
+		return fmt.Errorf("telemetry disabled")
 	}
 	cfg, err := LoadConfig()
 	if err != nil {
 		return err
 	}
 
-	// Rate limit: at most once per 24 hours
-	if cfg.LastUploadAt != "" {
+	// Rate limit: at most once per 24 hours (unless forced)
+	if !force && cfg.LastUploadAt != "" {
 		last, err := time.Parse(time.RFC3339, cfg.LastUploadAt)
 		if err == nil && time.Since(last) < uploadInterval {
 			return nil
@@ -279,15 +289,25 @@ func FlushIfNeeded() error {
 		return err
 	}
 
-	// Parse spool lines into a batch
+	// Parse spool lines into a batch.
+	// Important: bufio.Scanner reuses its internal buffer, so we must COPY each
+	// line before appending — otherwise all entries in `events` end up pointing
+	// at the same memory and marshaling produces N copies of the last line.
 	var events []json.RawMessage
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// Allow large lines (default 64 KB is fine but be explicit).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		events = append(events, json.RawMessage(line))
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		events = append(events, json.RawMessage(cp))
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("reading spool: %w", err)
 	}
 	if len(events) == 0 {
 		return nil
@@ -316,10 +336,10 @@ func FlushIfNeeded() error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("upload: %w", err)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -331,6 +351,24 @@ func FlushIfNeeded() error {
 		return SaveConfig(cfg)
 	}
 	return fmt.Errorf("telemetry upload: HTTP %d", resp.StatusCode)
+}
+
+// EventCount returns the number of events currently in the spool.
+func EventCount() (int, error) {
+	data, err := os.ReadFile(SpoolPath())
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(line) > 0 {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // SpoolSize returns the size of the spool file in bytes.

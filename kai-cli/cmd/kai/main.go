@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.5"
+var Version = "0.11.6"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2058,6 +2058,12 @@ var telemetryStatusCmd = &cobra.Command{
 	RunE:  runTelemetryStatus,
 }
 
+var telemetryFlushCmd = &cobra.Command{
+	Use:   "flush",
+	Short: "Force-upload any spooled telemetry events (bypasses the 24h rate limit)",
+	RunE:  runTelemetryFlush,
+}
+
 func runTelemetryEnable(cmd *cobra.Command, args []string) error {
 	if err := telemetry.Enable(); err != nil {
 		return fmt.Errorf("enabling telemetry: %w", err)
@@ -2075,6 +2081,22 @@ func runTelemetryDisable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("disabling telemetry: %w", err)
 	}
 	fmt.Println("Telemetry disabled.")
+	return nil
+}
+
+func runTelemetryFlush(cmd *cobra.Command, args []string) error {
+	count, _ := telemetry.EventCount()
+	size, _ := telemetry.SpoolSize()
+	if count == 0 {
+		fmt.Println("Nothing to flush (spool empty).")
+		return nil
+	}
+	fmt.Printf("Flushing %d events (%d bytes) to %s...\n", count, size, telemetry.UploadEndpoint)
+	if err := telemetry.FlushNow(); err != nil {
+		return fmt.Errorf("flush failed: %w", err)
+	}
+	newCount, _ := telemetry.EventCount()
+	fmt.Printf("Done. Spool: %d events remaining.\n", newCount)
 	return nil
 }
 
@@ -3248,6 +3270,7 @@ func init() {
 	telemetryCmd.AddCommand(telemetryEnableCmd)
 	telemetryCmd.AddCommand(telemetryDisableCmd)
 	telemetryCmd.AddCommand(telemetryStatusCmd)
+	telemetryCmd.AddCommand(telemetryFlushCmd)
 	rootCmd.AddCommand(telemetryCmd)
 
 	// Version subcommand
