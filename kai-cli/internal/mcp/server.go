@@ -2777,6 +2777,32 @@ func (s *Server) handleCheckpointNow(ctx context.Context, req mcp.CallToolReques
 
 	fmt.Fprintf(os.Stderr, "[kai-sync] checkpoint: agent=%s label=%q assert=%s\n", agentName, label, assertVal)
 
+	// kai↔git bridge: if enabled for this repo, translate the milestone into
+	// a git commit so git-only teammates see meaningful history. Best-effort:
+	// no git repo, no bridge, or kai-binary-not-on-PATH all result in silent
+	// skip. The bridge subcommand sets KAI_BRIDGE_INPROGRESS=1 internally so
+	// we don't re-enter pre-commit / pre-push here.
+	bridgeSentinel := filepath.Join(s.workDir, ".kai", "bridge-enabled")
+	gitDir := filepath.Join(s.workDir, ".git")
+	if _, err := os.Stat(bridgeSentinel); err == nil {
+		if _, err := os.Stat(gitDir); err == nil {
+			bridgeArgs := []string{"bridge", "milestone", "--label", label}
+			if assertVal != "" {
+				bridgeArgs = append(bridgeArgs, "--assert", assertVal)
+			}
+			if planHash != "" {
+				bridgeArgs = append(bridgeArgs, "--plan-hash", planHash)
+			}
+			cmd := exec.Command("kai", bridgeArgs...)
+			cmd.Dir = s.workDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "[kai-bridge] milestone→commit failed (non-fatal): %v\n%s\n", err, out)
+			} else {
+				fmt.Fprintf(os.Stderr, "[kai-bridge] milestone→commit: %q\n", label)
+			}
+		}
+	}
+
 	result := map[string]interface{}{
 		"status": "marked",
 		"reason": "agent_milestone",

@@ -346,7 +346,150 @@ func TestBridgeImport_AcceptsShortSHA(t *testing.T) {
 	}
 }
 
+// ─── Milestone → git commit ────────────────────────────────────────────────
+
+func TestBridgeMilestone_CreatesCommitWithLabelAndTrailers(t *testing.T) {
+	setupBridgeRepo(t)
+	captureForTest(t)
+
+	milestoneLabel = "billing feature complete"
+	milestoneAssert = "tests-pass"
+	milestonePlanHash = "plan123abc"
+	defer func() { milestoneLabel, milestoneAssert, milestonePlanHash = "", "", "" }()
+
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+
+	out, err := exec.Command("git", "log", "-1", "--format=%B").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(out)
+	if !strings.Contains(body, "billing feature complete") {
+		t.Errorf("subject missing from commit: %q", body)
+	}
+	if !strings.Contains(body, "Kai-Assert: tests-pass") {
+		t.Errorf("assert trailer missing: %q", body)
+	}
+	if !strings.Contains(body, "Kai-Plan-Hash: plan123abc") {
+		t.Errorf("plan-hash trailer missing: %q", body)
+	}
+	if !kaiSnapshotTrailerRe.MatchString(body) {
+		t.Errorf("Kai-Snapshot trailer missing or malformed: %q", body)
+	}
+}
+
+func TestBridgeMilestone_OmitsEmptyTrailers(t *testing.T) {
+	setupBridgeRepo(t)
+	milestoneLabel = "just a label"
+	defer func() { milestoneLabel = "" }()
+
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+	out, _ := exec.Command("git", "log", "-1", "--format=%B").Output()
+	body := string(out)
+	if strings.Contains(body, "Kai-Assert:") {
+		t.Errorf("Kai-Assert should be omitted: %q", body)
+	}
+	if strings.Contains(body, "Kai-Plan-Hash:") {
+		t.Errorf("Kai-Plan-Hash should be omitted: %q", body)
+	}
+}
+
+func TestBridgeMilestone_RequiresLabel(t *testing.T) {
+	setupBridgeRepo(t)
+	milestoneLabel = "  "
+	defer func() { milestoneLabel = "" }()
+
+	err := runBridgeMilestone(nil, nil)
+	if err == nil {
+		t.Fatal("expected error for blank label, got nil")
+	}
+	if !strings.Contains(err.Error(), "label") {
+		t.Errorf("error should mention label, got: %v", err)
+	}
+}
+
+func TestBridgeMilestone_NoOpWhenBridgeDisabled(t *testing.T) {
+	setupBridgeRepo(t)
+	if err := os.Remove(filepath.Join(".kai", "bridge-enabled")); err != nil {
+		t.Fatal(err)
+	}
+	shaBefore := gitHeadSHA(t)
+
+	milestoneLabel = "should not commit"
+	defer func() { milestoneLabel = "" }()
+
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+	shaAfter := gitHeadSHA(t)
+	if shaBefore != shaAfter {
+		t.Fatal("milestone created a commit even though bridge is disabled")
+	}
+}
+
+func TestBridgeMilestone_AllowsEmptyCommit(t *testing.T) {
+	setupBridgeRepo(t)
+	// No file changes between setup and milestone — the only way this should
+	// produce a commit is --allow-empty.
+	shaBefore := gitHeadSHA(t)
+	milestoneLabel = "trust assertion, no code changes"
+	defer func() { milestoneLabel = "" }()
+
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+	shaAfter := gitHeadSHA(t)
+	if shaBefore == shaAfter {
+		t.Fatal("milestone did not produce a commit on clean tree (expected --allow-empty)")
+	}
+}
+
+func TestBridgeMilestone_MilestoneCommitIsSkippedByImport(t *testing.T) {
+	// Full round-trip: create a milestone commit, then try to import it.
+	// The Kai-Snapshot trailer on the commit must cause import to skip,
+	// otherwise we'd loop.
+	setupBridgeRepo(t)
+	captureForTest(t)
+	milestoneLabel = "round trip"
+	defer func() { milestoneLabel = "" }()
+
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+	sha := gitHeadSHA(t)
+
+	// Verify the commit message has the trailer (sanity check).
+	out, _ := exec.Command("git", "log", "-1", "--format=%B").Output()
+	if !kaiSnapshotTrailerRe.MatchString(string(out)) {
+		t.Fatalf("milestone commit missing Kai-Snapshot trailer: %q", out)
+	}
+
+	if err := runBridgeImport(nil, []string{sha}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	refs := listGitRefs(t)
+	short := sha[:12]
+	if _, ok := refs["git."+short]; ok {
+		t.Fatal("milestone commit was imported back into kai — would cause a loop")
+	}
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+// captureForTest runs kai capture in the current dir so snap.latest exists
+// and milestone commits can write a Kai-Snapshot: trailer.
+func captureForTest(t *testing.T) {
+	t.Helper()
+	initMode = true
+	defer func() { initMode = false }()
+	if err := runCapture(nil, nil); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+}
 
 func chdirTemp(t *testing.T) string {
 	t.Helper()

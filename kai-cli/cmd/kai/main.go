@@ -2756,6 +2756,101 @@ Designed to be called from .git/hooks/post-commit — never errors the hook.`,
 	RunE: runBridgeImport,
 }
 
+var (
+	milestoneLabel    string
+	milestoneAssert   string
+	milestonePlanHash string
+)
+
+var bridgeMilestoneCmd = &cobra.Command{
+	Use:   "milestone",
+	Short: "Create a git commit from a kai milestone (usually invoked by the MCP handler)",
+	Long: `Translate a kai milestone into a git commit on the current branch.
+
+Intended use is automatic: when the kai↔git bridge is enabled, the MCP
+handler for 'kai_checkpoint_now' invokes this command so that kai
+milestones show up as meaningful git commits for git-only teammates.
+
+The commit message is <label>, followed by structured trailers:
+  Kai-Snapshot: <snap.latest hex>
+  Kai-Assert:   <assert value, when set>
+  Kai-Plan-Hash: <plan hash, when set>
+
+Sets KAI_BRIDGE_INPROGRESS=1 for the child git process so kai's own
+pre-commit/pre-push hooks short-circuit. The post-commit hook then sees
+the Kai-Snapshot: trailer and skips re-importing (no loop).
+
+Best-effort: returns nil without creating a commit when the bridge is
+disabled, the repo isn't git-backed, or git itself fails.`,
+	RunE: runBridgeMilestone,
+}
+
+func runBridgeMilestone(cmd *cobra.Command, args []string) error {
+	if !bridgeEnabled() {
+		return nil
+	}
+	if _, err := os.Stat(".git"); err != nil {
+		return nil
+	}
+	label := strings.TrimSpace(milestoneLabel)
+	if label == "" {
+		return fmt.Errorf("--label is required")
+	}
+
+	// Read snap.latest for the trailer. Missing snap.latest is fine — the
+	// commit still carries the label and the assert; the Kai-Snapshot
+	// trailer is just omitted.
+	var snapHex string
+	if db, err := openDB(); err == nil {
+		if latest, _ := ref.NewRefManager(db).Get("snap.latest"); latest != nil {
+			snapHex = util.BytesToHex(latest.TargetID)
+		}
+		db.Close()
+	}
+
+	var msg bytes.Buffer
+	fmt.Fprintln(&msg, label)
+	fmt.Fprintln(&msg)
+	if snapHex != "" {
+		fmt.Fprintf(&msg, "Kai-Snapshot: %s\n", snapHex)
+	}
+	if milestoneAssert != "" {
+		fmt.Fprintf(&msg, "Kai-Assert: %s\n", milestoneAssert)
+	}
+	if milestonePlanHash != "" {
+		fmt.Fprintf(&msg, "Kai-Plan-Hash: %s\n", milestonePlanHash)
+	}
+
+	msgFile, err := os.CreateTemp("", "kai-milestone-*.txt")
+	if err != nil {
+		return fmt.Errorf("writing milestone message: %w", err)
+	}
+	defer os.Remove(msgFile.Name())
+	if _, err := msgFile.Write(msg.Bytes()); err != nil {
+		msgFile.Close()
+		return fmt.Errorf("writing milestone message: %w", err)
+	}
+	msgFile.Close()
+
+	env := append(os.Environ(), "KAI_BRIDGE_INPROGRESS=1")
+
+	// Stage current working tree. Respects .gitignore naturally.
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Env = env
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add failed: %v\n%s", err, out)
+	}
+
+	// --allow-empty so milestones work even when nothing changed since the
+	// last commit (a milestone is a trust statement, not a code change).
+	commitCmd := exec.Command("git", "commit", "--allow-empty", "-F", msgFile.Name())
+	commitCmd.Env = env
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit failed: %v\n%s", err, out)
+	}
+	return nil
+}
+
 func runBridgeImport(cmd *cobra.Command, args []string) error {
 	if !bridgeEnabled() {
 		// Hook may have been installed manually; be a no-op instead of loud.
@@ -3520,6 +3615,10 @@ func init() {
 
 	bridgeCmd.AddCommand(bridgeImportCmd)
 	bridgeCmd.AddCommand(bridgeStatusCmd)
+	bridgeMilestoneCmd.Flags().StringVar(&milestoneLabel, "label", "", "Milestone label (becomes the git commit subject)")
+	bridgeMilestoneCmd.Flags().StringVar(&milestoneAssert, "assert", "", "Trust assertion (tests-pass, types-ok, lints-clean, manual-verified)")
+	bridgeMilestoneCmd.Flags().StringVar(&milestonePlanHash, "plan-hash", "", "Plan hash (optional, used with assert=tests-pass)")
+	bridgeCmd.AddCommand(bridgeMilestoneCmd)
 	rootCmd.AddCommand(bridgeCmd)
 
 	// Add auth subcommands
