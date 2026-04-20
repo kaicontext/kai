@@ -82,7 +82,14 @@ When you do push to a Kai server:
 
 ## What Kai Sends as Telemetry
 
-Telemetry is **off by default** in CI and **opt-in** everywhere else. Control it with `KAI_TELEMETRY=0` (disable) or `KAI_TELEMETRY=1` (enable).
+Telemetry is **on by default** on developer machines and **off by default in CI** (Kai auto-detects `CI=true`). It is **opt-out**: the first time Kai emits an event on a machine, it prints a one-line notice to stderr naming exactly what's collected and how to disable it.
+
+Control at any time with:
+
+- `kai telemetry disable` — persistent opt-out
+- `kai telemetry enable` — re-enable (also works for first-time explicit enable)
+- `KAI_TELEMETRY=0` — hard-off for a single invocation (or in env)
+- `KAI_TELEMETRY=1` — hard-on, overrides everything including `CI=true`
 
 When enabled, Kai reports:
 
@@ -93,12 +100,13 @@ When enabled, Kai reports:
 | Phase timings | `parse: 400ms, diff: 300ms` |
 | Aggregate counts | `files: 42, symbols: 180` |
 | OS / architecture | `darwin / arm64` |
-| Anonymous install ID | Random UUID per machine |
-| Result | `ok` or error class |
+| Anonymous install ID | Random UUID per machine, stored in `~/.kai/telemetry.json` |
+| Result | `ok` or error class (e.g. `network`, `auth`) |
+| Kai version | `0.12.1` |
 
 **Never collected:** file names, file paths, file contents, symbol names, repository URLs, Git refs, usernames, or any identifier tied to your codebase.
 
-Telemetry is batched locally (`~/.kai/telemetry.jsonl`, max 1 MB) and uploaded at most once per 24 hours to `https://kaicontext.com/v1/telemetry/batch`.
+Events are delivered directly to [PostHog](https://posthog.com) (US cloud, `us.i.posthog.com`). Each CLI invocation flushes its events on exit — there is no persistent local spool. The install ID is the only identifier and is not tied to any Kai account or email.
 
 ## Summary
 
@@ -107,6 +115,6 @@ Telemetry is batched locally (`~/.kai/telemetry.jsonl`, max 1 MB) and uploaded a
 | Does Kai read my source code? | Yes — to parse structure and compute diffs. |
 | Does Kai store my source code? | Locally, yes (content-addressed blobs). Never in the graph database — only hashes and metadata. |
 | Does Kai send my code to a server? | Only if you explicitly `kai push`. Never automatically. |
-| Does Kai phone home? | Only if you opt in to telemetry — and telemetry contains zero code or file information. |
+| Does Kai phone home? | Telemetry is on by default on dev machines (off in CI). A first-run notice tells you what's collected; `kai telemetry disable` turns it off forever. Telemetry contains zero code or file information. |
 | Can I use Kai fully offline? | Yes. All commands work without network access. |
 | What's in the graph database? | Names, signatures, line ranges, hashes, and structural relationships. Not source text. |

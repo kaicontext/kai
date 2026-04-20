@@ -646,8 +646,11 @@ This outputs a structured JSON document containing:
 Initialize Kai in the current directory.
 
 ```bash
-kai init
+kai init [--git-bridge]
 ```
+
+**Flags:**
+- `--git-bridge` — enable the kai↔git bridge (installs post-commit, post-merge, and post-checkout hooks so git and kai stay in sync on the same repo). See [`kai bridge`](#kai-bridge).
 
 **Creates:**
 - `.kai/db.sqlite` - SQLite database with WAL mode
@@ -655,6 +658,7 @@ kai init
 - `.kai/rules/modules.yaml` - Module definitions
 - `.kai/rules/changetypes.yaml` - Change type rules
 - `.kai/AGENTS.md` - AI agent guide for understanding Kai commands
+- `.kai/bridge-enabled` *(only with `--git-bridge`)* — sentinel that turns bridge hooks on for this repo
 
 **Notes:**
 - Run this once per project
@@ -1903,6 +1907,79 @@ kai shadow drift --git-ref <head> --snap snap.main --repo /path/to/repo
 - `--update-ref` - Ref to update to HEAD snapshot (default: `snap.main`)
 
 **Note:** Run this after `kai ws delete` to reclaim storage.
+
+---
+
+### `kai bridge`
+
+Manage the **kai↔git bridge** — two-way integration between kai and plain git so teammates who don't use kai keep working unchanged.
+
+```bash
+kai bridge status
+kai bridge import <commit-sha>
+kai bridge milestone --label <text> [--assert <value>] [--plan-hash <hash>]
+```
+
+Enable the bridge at init time with `kai init --git-bridge`. Once enabled, three hooks are installed in `.git/hooks/`:
+
+| Hook | Triggers on | What it does |
+|---|---|---|
+| `post-commit` | every local `git commit` | calls `kai bridge import <HEAD>` — imports the commit as a kai snapshot with ref `git.<short-sha>` |
+| `post-merge` | `git pull` / `git merge` | imports each new commit in `ORIG_HEAD..HEAD` |
+| `post-checkout` | branch switches | imports each new commit in `prev..new` (skipped for file-level checkouts) |
+
+All hooks short-circuit when `KAI_BRIDGE_INPROGRESS=1` is set, so the bridge's own git operations don't loop through kai.
+
+**`kai bridge status`** — prints `kai↔git bridge: enabled` / `disabled` for the current repo.
+
+**`kai bridge import <sha>`** — invoked by the hooks; idempotent and re-entrancy-safe:
+- skips commits whose message carries a `Kai-Snapshot:` trailer (those came from kai itself)
+- skips when a `git.<short-sha>` ref already exists
+- otherwise runs `kai capture` and points `git.<short-sha>` + `git.HEAD` at the resulting snapshot, with `source=bridge_import_git` in ref metadata
+
+**`kai bridge milestone`** — turns a kai milestone into a git commit on the current branch. The MCP server calls this automatically from the `kai_checkpoint_now` tool when the bridge is enabled. The produced commit carries these trailers:
+
+```
+<milestone label>
+
+Kai-Snapshot: <hex of snap.latest at milestone time>
+Kai-Assert:   <value, when set> (e.g. tests-pass, types-ok, lints-clean, manual-verified)
+Kai-Plan-Hash: <hash, when set>
+```
+
+**Flags:**
+- `--label <text>` *(required)* — the commit subject.
+- `--assert <value>` — structured trust assertion. One of: `tests-pass`, `types-ok`, `lints-clean`, `manual-verified`.
+- `--plan-hash <hash>` — optional plan hash; only valid with `--assert tests-pass`.
+
+Setup order: kai milestone → captures working tree → reads `snap.latest` → writes commit with the trailer referencing the just-captured snapshot. The post-commit hook sees the trailer and skips re-importing, which terminates the kai→git→kai cycle.
+
+**Disabling the bridge:** delete `.kai/bridge-enabled`. The hooks themselves stay installed but no-op when the sentinel is missing. Or use `kai hook uninstall` to remove them entirely.
+
+---
+
+### `kai telemetry`
+
+Manage anonymous usage telemetry. Telemetry is on by default on developer machines and off by default in CI (`CI=true`). On first use it prints a one-line stderr notice listing what's collected and how to disable it.
+
+```bash
+kai telemetry status
+kai telemetry enable
+kai telemetry disable
+kai telemetry flush
+```
+
+**What's collected:** command name, duration, phase timings, version, OS/arch, result (`ok` or error class), and an anonymous install UUID. **Never collected:** file names, paths, content, symbol names, repo URLs, or anything that identifies your code. Events ship directly to PostHog (US cloud, `us.i.posthog.com`).
+
+**Environment overrides (hard, per-invocation):**
+- `KAI_TELEMETRY=0` — off
+- `KAI_TELEMETRY=1` — on (overrides `CI=true`)
+
+**`kai telemetry status`** — prints the current state, install ID, config path, and destination. Distinguishes `enabled (default — opt-out)` (no config yet, default-on) from explicit `enabled` / `disabled` choices.
+
+**`kai telemetry enable` / `disable`** — persistent. Writes `~/.kai/telemetry.json`. Disable is honored across upgrades.
+
+**`kai telemetry flush`** — forces a flush to PostHog now instead of waiting for the next CLI exit. Useful when verifying events land in PostHog.
 
 ---
 
