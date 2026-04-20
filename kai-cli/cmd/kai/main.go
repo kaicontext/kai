@@ -14611,20 +14611,23 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if len(batchUpdates) > 0 {
 		result, err := client.BatchUpdateRefs(batchUpdates)
 		if err != nil {
-			// Check for commit limit error
+			// Check for usage limit error. Current server only meters live-sync
+			// pushes from MCP sessions; plain 'kai push' should no longer hit
+			// this. Left in place for older servers that still meter ref
+			// updates.
 			if limErr, ok := err.(*remote.CommitLimitError); ok {
 				fmt.Fprintf(os.Stderr, "\r\033[K")
 				fmt.Println()
-				fmt.Println("  Push blocked: you've reached the commit limit for this billing period.")
+				fmt.Println("  Push blocked: usage limit reached for this billing period.")
 				fmt.Println()
 				fmt.Printf("    Plan:    %s\n", limErr.Tier)
-				fmt.Printf("    Used:    %d / %d commits\n", limErr.Used, limErr.Limit)
+				fmt.Printf("    Used:    %d / %d events\n", limErr.Used, limErr.Limit)
 				fmt.Println()
 				if limErr.UpgradeURL != "" {
-					fmt.Printf("  Upgrade to Pro for more commits: %s\n", limErr.UpgradeURL)
+					fmt.Printf("  Upgrade for a higher limit: %s\n", limErr.UpgradeURL)
 				}
 				fmt.Println()
-				return fmt.Errorf("commit limit reached")
+				return fmt.Errorf("usage limit reached")
 			}
 			// Fallback to individual updates if batch not supported (405 or other error)
 			if strings.Contains(err.Error(), "405") || strings.Contains(err.Error(), "Method Not Allowed") {
@@ -14789,6 +14792,10 @@ func runPush(cmd *cobra.Command, args []string) error {
 		if pushUsage.Limit > 0 {
 			pct = pushUsage.Used * 100 / pushUsage.Limit
 		}
+		// Usage reflects live-sync events from MCP sessions, not 'kai push'
+		// itself — the latter is always free. We still surface these warnings
+		// on kai push because it's the natural moment to tell a user about
+		// their monthly sync budget.
 		switch {
 		case pushUsage.Plan == "pro" && pushUsage.Used > pushUsage.Limit:
 			overage := pushUsage.Used - pushUsage.Limit
@@ -14796,15 +14803,15 @@ func runPush(cmd *cobra.Command, args []string) error {
 			if rate == "" {
 				rate = "$0.05"
 			}
-			fmt.Printf("\n  Pro plan: %d commits used (%d overage at %s/each)\n\n", pushUsage.Used, overage, rate)
+			fmt.Printf("\n  Pro plan: %d sync events used (%d overage at %s/each)\n\n", pushUsage.Used, overage, rate)
 		case pct >= 90:
-			fmt.Printf("\n  Usage: %d / %d commits (%d%%) this period\n", pushUsage.Used, pushUsage.Limit, pct)
+			fmt.Printf("\n  Usage: %d / %d agent sync events (%d%%) this period\n", pushUsage.Used, pushUsage.Limit, pct)
 			if pushUsage.UpgradeURL != "" {
 				fmt.Printf("  Upgrade to Pro: %s\n", pushUsage.UpgradeURL)
 			}
 			fmt.Println()
 		case pct >= 80:
-			fmt.Printf("\n  Usage: %d / %d commits (%d%%) this period\n\n", pushUsage.Used, pushUsage.Limit, pct)
+			fmt.Printf("\n  Usage: %d / %d agent sync events (%d%%) this period\n\n", pushUsage.Used, pushUsage.Limit, pct)
 		}
 	}
 
