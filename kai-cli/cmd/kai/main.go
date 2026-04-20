@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.12.2"
+var Version = "0.12.3"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -11930,10 +11930,11 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Println(string(jsonOut))
 		} else {
-			fmt.Printf("Diff: %s → %s\n\n", sd.Base, sd.Head)
 			if stdoutColor {
+				fmt.Printf("\033[1mDiff:\033[0m \033[2m%s → %s\033[0m\n\n", sd.Base, sd.Head)
 				fmt.Print(sd.FormatTextColor())
 			} else {
+				fmt.Printf("Diff: %s → %s\n\n", sd.Base, sd.Head)
 				fmt.Print(sd.FormatText())
 			}
 		}

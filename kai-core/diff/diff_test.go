@@ -256,14 +256,23 @@ func TestSemanticDiff_FormatText(t *testing.T) {
 	if !strings.Contains(output, "auth/login.ts") {
 		t.Error("expected output to contain 'auth/login.ts'")
 	}
-	if !strings.Contains(output, "login(user) -> login(user, token)") {
-		t.Error("expected output to contain signature change")
+	// Signature change renders as a remove/add pair (git convention) so
+	// reviewers see the old and new lines aligned, one above the other.
+	if !strings.Contains(output, "- login(user)") {
+		t.Errorf("expected output to contain removed signature line; got:\n%s", output)
+	}
+	if !strings.Contains(output, "+ login(user, token)") {
+		t.Errorf("expected output to contain added signature line; got:\n%s", output)
 	}
 	if !strings.Contains(output, "validateMFA") {
 		t.Error("expected output to contain 'validateMFA'")
 	}
-	if !strings.Contains(output, "timeout: 3600 -> 1800") {
-		t.Error("expected output to contain timeout change")
+	// JSON-key value changes also render as a remove/add pair.
+	if !strings.Contains(output, "- timeout: 3600") {
+		t.Errorf("expected output to contain removed timeout line; got:\n%s", output)
+	}
+	if !strings.Contains(output, "+ timeout: 1800") {
+		t.Errorf("expected output to contain added timeout line; got:\n%s", output)
 	}
 }
 
