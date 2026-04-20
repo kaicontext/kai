@@ -2086,18 +2086,15 @@ func runTelemetryDisable(cmd *cobra.Command, args []string) error {
 }
 
 func runTelemetryFlush(cmd *cobra.Command, args []string) error {
-	count, _ := telemetry.EventCount()
-	size, _ := telemetry.SpoolSize()
-	if count == 0 {
-		fmt.Println("Nothing to flush (spool empty).")
+	if !telemetry.IsEnabled() {
+		fmt.Println("Telemetry is disabled. Run 'kai telemetry enable' first.")
 		return nil
 	}
-	fmt.Printf("Flushing %d events (%d bytes) to %s...\n", count, size, telemetry.UploadEndpoint)
+	fmt.Println("Flushing pending events to PostHog...")
 	if err := telemetry.FlushNow(); err != nil {
 		return fmt.Errorf("flush failed: %w", err)
 	}
-	newCount, _ := telemetry.EventCount()
-	fmt.Printf("Done. Spool: %d events remaining.\n", newCount)
+	fmt.Println("Done.")
 	return nil
 }
 
@@ -2118,12 +2115,8 @@ func runTelemetryStatus(cmd *cobra.Command, args []string) error {
 	if cfg.CreatedAt != "" {
 		fmt.Printf("  Created:       %s\n", cfg.CreatedAt)
 	}
-	if cfg.LastUploadAt != "" {
-		fmt.Printf("  Last upload:   %s\n", cfg.LastUploadAt)
-	}
-	size, _ := telemetry.SpoolSize()
-	fmt.Printf("  Spool size:    %d bytes\n", size)
 	fmt.Printf("  Config:        %s\n", telemetry.ConfigPath())
+	fmt.Printf("  Destination:   PostHog (us.i.posthog.com)\n")
 
 	// Show effective state considering env overrides
 	effective := telemetry.IsEnabled()
@@ -3171,7 +3164,9 @@ func init() {
 		selfHealHooks()
 	}
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
-		_ = telemetry.FlushIfNeeded()
+		// Flush any queued PostHog events before the CLI exits. Best-effort:
+		// the PostHog client times out its own Close.
+		telemetry.Close()
 	}
 
 	snapshotCreateCmd.Flags().StringVar(&repoPath, "repo", ".", "Path to the Git repository")
