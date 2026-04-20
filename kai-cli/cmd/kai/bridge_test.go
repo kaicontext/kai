@@ -66,9 +66,11 @@ func TestBridgeEnabled_ReturnsTrueWhenSentinelPresent(t *testing.T) {
 
 func TestHookScripts_AllContainReEntrancyGuard(t *testing.T) {
 	scripts := map[string]string{
-		"preCommit":  preCommitHookScript,
-		"prePush":    prePushHookScript,
-		"postCommit": postCommitHookScript,
+		"preCommit":    preCommitHookScript,
+		"prePush":      prePushHookScript,
+		"postCommit":   postCommitHookScript,
+		"postMerge":    postMergeHookScript,
+		"postCheckout": postCheckoutHookScript,
 	}
 	for name, s := range scripts {
 		if !strings.Contains(s, `"${KAI_BRIDGE_INPROGRESS:-}" = "1"`) {
@@ -83,9 +85,11 @@ func TestHookScripts_AllContainReEntrancyGuard(t *testing.T) {
 func TestHookScripts_AllTaggedWithCurrentVersion(t *testing.T) {
 	tag := kaiHookMarker + " " + kaiHookVersion
 	for name, s := range map[string]string{
-		"preCommit":  preCommitHookScript,
-		"prePush":    prePushHookScript,
-		"postCommit": postCommitHookScript,
+		"preCommit":    preCommitHookScript,
+		"prePush":      prePushHookScript,
+		"postCommit":   postCommitHookScript,
+		"postMerge":    postMergeHookScript,
+		"postCheckout": postCheckoutHookScript,
 	} {
 		if !strings.Contains(s, tag) {
 			t.Errorf("%s hook missing version tag %q", name, tag)
@@ -99,6 +103,51 @@ func TestPostCommitHookScript_InvokesBridgeImport(t *testing.T) {
 	}
 	if !strings.Contains(postCommitHookScript, "git rev-parse HEAD") {
 		t.Fatal("post-commit hook does not read HEAD sha")
+	}
+}
+
+func TestPostMergeHookScript_IteratesOrigHeadRange(t *testing.T) {
+	if !strings.Contains(postMergeHookScript, "ORIG_HEAD..HEAD") {
+		t.Fatal("post-merge hook does not walk ORIG_HEAD..HEAD")
+	}
+	if !strings.Contains(postMergeHookScript, "kai bridge import") {
+		t.Fatal("post-merge hook does not call 'kai bridge import'")
+	}
+}
+
+func TestPostCheckoutHookScript_OnlyActsOnBranchSwitch(t *testing.T) {
+	if !strings.Contains(postCheckoutHookScript, `"$3" != "1"`) {
+		t.Fatal("post-checkout hook does not short-circuit on file checkouts")
+	}
+	if !strings.Contains(postCheckoutHookScript, "kai bridge import") {
+		t.Fatal("post-checkout hook does not call 'kai bridge import'")
+	}
+}
+
+func TestHookInstall_InstallsAllThreeBridgeHooksWhenEnabled(t *testing.T) {
+	chdirTemp(t)
+	if err := os.MkdirAll(filepath.Join(".git", "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(".kai", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".kai", "bridge-enabled"), []byte("1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	initMode = true
+	defer func() { initMode = false }()
+	if err := runHookInstall(nil, nil); err != nil {
+		t.Fatalf("hook install: %v", err)
+	}
+	for _, name := range []string{"post-commit", "post-merge", "post-checkout"} {
+		data, err := os.ReadFile(filepath.Join(".git", "hooks", name))
+		if err != nil {
+			t.Fatalf("%s hook missing: %v", name, err)
+		}
+		if !strings.Contains(string(data), kaiHookMarker) {
+			t.Errorf("%s hook is not tagged as kai-managed", name)
+		}
 	}
 }
 

@@ -2575,6 +2575,63 @@ kai bridge import "$SHA" >/dev/null 2>&1 || true
 exit 0
 `
 
+// postMergeHookScript imports any new commits brought in by a merge or
+// pull (fast-forward or otherwise). Only installed when the bridge is
+// enabled. Uses ORIG_HEAD..HEAD to walk just the new commits.
+const postMergeHookScript = `#!/bin/sh
+` + kaiHookMarker + ` ` + kaiHookVersion + `
+# Auto-installed by 'kai init --git-bridge'.
+# Best-effort: never blocks git. Remove with: kai hook uninstall
+
+if [ "${KAI_BRIDGE_INPROGRESS:-}" = "1" ]; then
+  exit 0
+fi
+if ! command -v kai >/dev/null 2>&1; then
+  exit 0
+fi
+if [ ! -d .kai ]; then
+  exit 0
+fi
+# Walk new commits (oldest first) and import each. ORIG_HEAD is set by
+# merge/pull to the old HEAD.
+git rev-list --reverse ORIG_HEAD..HEAD 2>/dev/null | while read -r SHA; do
+  kai bridge import "$SHA" >/dev/null 2>&1 || true
+done
+exit 0
+`
+
+// postCheckoutHookScript imports any new commits after a branch switch
+// that brings in history the working copy hadn't seen. $1 = previous HEAD,
+// $2 = new HEAD, $3 = 1 when switching branches (0 for file checkout).
+const postCheckoutHookScript = `#!/bin/sh
+` + kaiHookMarker + ` ` + kaiHookVersion + `
+# Auto-installed by 'kai init --git-bridge'.
+# Best-effort: never blocks git. Remove with: kai hook uninstall
+
+if [ "${KAI_BRIDGE_INPROGRESS:-}" = "1" ]; then
+  exit 0
+fi
+if ! command -v kai >/dev/null 2>&1; then
+  exit 0
+fi
+if [ ! -d .kai ]; then
+  exit 0
+fi
+# Only act on branch switches (arg 3 = 1), not file checkouts.
+if [ "$3" != "1" ]; then
+  exit 0
+fi
+PREV="$1"
+NEW="$2"
+if [ "$PREV" = "$NEW" ]; then
+  exit 0
+fi
+git rev-list --reverse "$PREV".."$NEW" 2>/dev/null | while read -r SHA; do
+  kai bridge import "$SHA" >/dev/null 2>&1 || true
+done
+exit 0
+`
+
 // runDoctor audits local Kai state and reports findings. With --fix, it
 // applies automatic repairs (currently just hook upgrades). Doctor must
 // never error: every check is independent and logged inline.
@@ -2608,6 +2665,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checkHook("pre-push", prePushHookScript)
 		if bridgeEnabled() {
 			checkHook("post-commit", postCommitHookScript)
+			checkHook("post-merge", postMergeHookScript)
+			checkHook("post-checkout", postCheckoutHookScript)
 		}
 	} else {
 		fmt.Printf("%s not a git repository (hook checks skipped)\n", warn)
@@ -2695,6 +2754,8 @@ func selfHealHooks() {
 	upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "pre-push"), prePushHookScript)
 	if bridgeEnabled() {
 		upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "post-commit"), postCommitHookScript)
+		upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "post-merge"), postMergeHookScript)
+		upgradeIfOldKaiHook(filepath.Join(".git", "hooks", "post-checkout"), postCheckoutHookScript)
 	}
 }
 
@@ -2939,6 +3000,41 @@ func runBridgeImport(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// installOrUpgradeBridgeHook is the DRY helper for the three bridge-only
+// hooks (post-commit, post-merge, post-checkout). Install semantics match
+// runHookInstall's pre-commit / pre-push paths: foreign hooks left alone,
+// kai-managed ones upgraded, missing ones created.
+func installOrUpgradeBridgeHook(hookName, script string) {
+	path := filepath.Join(".git", "hooks", hookName)
+	if data, err := os.ReadFile(path); err == nil {
+		if !strings.Contains(string(data), kaiHookMarker) {
+			if !initMode {
+				fmt.Printf("Note: %s hook already exists (not managed by Kai). Skipping.\n", hookName)
+			}
+			return
+		}
+		if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+			if !initMode {
+				fmt.Printf("Warning: could not upgrade %s hook: %v\n", hookName, err)
+			}
+			return
+		}
+		if !initMode {
+			fmt.Printf("Upgraded %s hook: .git/hooks/%s\n", hookName, hookName)
+		}
+		return
+	}
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		if !initMode {
+			fmt.Printf("Warning: could not install %s hook: %v\n", hookName, err)
+		}
+		return
+	}
+	if !initMode {
+		fmt.Printf("Installed %s hook: .git/hooks/%s\n", hookName, hookName)
+	}
+}
+
 // upgradeIfOldKaiHook overwrites a kai-managed hook in place if it isn't at
 // the current version. Foreign hooks are left untouched.
 func upgradeIfOldKaiHook(path, newScript string) {
@@ -3023,32 +3119,11 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// post-commit — only when the kai↔git bridge is enabled for this repo
+	// Bridge hooks — only when the kai↔git bridge is enabled for this repo.
 	if bridgeEnabled() {
-		postHookPath := filepath.Join(".git", "hooks", "post-commit")
-		if data, err := os.ReadFile(postHookPath); err == nil {
-			if !strings.Contains(string(data), kaiHookMarker) {
-				if !initMode {
-					fmt.Println("Note: post-commit hook already exists (not managed by Kai). Skipping.")
-				}
-			} else {
-				if err := os.WriteFile(postHookPath, []byte(postCommitHookScript), 0755); err != nil {
-					if !initMode {
-						fmt.Printf("Warning: could not upgrade post-commit hook: %v\n", err)
-					}
-				} else if !initMode {
-					fmt.Println("Upgraded post-commit hook: .git/hooks/post-commit")
-				}
-			}
-		} else {
-			if err := os.WriteFile(postHookPath, []byte(postCommitHookScript), 0755); err != nil {
-				if !initMode {
-					fmt.Printf("Warning: could not install post-commit hook: %v\n", err)
-				}
-			} else if !initMode {
-				fmt.Println("Installed post-commit hook: .git/hooks/post-commit")
-			}
-		}
+		installOrUpgradeBridgeHook("post-commit", postCommitHookScript)
+		installOrUpgradeBridgeHook("post-merge", postMergeHookScript)
+		installOrUpgradeBridgeHook("post-checkout", postCheckoutHookScript)
 	}
 
 	if !initMode {
