@@ -380,6 +380,49 @@ func TestBridgeMilestone_CreatesCommitWithLabelAndTrailers(t *testing.T) {
 	}
 }
 
+func TestBridgeMilestone_TrailerMatchesCommittedState(t *testing.T) {
+	// Regression: the Kai-Snapshot trailer must reference a snapshot of the
+	// code being committed, not the snapshot that existed *before* the
+	// milestone change. Without an explicit capture inside runBridgeMilestone,
+	// the trailer would reference the stale snap.latest (pre-commit hook
+	// is silenced by KAI_BRIDGE_INPROGRESS so it can't capture for us).
+	setupBridgeRepo(t)
+	captureForTest(t)
+
+	// Read snap.latest BEFORE the milestone change.
+	db1, _ := graph.Open(filepath.Join(".kai", "db.sqlite"), filepath.Join(".kai", "objects"))
+	before, _ := ref.NewRefManager(db1).Get("snap.latest")
+	db1.Close()
+
+	// Change the tree, then fire the milestone.
+	if err := os.WriteFile("hello.txt", []byte("new content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	milestoneLabel = "new content milestone"
+	defer func() { milestoneLabel = "" }()
+	if err := runBridgeMilestone(nil, nil); err != nil {
+		t.Fatalf("milestone: %v", err)
+	}
+
+	// Extract the Kai-Snapshot trailer value from the new commit.
+	out, _ := exec.Command("git", "log", "-1", "--format=%B").Output()
+	m := kaiSnapshotTrailerRe.FindStringSubmatch(string(out))
+	if len(m) < 2 {
+		t.Fatalf("Kai-Snapshot trailer missing from commit: %q", out)
+	}
+	trailerHex := m[1]
+	if before != nil && trailerHex == hexStr(before.TargetID) {
+		t.Fatalf("trailer references pre-milestone snap.latest (%s); should reference the post-change snapshot", trailerHex)
+	}
+	// Double-check: the trailer hex equals the current snap.latest.
+	db2, _ := graph.Open(filepath.Join(".kai", "db.sqlite"), filepath.Join(".kai", "objects"))
+	after, _ := ref.NewRefManager(db2).Get("snap.latest")
+	db2.Close()
+	if after == nil || trailerHex != hexStr(after.TargetID) {
+		t.Fatalf("trailer %s does not match current snap.latest %s", trailerHex, hexStr(after.TargetID))
+	}
+}
+
 func TestBridgeMilestone_OmitsEmptyTrailers(t *testing.T) {
 	setupBridgeRepo(t)
 	milestoneLabel = "just a label"

@@ -70,7 +70,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.11.7"
+var Version = "0.12.0"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -2795,6 +2795,21 @@ func runBridgeMilestone(cmd *cobra.Command, args []string) error {
 	label := strings.TrimSpace(milestoneLabel)
 	if label == "" {
 		return fmt.Errorf("--label is required")
+	}
+
+	// Capture the working tree so snap.latest reflects the state we're
+	// about to commit. Without this, the Kai-Snapshot: trailer on the
+	// commit would reference the *previous* snapshot (pre-commit hook
+	// would normally capture, but we silence all hooks via
+	// KAI_BRIDGE_INPROGRESS below to prevent loops).
+	{
+		initMode = true
+		if err := runCapture(cmd, nil); err != nil {
+			debugf("bridge milestone: capture failed: %v", err)
+			// non-fatal — the milestone still goes through, just without a
+			// fresh Kai-Snapshot trailer
+		}
+		initMode = false
 	}
 
 	// Read snap.latest for the trailer. Missing snap.latest is fine — the
