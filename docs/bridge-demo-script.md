@@ -227,13 +227,12 @@ alice $ git pull
 > "Her post-merge hook sees Bob's new commit, recognizes it doesn't carry a Kai-Snapshot trailer — meaning it's genuinely new to kai — and imports it into her semantic graph, automatically. Let's see."
 
 ```bash
-alice $ kai ref list | grep git.
-# git.HEAD          Snapshot  9d8e...  ← points at Bob's commit
-# git.a1b2c3d4...   Snapshot  8f7e...  ← Alice's "add farewell" milestone
-# git.f5e6d7c8...   Snapshot  9d8e...  ← Bob's bug fix, auto-imported
+alice $ kai ref list | grep ^git\.
+# git.28ebce9f...   Snapshot  f8cba03f...   ← Bob's bug fix, auto-imported
+# git.HEAD          Snapshot  f8cba03f...   ← also points at Bob's commit
 ```
 
-> "Three refs in kai, one for each commit on the branch. Alice's AI agent can now reason about Bob's change — answer 'what did Bob just change,' 'does it affect my code,' 'should I rerun tests' — with full kai context. Bob still has no idea kai exists."
+> "Two refs. Bob's new commit is in kai as a semantic snapshot, ready for Alice's AI agent to reason about — 'what did Bob just change,' 'does it affect my code,' 'should I rerun tests' — with full kai context. Notice there's no ref for Alice's own milestone commit here: that one already carries a Kai-Snapshot trailer, so the import hook correctly skipped it and no loop ever starts."
 
 ---
 
