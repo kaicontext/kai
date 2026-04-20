@@ -3170,6 +3170,10 @@ func init() {
 		if !verbose {
 			verbose = os.Getenv("KAI_VERBOSE") == "1" || os.Getenv("KAI_VERBOSE") == "true"
 		}
+		// Detect TTY on stdout/stderr once per invocation so commands that
+		// print colored output (e.g. kai diff) can decide whether to emit
+		// ANSI escapes. Respects NO_COLOR.
+		initColors()
 		printUpdateNotice()
 		backgroundUpdateCheck()
 		// Silently upgrade old (dangerous v1) kai-managed git hooks if present.
@@ -3783,12 +3787,20 @@ var initMode bool
 // ANSI color helpers for init output. Respect NO_COLOR and non-TTY stderr.
 var stderrColor bool
 
+// stdoutColor reports whether stdout should receive ANSI color. Used by
+// commands that print diff/listing output (kai diff, etc.) where the caller
+// often pipes into less/grep and wants plain text in that case.
+var stdoutColor bool
+
 func initColors() {
 	if os.Getenv("NO_COLOR") != "" {
 		return
 	}
 	if fi, err := os.Stderr.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
 		stderrColor = true
+	}
+	if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+		stdoutColor = true
 	}
 }
 
@@ -11919,7 +11931,11 @@ func runDiff(cmd *cobra.Command, args []string) error {
 			fmt.Println(string(jsonOut))
 		} else {
 			fmt.Printf("Diff: %s → %s\n\n", sd.Base, sd.Head)
-			fmt.Print(sd.FormatText())
+			if stdoutColor {
+				fmt.Print(sd.FormatTextColor())
+			} else {
+				fmt.Print(sd.FormatText())
+			}
 		}
 
 		return nil

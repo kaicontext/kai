@@ -6,8 +6,21 @@ import (
 	"strings"
 )
 
-// FormatText formats a semantic diff as human-readable text.
+// FormatText formats a semantic diff as human-readable plain text.
+// Callers wanting ANSI-colored output for terminals should use FormatTextColor.
 func (sd *SemanticDiff) FormatText() string {
+	return sd.formatText(false)
+}
+
+// FormatTextColor formats a semantic diff with ANSI color codes:
+// added symbols in green, removed in red, modified in yellow, bold file
+// headers, dim '->' in signature changes. Produces the exact same content
+// as FormatText — only styling differs.
+func (sd *SemanticDiff) FormatTextColor() string {
+	return sd.formatText(true)
+}
+
+func (sd *SemanticDiff) formatText(color bool) string {
 	var sb strings.Builder
 
 	for _, f := range sd.Files {
@@ -22,11 +35,18 @@ func (sd *SemanticDiff) FormatText() string {
 			actionChar = "~"
 		}
 
-		sb.WriteString(fmt.Sprintf("%s %s\n", actionChar, f.Path))
+		// File headers get the action color and bold styling in color mode.
+		if color {
+			sb.WriteString(fmt.Sprintf("%s %s\n",
+				colorizeAction(actionChar, actionChar),
+				ansiBold(f.Path)))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s %s\n", actionChar, f.Path))
+		}
 
 		// Unit changes
 		for _, u := range f.Units {
-			sb.WriteString(formatUnit(u))
+			sb.WriteString(formatUnitWithColor(u, color))
 		}
 
 		if len(f.Units) > 0 {
@@ -47,18 +67,51 @@ func (sd *SemanticDiff) FormatText() string {
 	return sb.String()
 }
 
-// formatUnit formats a single unit diff.
+// ANSI helpers — small, local, no external deps. colorize receives the raw
+// action char so we know which color to apply; the visible text can differ.
+func colorizeAction(action, visible string) string {
+	switch action {
+	case "+":
+		return "\033[32m" + visible + "\033[0m" // green
+	case "-":
+		return "\033[31m" + visible + "\033[0m" // red
+	case "~":
+		return "\033[33m" + visible + "\033[0m" // yellow
+	default:
+		return visible
+	}
+}
+
+func ansiBold(s string) string { return "\033[1m" + s + "\033[0m" }
+func ansiDim(s string) string  { return "\033[2m" + s + "\033[0m" }
+
+// formatUnit formats a single unit diff (uncolored, kept for back-compat).
 func formatUnit(u UnitDiff) string {
+	return formatUnitWithColor(u, false)
+}
+
+// formatUnitWithColor formats a single unit diff, optionally with ANSI color.
+// When color is true, the action char is colorized to match its meaning
+// (+green/-red/~yellow) and the "->" arrow in signature/value changes is dim.
+func formatUnitWithColor(u UnitDiff, color bool) string {
 	var sb strings.Builder
 
-	actionChar := getActionChar(u.Action)
+	rawAction := getActionChar(u.Action)
+	actionChar := rawAction
+	if color {
+		actionChar = colorizeAction(rawAction, rawAction)
+	}
+	arrow := "->"
+	if color {
+		arrow = ansiDim("->")
+	}
 	kindStr := formatKind(u.Kind)
 
 	switch u.Kind {
 	case KindFunction, KindMethod:
 		if u.Action == ActionModified && u.BeforeSig != u.AfterSig {
 			// Signature change - signature already includes "function" keyword
-			sb.WriteString(fmt.Sprintf("  %s %s -> %s\n", actionChar, u.BeforeSig, u.AfterSig))
+			sb.WriteString(fmt.Sprintf("  %s %s %s %s\n", actionChar, u.BeforeSig, arrow, u.AfterSig))
 		} else if u.Action == ActionAdded {
 			sig := u.AfterSig
 			if sig == "" {
@@ -80,10 +133,9 @@ func formatUnit(u UnitDiff) string {
 
 	case KindVariable, KindConst:
 		if u.Action == ActionModified && u.Before != u.After {
-			// Show value change for simple values
 			before := truncateValue(u.Before)
 			after := truncateValue(u.After)
-			sb.WriteString(fmt.Sprintf("  %s %s: %s -> %s\n", actionChar, u.Name, before, after))
+			sb.WriteString(fmt.Sprintf("  %s %s: %s %s %s\n", actionChar, u.Name, before, arrow, after))
 		} else {
 			sb.WriteString(fmt.Sprintf("  %s %s %s\n", actionChar, kindStr, u.Name))
 		}
@@ -94,7 +146,7 @@ func formatUnit(u UnitDiff) string {
 			path = u.Name
 		}
 		if u.Action == ActionModified && u.Before != "" && u.After != "" {
-			sb.WriteString(fmt.Sprintf("  %s %s: %s -> %s\n", actionChar, path, truncateValue(u.Before), truncateValue(u.After)))
+			sb.WriteString(fmt.Sprintf("  %s %s: %s %s %s\n", actionChar, path, truncateValue(u.Before), arrow, truncateValue(u.After)))
 		} else {
 			sb.WriteString(fmt.Sprintf("  %s %s\n", actionChar, path))
 		}
@@ -104,7 +156,7 @@ func formatUnit(u UnitDiff) string {
 
 	case KindSQLColumn:
 		if u.Action == ActionModified {
-			sb.WriteString(fmt.Sprintf("  %s %s: %s -> %s\n", actionChar, u.Path, truncateValue(u.Before), truncateValue(u.After)))
+			sb.WriteString(fmt.Sprintf("  %s %s: %s %s %s\n", actionChar, u.Path, truncateValue(u.Before), arrow, truncateValue(u.After)))
 		} else {
 			defStr := ""
 			if u.After != "" {
