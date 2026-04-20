@@ -9,9 +9,9 @@
 #   - personal org auto-creation
 #   - repo creation and remote wiring
 #   - first push to kai-server
-#   - post-commit / pre-push git hooks installed at v2 (never block git)
+#   - post-commit / pre-push git hooks installed at v3 (never block git)
 #   - broken .kai directory does NOT block git commit
-#   - selfHealHooks() upgrades a v1 hook to v2 on any kai invocation
+#   - selfHealHooks() upgrades a v1 hook to v3 on any kai invocation
 #
 # Environment variables (all required):
 #   KAI_SERVER               - base URL, e.g. https://staging.kaicontext.com
@@ -62,8 +62,8 @@ echo "=== 4. Post-init assertions ==="
 fail() { echo "  ASSERT FAIL: $1"; exit 1; }
 
 [ -d .kai ] || fail ".kai directory not created"
-grep -q "kai-managed-hook v2" .git/hooks/pre-commit || fail "pre-commit hook is not v2"
-grep -q "kai-managed-hook v2" .git/hooks/pre-push || fail "pre-push hook is not v2"
+grep -q "kai-managed-hook v3" .git/hooks/pre-commit || fail "pre-commit hook is not v3"
+grep -q "kai-managed-hook v3" .git/hooks/pre-push || fail "pre-push hook is not v3"
 grep -q "Already logged in\|Logged in as" /tmp/init.log || fail "init did not reach login step"
 kai doctor > /tmp/doctor.log 2>&1 || true
 grep -q "logged in" /tmp/doctor.log || fail "kai doctor does not see an active login"
@@ -88,15 +88,15 @@ cat > .git/hooks/pre-commit <<'OLDHOOK'
 kai capture
 OLDHOOK
 chmod +x .git/hooks/pre-commit
-grep -q "kai-managed-hook v2" .git/hooks/pre-commit && fail "test setup wrong: hook is still v2"
+grep -q "kai-managed-hook v3" .git/hooks/pre-commit && fail "test setup wrong: hook is still v3"
 
 # Invoke a real subcommand so cobra runs PersistentPreRun (and thus
 # selfHealHooks). `kai --version` and `kai --help` short-circuit in
 # cobra and do NOT run PreRun hooks — don't use them for this test.
 kai doctor >/dev/null 2>&1 || true
 
-grep -q "kai-managed-hook v2" .git/hooks/pre-commit || fail "selfHealHooks did not upgrade v1 -> v2"
-echo "  hook upgraded to v2 after kai invocation"
+grep -q "kai-managed-hook v3" .git/hooks/pre-commit || fail "selfHealHooks did not upgrade v1 -> v3"
+echo "  hook upgraded to v3 after kai invocation"
 echo
 
 echo "=== SMOKE PASSED ==="
