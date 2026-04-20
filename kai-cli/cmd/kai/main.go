@@ -2103,15 +2103,26 @@ func runTelemetryStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Enabled {
+	// "No config file yet" == default-on new install. Show that explicitly
+	// so users can tell "never decided, using default" from "explicitly enabled".
+	configExists := true
+	if _, statErr := os.Stat(telemetry.ConfigPath()); os.IsNotExist(statErr) {
+		configExists = false
+	}
+	switch {
+	case !configExists:
+		fmt.Println("Telemetry: enabled (default — opt-out)")
+	case cfg.Enabled:
 		fmt.Println("Telemetry: enabled")
-	} else {
+	default:
 		fmt.Println("Telemetry: disabled")
 	}
 	if cfg.InstallID != "" {
 		fmt.Printf("  Install ID:    %s\n", cfg.InstallID)
 	}
-	fmt.Printf("  Level:         %s\n", cfg.Level)
+	if cfg.Level != "" {
+		fmt.Printf("  Level:         %s\n", cfg.Level)
+	}
 	if cfg.CreatedAt != "" {
 		fmt.Printf("  Created:       %s\n", cfg.CreatedAt)
 	}
@@ -2120,7 +2131,9 @@ func runTelemetryStatus(cmd *cobra.Command, args []string) error {
 
 	// Show effective state considering env overrides
 	effective := telemetry.IsEnabled()
-	if effective != cfg.Enabled {
+	configuredOn := configExists && cfg.Enabled
+	configuredOn = configuredOn || !configExists // default-on counts as "configured on"
+	if effective != configuredOn {
 		if effective {
 			fmt.Println("  (overridden to ENABLED by KAI_TELEMETRY=1)")
 		} else {

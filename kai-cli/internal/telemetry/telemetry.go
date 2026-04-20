@@ -115,7 +115,10 @@ func SaveConfig(cfg *Config) error {
 // 1. KAI_TELEMETRY=0 → hard off
 // 2. KAI_TELEMETRY=1 → on
 // 3. CI=true → off (unless KAI_TELEMETRY=1)
-// 4. Config file
+// 4. Config file — if present, honor cfg.Enabled.
+//                 If absent, default to ON. New installs are opt-out;
+//                 returning users who explicitly ran 'kai telemetry disable'
+//                 have cfg.Enabled=false and stay disabled.
 func IsEnabled() bool {
 	if v := os.Getenv("KAI_TELEMETRY"); v != "" {
 		return v == "1"
@@ -123,12 +126,51 @@ func IsEnabled() bool {
 	if ci := os.Getenv("CI"); strings.EqualFold(ci, "true") || ci == "1" {
 		return false
 	}
+	if _, err := os.Stat(ConfigPath()); os.IsNotExist(err) {
+		return true
+	}
 	cfg, err := LoadConfig()
 	if err != nil {
 		return false
 	}
 	return cfg.Enabled
 }
+
+// ensureConfigAndMaybeNotice makes sure a config file exists (creating one
+// with Enabled=true and a fresh install_id if missing) and prints a one-time
+// first-run notice to stderr when it had to create the config. Returns the
+// (possibly just-created) config.
+//
+// This is what makes opt-out work ethically: the first time a user's CLI
+// fires telemetry by default, they see exactly what's being collected and
+// how to turn it off.
+func ensureConfigAndMaybeNotice() (*Config, bool, error) {
+	if _, err := os.Stat(ConfigPath()); err == nil {
+		cfg, err := LoadConfig()
+		return cfg, false, err
+	}
+	cfg := &Config{
+		Enabled:   true,
+		InstallID: uuid.New().String(),
+		Level:     "basic",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := SaveConfig(cfg); err != nil {
+		return cfg, false, err
+	}
+	fmt.Fprint(os.Stderr, firstRunNotice)
+	return cfg, true, nil
+}
+
+// firstRunNotice is printed exactly once per install, on the first telemetry
+// event after kai starts reporting. Wording is intentionally specific so
+// users can decide quickly.
+const firstRunNotice = `
+kai: anonymous usage telemetry is on. Each command sends: name, duration,
+     result, kai version, OS, arch, and an install UUID. No code, file
+     paths, repo names, or content is sent.
+     Disable at any time with: kai telemetry disable
+`
 
 // ─── PostHog client (singleton, lazy) ───────────────────────────────────────
 
@@ -189,12 +231,16 @@ func Close() {
 // NewEvent creates a new event for the given command, pre-filled with
 // timestamp, install_id, version, os, and arch.
 // Returns nil if telemetry is disabled.
+//
+// On the first ever telemetry-eligible invocation it materializes the
+// telemetry config with Enabled=true and prints a one-line notice to
+// stderr explaining what's collected and how to disable.
 func NewEvent(command string) *Event {
 	if !IsEnabled() {
 		return nil
 	}
-	cfg, err := LoadConfig()
-	if err != nil {
+	cfg, _, err := ensureConfigAndMaybeNotice()
+	if err != nil || cfg == nil {
 		return nil
 	}
 	// Drop the pre-PostHog spool once we know telemetry is active — the

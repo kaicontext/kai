@@ -117,12 +117,27 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
-func TestIsEnabled_Default(t *testing.T) {
+func TestIsEnabled_DefaultIsOnWhenNoConfig(t *testing.T) {
 	withTempHome(t)
 	t.Setenv("KAI_TELEMETRY", "")
 	t.Setenv("CI", "")
+	if !IsEnabled() {
+		t.Error("expected telemetry ON when no config file exists (opt-out default)")
+	}
+}
+
+func TestIsEnabled_RespectsExplicitDisable(t *testing.T) {
+	// Returning users who ran 'kai telemetry disable' must stay disabled,
+	// even though the default flipped to on.
+	withTempHome(t)
+	t.Setenv("KAI_TELEMETRY", "")
+	t.Setenv("CI", "")
+	cfg := &Config{Enabled: false, InstallID: "prev-user", Level: "basic"}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	if IsEnabled() {
-		t.Error("expected disabled by default")
+		t.Error("expected disabled config to be honored")
 	}
 }
 
@@ -365,6 +380,62 @@ func TestNewEvent_DeletesLegacySpool(t *testing.T) {
 	if _, err := os.Stat(spool); !os.IsNotExist(err) {
 		t.Errorf("legacy spool should have been deleted on NewEvent; err=%v", err)
 	}
+}
+
+func TestNewEvent_CreatesConfigAndInstallIDOnFirstUse(t *testing.T) {
+	tmp := withTempHome(t)
+	t.Setenv("KAI_TELEMETRY", "")
+	t.Setenv("CI", "")
+
+	// No config yet — default-on path creates one with a fresh install_id.
+	if _, err := os.Stat(filepath.Join(tmp, ".kai", "telemetry.json")); !os.IsNotExist(err) {
+		t.Fatalf("test setup: config should not exist yet; err=%v", err)
+	}
+	_ = withFakeSink(t)
+
+	e := NewEvent("init")
+	if e == nil {
+		t.Fatal("expected non-nil event under default-on")
+	}
+	e.Finish()
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if !cfg.Enabled {
+		t.Error("config created by first event should have Enabled=true")
+	}
+	if cfg.InstallID == "" {
+		t.Error("config created by first event should have a generated install_id")
+	}
+	if cfg.CreatedAt == "" {
+		t.Error("config created by first event should stamp CreatedAt")
+	}
+}
+
+func TestNewEvent_DoesNotRecreateConfig(t *testing.T) {
+	// Once a config exists, NewEvent must not overwrite it — in particular,
+	// a user who disabled telemetry must not have their install_id rotated
+	// or their disabled flag silently flipped on by a later upgrade.
+	tmp := withTempHome(t)
+	t.Setenv("KAI_TELEMETRY", "1") // forces IsEnabled() true even though cfg disabled, just so NewEvent runs
+	cfg := &Config{Enabled: false, InstallID: "stable-id", Level: "basic", CreatedAt: "2020-01-01T00:00:00Z"}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	_ = withFakeSink(t)
+
+	_ = NewEvent("init")
+
+	loaded, _ := LoadConfig()
+	if loaded.InstallID != "stable-id" {
+		t.Errorf("install_id was rotated: got %q", loaded.InstallID)
+	}
+	if loaded.Enabled {
+		t.Error("Enabled flag was flipped on by NewEvent; user opt-out not respected")
+	}
+	_ = tmp
 }
 
 func TestFlushNow_DisabledReturnsError(t *testing.T) {
