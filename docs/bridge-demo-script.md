@@ -24,24 +24,47 @@ Two terminals side-by-side (or tmux split).
 
 A shared bare repo at `/tmp/team.git` that both push to and pull from.
 
+Paste this **whole block as-is** into one shell — the `set -e` makes it bail loudly if any step fails, which matters because a silent `git push` failure in Alice's block leaves Bob with an empty clone and Scene 4 fails mysteriously.
+
 ```bash
+set -e
 rm -rf /tmp/team.git /tmp/alice /tmp/bob
-git init --bare /tmp/team.git
+
+# Bare repo with an explicit default branch — don't leave it to git's defaults,
+# which differ by version (master vs main) and can silently mismatch below.
+git init --bare -b main /tmp/team.git
 mkdir /tmp/alice /tmp/bob
 
+# Alice: clone, commit, push. -u origin main makes the first push set upstream
+# tracking so the bare repo actually receives the ref.
 cd /tmp/alice
-git clone /tmp/team.git . && git config user.email alice@demo && git config user.name Alice
+git clone /tmp/team.git .
+git config user.email alice@demo
+git config user.name Alice
+git config commit.gpgsign false
+git checkout -b main 2>/dev/null || git checkout main
 cat > app.py <<'EOF'
 def greet(name):
     return f"hi, {name}"
 EOF
-git add -A && git commit -m "initial" -q && git push -q
+git add -A
+git commit -q -m "initial"
+git push -q -u origin main
 
+# Bob: clones *after* Alice pushed, so he actually gets the initial commit.
 cd /tmp/bob
-git clone /tmp/team.git . && git config user.email bob@demo && git config user.name Bob
+git clone /tmp/team.git .
+git config user.email bob@demo
+git config user.name Bob
+git config commit.gpgsign false
+
+# Sanity check — fail loud if either side is in a bad state.
+[ -f /tmp/alice/app.py ] || { echo "SETUP BROKEN: alice/app.py missing"; exit 1; }
+[ -f /tmp/bob/app.py ]   || { echo "SETUP BROKEN: bob/app.py missing (Alice's push didn't land)"; exit 1; }
+echo "setup ok — alice and bob both at initial commit"
 ```
 
-Both terminals are now sitting on the same `initial` commit. Nothing else has happened yet.
+If that final `setup ok` line doesn't print, **stop** and re-run the block in a fresh shell. Do not start recording until both sides are sitting on the same `initial` commit.
 
 ---
 
