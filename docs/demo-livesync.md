@@ -97,27 +97,52 @@ The `watch -n 0.3` redraws each filesystem pane every 300 ms. When a file arrive
 
 ### The sync feed (the fifth pane)
 
-Run this in a fifth terminal or a sixth tmux pane, pointed at any one of the four dirs (it reads the shared channel from the server):
+Kai writes every live-sync event to a JSONL log at `.kai/sync-log/YYYY-MM-DD.jsonl`. Each line is one event; the interesting fields are `event` (`push` / `recv` / `merge` / `conflict` / `skip`), `file`, `agent`, and `timestamp`. Tail all four agents at once:
+
+```bash
+# Paste into a fifth tmux pane or a dedicated terminal window.
+# jq is the pretty-printer; if you don't have it, fall back to the
+# raw `tail -F` block further down.
+{
+  for d in a b c d; do
+    tail -F /tmp/demo-$d/.kai/sync-log/*.jsonl 2>/dev/null &
+  done
+  wait
+} | jq -r --unbuffered '
+  # Strip the long agent id down to a single letter based on the dir
+  # (agents self-name; the filename path in the log tells us which
+  # working dir they came from). Simpler and demo-safe: color by event.
+  def color(e):
+    if   e == "push"     then "\u001b[1;32m"   # bold green = outgoing
+    elif e == "recv"     then "\u001b[2m"      # dim       = incoming
+    elif e == "merge"    then "\u001b[1;33m"   # bold yellow
+    elif e == "conflict" then "\u001b[1;31m"   # bold red
+    else                       "\u001b[0m" end;
+  "\(color(.event))\(.timestamp | (./1000) | strftime("%H:%M:%S"))  \(.event | ascii_upcase)  \(.file) \u001b[0m"
+'
+```
+
+If you don't have `jq` on the demo machine, raw tail works fine and is still legible:
+
+```bash
+for d in a b c d; do
+  tail -F /tmp/demo-$d/.kai/sync-log/*.jsonl 2>/dev/null | sed "s/^/[$d] /" &
+done
+wait
+```
+
+Poor-man's feed, but on screen it still reads `[a] {"event":"push","file":"src/greet.js",...}` followed a half-second later by three `[b/c/d] {"event":"recv",...}` lines — which is all the demo needs.
+
+### Want a summary instead of per-event lines?
+
+`kai live status` (no `--follow` flag yet) prints a compacted view of the sync_events log since the last capture. Wrap it with `watch` for a 500 ms-refreshing status panel:
 
 ```bash
 cd /tmp/demo-a
-kai activity --follow 2>&1 | while IFS= read -r line; do
-  case "$line" in
-    *"write"*|*"→ sync"*)  color="\033[0m" ;;
-    *"recv"*|*"← sync"*)   color="\033[2m" ;;  # dim for incoming
-    *"merge"*)             color="\033[33m" ;; # yellow = auto-merge
-    *"conflict"*)          color="\033[31m" ;; # red = conflict
-    *)                     color="\033[0m" ;;
-  esac
-  printf "%b%s %s\033[0m\n" "$color" "$(date +%T)" "$line"
-done
+watch -n 0.5 -t kai live status
 ```
 
-If `kai activity --follow` isn't available in your build, fall back to tailing the sync log directly:
-
-```bash
-tail -F /tmp/demo-a/.kai/sync.log 2>/dev/null
-```
+It won't show the hero "file just arrived" moment as cleanly as the tail-based feed — use one, not both.
 
 ### One more clever trick: the "diff heartbeat"
 
