@@ -15195,7 +15195,18 @@ func runCloneKaiOnly(args []string) error {
 	} else {
 		u := rawURL
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			if strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1") {
+			// Distinguish 'org/repo' shorthand from 'host/path' input. If the
+			// first path segment looks like a hostname (contains '.' or ':',
+			// or matches the localhost special cases), treat the whole thing
+			// as a server URL. Otherwise it's shorthand against DefaultServer.
+			firstSeg := strings.SplitN(u, "/", 2)[0]
+			isHostnameLike := strings.Contains(firstSeg, ".") ||
+				strings.Contains(firstSeg, ":") ||
+				firstSeg == "localhost" ||
+				firstSeg == "127.0.0.1"
+			if !isHostnameLike {
+				u = strings.TrimRight(remote.DefaultServer, "/") + "/" + u
+			} else if strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1") {
 				u = "http://" + u
 			} else {
 				u = "https://" + u

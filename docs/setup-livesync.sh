@@ -44,13 +44,20 @@ kai init
 kai capture -m "scaffold"
 kai push
 
-# Read the <tenant>/<repo> kai just created for us.
-SLUG=$(kai remote get origin | awk '/Tenant:/{t=$2} /Repo:/{r=$2} END{printf "%s/%s", t, r}')
-echo "seed published at: $SLUG"
+# Read the full URL kai just set up (URL + tenant + repo).
+# Build a full https:// form because 'kai clone <org>/<repo>' shorthand
+# is currently broken in the parser — see the bug in cmd/kai/main.go:~15200.
+eval "$(kai remote get origin | awk '
+  /URL:/    {print "URL="$2}
+  /Tenant:/ {print "TENANT="$2}
+  /Repo:/   {print "REPO="$2}
+')"
+FULL_URL="${URL%/}/$TENANT/$REPO"
+echo "seed published at: $FULL_URL"
 
 # ── Clone the same kai repo into /tmp/demo-{b,c,d} (working tree only). ──
 for d in b c d; do
-  kai clone "$SLUG" "/tmp/demo-$d" --kai-only
+  kai clone "$FULL_URL" "/tmp/demo-$d" --kai-only
 done
 
 echo
