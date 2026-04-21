@@ -15,9 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -210,6 +212,13 @@ func (s *Server) Serve(ctx context.Context) error {
 	)
 
 	s.registerTools(srv)
+
+	// Reconcile any stale or orphaned MCP sessions from prior runs before
+	// we take over the workdir. If a sibling session is alive and healthy,
+	// this returns an error and we refuse to start.
+	if err := s.reconcileExistingSessions(); err != nil {
+		return err
+	}
 
 	// Write MCP session file so kai capture can detect active AI sessions.
 	// The initial write uses the "mcp-client" fallback; the after-initialize
@@ -498,6 +507,96 @@ func (s *Server) touchSessionFile() {
 // removeSessionFile cleans up when the MCP server exits.
 func (s *Server) removeSessionFile() {
 	os.Remove(s.sessionFilePath())
+}
+
+// reconcileExistingSessions handles any other MCP session files present in
+// s.kaiDir before we start watching files. Running multiple MCP servers in
+// the same workdir causes every one of them to attach a separate fsnotify
+// watcher and log its own push/skip for every event — the sync feed fills
+// with noise.
+//
+// For each stale session file we find:
+//
+//   - If the PID is dead → leftover from a prior crash. Delete the file.
+//   - If the PID is alive and its parent is dead → the parent Claude exited
+//     without taking its MCP child with it. Safe to take over: SIGTERM the
+//     orphan and delete its session file.
+//   - If the PID is alive and its parent is also alive → a legitimate
+//     concurrent Claude session is running here. Refuse to start so we
+//     don't fight over fsnotify events (and so we don't enter a ping-pong
+//     kill loop where each MCP kills the other on restart).
+//
+// The "parent alive" check is what makes this safe: once an MCP is
+// orphaned we take over permanently; once a real sibling exists, we
+// always refuse. There's no state that flips back and forth.
+func (s *Server) reconcileExistingSessions() error {
+	entries, err := os.ReadDir(s.kaiDir)
+	if err != nil {
+		return nil
+	}
+	myPid := os.Getpid()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "mcp-session-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		pidStr := strings.TrimSuffix(strings.TrimPrefix(name, "mcp-session-"), ".json")
+		pid, convErr := strconv.Atoi(pidStr)
+		if convErr != nil || pid == myPid {
+			continue
+		}
+		path := filepath.Join(s.kaiDir, name)
+
+		if !processAlive(pid) {
+			os.Remove(path)
+			continue
+		}
+
+		ppid, ok := parentPID(pid)
+		if !ok || !processAlive(ppid) {
+			// Orphan — parent Claude is gone. Take over.
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			os.Remove(path)
+			continue
+		}
+
+		// Live sibling. Refuse to start; let the user pick which Claude to close.
+		return fmt.Errorf("another MCP server is already running in %s (pid %d, parent pid %d). "+
+			"Close one of the Claude sessions for this workdir, or kill pid %d, then retry",
+			s.workDir, pid, ppid, pid)
+	}
+	return nil
+}
+
+// processAlive returns true if a signal-0 kill succeeds (process exists
+// and we can signal it). A "permission denied" errno also means the
+// process exists (just owned by someone else), which is treated as alive.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	return err == syscall.EPERM
+}
+
+// parentPID returns the PPID of pid via `ps`. Portable across macOS and
+// Linux without pulling in platform-specific sysctl code.
+func parentPID(pid int) (int, bool) {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, false
+	}
+	return ppid, true
 }
 
 // Close cleans up resources.

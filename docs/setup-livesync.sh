@@ -10,6 +10,11 @@ kai version | grep -qE '0\.(1[2-9]|[2-9][0-9])' || {
   echo "need kai >= 0.12.3"; exit 1
 }
 
+# Kill any MCP servers / tmux session left from a prior demo run. Otherwise
+# their fsnotify watchers stay attached and flood the new sync log with
+# skip-events (see docs/teardown-livesync.sh).
+bash "$(dirname "$0")/teardown-livesync.sh"
+
 rm -rf /tmp/demo-a /tmp/demo-b /tmp/demo-c /tmp/demo-d
 
 # ── Agent A's dir is the seed: init, push once, then clone for b/c/d. ──
@@ -55,9 +60,22 @@ eval "$(kai remote get origin | awk '
 FULL_URL="${URL%/}/$TENANT/$REPO"
 echo "seed published at: $FULL_URL"
 
-# ── Clone the same kai repo into /tmp/demo-{b,c,d} (working tree only). ──
+# ── Clone the same kai repo into /tmp/demo-{b,c,d}, then init a local
+# git repo in each so all four dirs are symmetric. We use --kai-only
+# because the kaicontext server doesn't serve git refs (kai push
+# uploads the snapshot, not a git remote). Each B/C/D gets an
+# independent local git history rooted at the scaffold state — fine
+# for the demo, since agents sync via kai, not git. ──
 for d in b c d; do
   kai clone "$FULL_URL" "/tmp/demo-$d" --kai-only
+  (
+    cd "/tmp/demo-$d"
+    git init -q -b main
+    git config user.email demo@demo
+    git config user.name Demo
+    git config commit.gpgsign false
+    git add -A && git commit -q -m "scaffold"
+  )
 done
 
 echo
