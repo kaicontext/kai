@@ -173,62 +173,73 @@ If you're editing the recording after the fact: detect the frame where each file
 
 Stick to this palette. In the sync feed, in the pane borders, in the voiceover callouts. Consistency is what lets a viewer track four things at once for two minutes.
 
-### One-shot setup (paste into a fifth, temporary shell)
+### One-shot setup
+
+Save this as `/tmp/setup-livesync.sh` and run `bash /tmp/setup-livesync.sh`. **Do not paste it directly into your interactive shell** — the `set -e` at the top will kill your terminal on any error (including Ctrl+C during the `kai init` org prompt).
 
 ```bash
-set -e
-kai version | grep -qE '0\.(1[2-9]|[2-9][0-9])' || { echo "need kai >= 0.12.3"; exit 1; }
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Bare repo that all four agents will sync through kaicontext.com
-rm -rf /tmp/demo-seed /tmp/demo-a /tmp/demo-b /tmp/demo-c /tmp/demo-d
-mkdir /tmp/demo-seed && cd /tmp/demo-seed
+kai version | grep -qE '0\.(1[2-9]|[2-9][0-9])' || {
+  echo "need kai >= 0.12.3"; exit 1
+}
+
+rm -rf /tmp/demo-a /tmp/demo-b /tmp/demo-c /tmp/demo-d
+
+# ── Agent A's dir is the seed: init, push once, then clone for b/c/d. ──
+mkdir -p /tmp/demo-a && cd /tmp/demo-a
 git init -q -b main
-git config user.email demo@demo && git config user.name Demo
+git config user.email demo@demo
+git config user.name Demo
 git config commit.gpgsign false
 
-# Scaffolding small enough that every agent fits on one screen
 mkdir -p src tests docs
-cat > src/greet.js <<'EOF'
+cat > src/greet.js <<'JS'
 // TODO: implement greet(name)
-EOF
-cat > tests/greet.test.js <<'EOF'
+JS
+cat > tests/greet.test.js <<'JS'
 // TODO: tests for greet(name)
-EOF
-cat > docs/greet.md <<'EOF'
+JS
+cat > docs/greet.md <<'MD'
 # greet(name)
 
 TODO: describe
-EOF
-cat > README.md <<'EOF'
+MD
+cat > README.md <<'MD'
 # live-sync demo
 Four agents build greet(name) together.
-EOF
+MD
 
 git add -A && git commit -q -m "scaffold"
-kai init                   # first run: interactive org pick
+
+# kai init is interactive: it'll prompt for an org the first time.
+# Pick one, or press Enter to skip if you already have a default.
+kai init
 kai capture -m "scaffold"
 kai push
 
-# Clone into four working dirs. Each will be one agent's workspace.
-for d in a b c d; do
-  cp -r /tmp/demo-seed /tmp/demo-$d
-  # Independent kai databases per agent — they meet on the kaicontext server,
-  # not on the filesystem. Reset local .kai so each agent initializes fresh.
-  rm -rf /tmp/demo-$d/.kai /tmp/demo-$d/.git
-  cd /tmp/demo-$d
-  git init -q -b main && git config user.email demo@demo && git config user.name Demo
-  git config commit.gpgsign false
-  git add -A && git commit -q -m scaffold
-  # Point origin at the kaicontext repo we just pushed
-  KAIREPO=$(cd /tmp/demo-seed && grep -oE 'remote/origin/.*' .kai/db.sqlite 2>/dev/null | head -1 || echo "")
-  kai remote set origin $(cd /tmp/demo-seed && kai remote get origin 2>/dev/null || echo "")
-  kai fetch origin 2>&1 | tail -1
+# Read the <tenant>/<repo> kai just created for us.
+SLUG=$(kai remote get origin | awk '/Tenant:/{t=$2} /Repo:/{r=$2} END{printf "%s/%s", t, r}')
+echo "seed published at: $SLUG"
+
+# ── Clone the same kai repo into /tmp/demo-{b,c,d} (working tree only). ──
+for d in b c d; do
+  kai clone "$SLUG" /tmp/demo-$d --kai-only
 done
 
-echo "=== ready: open 4 Claude Code sessions, one in each /tmp/demo-{a,b,c,d} ==="
+echo
+echo "=== ready ==="
+echo "  Open 4 Claude Code sessions, one in each of:"
+for d in a b c d; do echo "    /tmp/demo-$d"; done
 ```
 
-(If the `kai remote set`/`fetch` dance is flaky at your install, just `kai clone` the same kaicontext repo four times into the four paths — the point is each agent ends up pointing at the same remote.)
+**What this gives you:**
+
+- `/tmp/demo-a` — the seed repo, kai-initialized, pushed to kaicontext.
+- `/tmp/demo-b`, `/tmp/demo-c`, `/tmp/demo-d` — each a fresh `kai clone --kai-only` of the same kaicontext repo. Independent local kai DBs, same remote, same sync channel when they call `kai_live_sync`.
+
+**If `kai init` hangs or the org picker annoys you on every demo run:** create the repo once manually on kaicontext.com, then replace the `kai init` line with `KAI_SERVER=https://kaicontext.com kai remote set origin https://kaicontext.com && kai push` — fully non-interactive after the one-time repo creation.
 
 ### Enable live-sync in each Claude session
 
