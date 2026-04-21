@@ -1473,6 +1473,37 @@ var remoteDelCmd = &cobra.Command{
 	RunE:  runRemoteDel,
 }
 
+// ── Org management ─────────────────────────────────────────────────
+
+var orgCmd = &cobra.Command{
+	Use:   "org",
+	Short: "Manage organizations on the remote server",
+	Long: `Inspect and administer organizations on a remote Kailab server
+(kaicontext.com by default). Requires an authenticated session
+(run 'kai auth login' first).`,
+}
+
+var orgListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List organizations you belong to",
+	RunE:  runOrgList,
+}
+
+var orgDeleteYes bool
+
+var orgDeleteCmd = &cobra.Command{
+	Use:   "delete <slug>",
+	Short: "Delete an organization (hard delete, destructive)",
+	Long: `Hard-deletes an organization, every repo inside it, and all
+dependent data (snapshots, refs, CI runs, webhooks, secrets, variables,
+billing, memberships). Irreversible.
+
+Only the org owner can delete an org. The CLI requires you to type the
+slug to confirm; --yes skips the prompt (for scripts).`,
+	Args: cobra.ExactArgs(1),
+	RunE: runOrgDelete,
+}
+
 var pushCmd = &cobra.Command{
 	Use:   "push [remote] [target...]",
 	Short: "Push snapshots, changesets, and reviews to a remote server",
@@ -3361,6 +3392,10 @@ func init() {
 	remoteCmd.AddCommand(remoteListCmd)
 	remoteCmd.AddCommand(remoteDelCmd)
 
+	orgDeleteCmd.Flags().BoolVarP(&orgDeleteYes, "yes", "y", false, "Skip confirmation prompt (dangerous)")
+	orgCmd.AddCommand(orgListCmd)
+	orgCmd.AddCommand(orgDeleteCmd)
+
 	// Add ref subcommands
 	refCmd.AddCommand(refListCmd)
 	refCmd.AddCommand(refSetCmd)
@@ -3627,6 +3662,8 @@ func init() {
 	authCmd.GroupID = groupRemote
 	updateCmd.GroupID = groupRemote
 	rootCmd.AddCommand(remoteCmd)
+	orgCmd.GroupID = groupRemote
+	rootCmd.AddCommand(orgCmd)
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(fetchCmd)
 	rootCmd.AddCommand(pullCmd)
@@ -13754,6 +13791,86 @@ func runRemoteDel(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Deleted remote '%s'\n", name)
+	return nil
+}
+
+// ── kai org list / delete ──────────────────────────────────────────
+
+// newControlClientAuthed returns a ControlClient pointed at KAI_SERVER
+// (default kaicontext.com) with the current user's access token wired
+// in. Returns a friendly error if the user is not logged in.
+func newControlClientAuthed() (*remote.ControlClient, error) {
+	serverURL := os.Getenv("KAI_SERVER")
+	if serverURL == "" {
+		serverURL = remote.DefaultServer
+	}
+	token, err := remote.GetValidAccessToken()
+	if err != nil || token == "" {
+		return nil, fmt.Errorf("not logged in — run 'kai auth login' first")
+	}
+	c := remote.NewControlClient(serverURL)
+	c.AuthToken = token
+	return c, nil
+}
+
+func runOrgList(cmd *cobra.Command, args []string) error {
+	c, err := newControlClientAuthed()
+	if err != nil {
+		return err
+	}
+	orgs, err := c.ListOrgs()
+	if err != nil {
+		return fmt.Errorf("listing orgs: %w", err)
+	}
+	if len(orgs) == 0 {
+		fmt.Println("You don't belong to any organizations.")
+		return nil
+	}
+	for _, o := range orgs {
+		fmt.Printf("  %-20s  %s\n", o.Slug, o.Name)
+	}
+	return nil
+}
+
+func runOrgDelete(cmd *cobra.Command, args []string) error {
+	slug := args[0]
+	c, err := newControlClientAuthed()
+	if err != nil {
+		return err
+	}
+
+	if !orgDeleteYes {
+		// List repos first so the user sees the blast radius.
+		repos, err := c.ListRepos(slug)
+		if err != nil {
+			// A 403/404 here usually means the user isn't a member;
+			// we still want to try the delete for the owner-only case,
+			// so just warn and continue to the confirmation prompt.
+			fmt.Fprintf(os.Stderr, "Note: couldn't list repos (%v); proceeding.\n\n", err)
+		} else {
+			fmt.Printf("About to delete organization %q and %d repo(s):\n", slug, len(repos))
+			for _, r := range repos {
+				fmt.Printf("  - %s/%s\n", slug, r.Name)
+			}
+			fmt.Println()
+			fmt.Println("This is irreversible. Every snapshot, ref, CI run, webhook,")
+			fmt.Println("secret, variable, and membership will be permanently removed.")
+			fmt.Println()
+		}
+		fmt.Printf("Type the org slug (%s) to confirm: ", slug)
+		reader := bufio.NewReader(os.Stdin)
+		typed, _ := reader.ReadString('\n')
+		typed = strings.TrimSpace(typed)
+		if typed != slug {
+			return fmt.Errorf("confirmation did not match; org NOT deleted")
+		}
+	}
+
+	reposDeleted, err := c.DeleteOrg(slug)
+	if err != nil {
+		return fmt.Errorf("deleting org: %w", err)
+	}
+	fmt.Printf("✓ Deleted organization %q (%d repo(s))\n", slug, reposDeleted)
 	return nil
 }
 

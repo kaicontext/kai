@@ -1379,6 +1379,40 @@ func (c *ControlClient) CreateOrg(slug, name string) (*OrgInfo, error) {
 	return &result, nil
 }
 
+// DeleteOrg hard-deletes an org, every repo in it, and all dependent
+// data. Requires the caller to be the org owner. The server additionally
+// requires ?confirm=<slug> — we pass it automatically.
+//
+// On success returns a summary: number of repos deleted.
+func (c *ControlClient) DeleteOrg(slug string) (reposDeleted int, err error) {
+	url := fmt.Sprintf("%s/api/v1/orgs/%s?confirm=%s", c.BaseURL, slug, slug)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("server error: %d %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		DeletedOrg   string `json:"deleted_org"`
+		ReposDeleted int    `json:"repos_deleted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("decoding response: %w", err)
+	}
+	return result.ReposDeleted, nil
+}
+
 // ListRepos lists repositories in an organization.
 func (c *ControlClient) ListRepos(orgSlug string) ([]RepoInfo, error) {
 	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/orgs/"+orgSlug+"/repos", nil)
