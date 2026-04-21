@@ -6,6 +6,32 @@
 
 ---
 
+## TL;DR — run the whole thing
+
+Two scripts, in order, from the kai repo root:
+
+```bash
+# 1. Build the four agent working dirs (interactive on first run:
+#    kai init will ask you to pick an org).
+bash docs/setup-livesync.sh
+
+# 2. Open tmux with the 4-agent + sync-feed layout.
+bash docs/layout-livesync.sh
+```
+
+You're now attached to a tmux session `livesync`. Inside:
+
+1. In each of the four agent panes, run: `claude`
+2. Paste the **"join channel"** prompt (section below) into all four Claude windows so they connect to the same sync channel.
+3. Paste the **four role prompts** (Agent A–D, also below) into their respective windows.
+4. Watch the bottom sync-feed pane for `PUSH` / `RECV` events as the agents build `greet(name)` together.
+
+Detach with `Ctrl-B d`, reattach with `tmux attach -t livesync`, kill with `tmux kill-session -t livesync`.
+
+---
+
+---
+
 ## The argument in one paragraph
 
 An AI agent is a great way to finish one task quickly. Four AI agents are, in theory, a great way to finish four tasks quickly — except the moment you run them against the same codebase, you get race conditions, clobbered files, and contradictory edits that someone still has to reconcile. The industry's current answer is "run them one at a time," which is another way of saying "don't use the parallelism that's right in front of you." Kai's answer is different: let them work simultaneously, semantically merge their edits in real time, and track who did what so you can actually review the result.
