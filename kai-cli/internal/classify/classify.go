@@ -35,9 +35,9 @@ func (d *Detector) SetSymbols(fileID string, symbols []*coregraph.Node) {
 }
 
 // DetectChanges detects all change types between two versions of a file.
-// Optional lang parameter specifies the language for proper parsing.
-func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang ...string) ([]*ChangeType, error) {
-	return d.inner.DetectChanges(path, beforeContent, afterContent, fileID, lang...)
+// The lang parameter specifies the language for proper parsing (e.g., "py", "js", "ts").
+func (d *Detector) DetectChanges(path string, beforeContent, afterContent []byte, fileID string, lang string) ([]*ChangeType, error) {
+	return d.inner.DetectChanges(path, beforeContent, afterContent, fileID, lang)
 }
 
 // DetectFileChange creates a FILE_CONTENT_CHANGED for non-parseable files.
