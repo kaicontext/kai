@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"kai/internal/authorship"
 	spawnpkg "kai/internal/spawn"
 	"kai/internal/synclog"
 )
@@ -118,7 +119,7 @@ func handleAgents(w http.ResponseWriter, r *http.Request) {
 		if t, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 			dto.UptimeSec = int64(time.Since(t).Seconds())
 		}
-		lastFile, lastTs, sparks := summarizeSyncLog(kdPath, time.Now())
+		lastFile, lastTs, sparks := summarizeActivity(kdPath, time.Now())
 		dto.LastFile = lastFile
 		dto.LastEventTs = lastTs
 		dto.Sparkline = sparks
@@ -154,17 +155,31 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		kdPath := filepath.Join(e.Path, ".kai")
-		evs := readRecentSyncLog(kdPath, 50)
-		for _, ev := range evs {
+		displayName := displayAgentName(e.Agent, e.WorkspaceName)
+		// Sync events (peer push/recv/merge/conflict).
+		for _, ev := range readRecentSyncLog(kdPath, 50) {
 			all = append(all, eventDTO{
 				Type:      ev.Event,
 				Agent:     ev.Agent,
-				AgentName: displayAgentName(e.Agent, e.WorkspaceName),
+				AgentName: displayName,
 				Color:     color,
 				File:      ev.File,
 				Timestamp: ev.Timestamp,
 				Detail:    ev.Detail,
 			})
+		}
+		// Local checkpoint events (this agent's authored edits).
+		if cps, err := authorship.ReadPendingCheckpoints(kdPath); err == nil {
+			for _, cp := range cps {
+				all = append(all, eventDTO{
+					Type:      "checkpoint",
+					Agent:     cp.Agent,
+					AgentName: displayName,
+					Color:     color,
+					File:      cp.File,
+					Timestamp: cp.Timestamp,
+				})
+			}
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Timestamp > all[j].Timestamp })
@@ -283,28 +298,46 @@ func readRecentSyncLog(kdPath string, max int) []synclog.SyncLogEntry {
 	return entries
 }
 
-// summarizeSyncLog returns the most recent file edited, its timestamp,
-// and a 20-bucket sparkline of event counts over the last 5 minutes.
-func summarizeSyncLog(kdPath string, now time.Time) (string, int64, []int) {
+// summarizeActivity returns the most recent file the agent touched, its
+// timestamp, and a 20-bucket sparkline of activity over the last 5
+// minutes. Pulls from BOTH the sync-log (peer push/recv events) AND the
+// local checkpoint files (authorship records), so the dashboard reflects
+// agent activity even when live-sync hasn't fired any peer events.
+func summarizeActivity(kdPath string, now time.Time) (string, int64, []int) {
 	const buckets = 20
 	const windowSec = 300
 	bucketSec := int64(windowSec / buckets)
 	hist := make([]int, buckets)
 	cutoff := now.Add(-time.Duration(windowSec) * time.Second).UnixMilli()
-	recent := readRecentSyncLog(kdPath, 500)
+
+	type tsFile struct {
+		ts   int64
+		file string
+	}
+	all := []tsFile{}
+
+	for _, e := range readRecentSyncLog(kdPath, 500) {
+		all = append(all, tsFile{ts: e.Timestamp, file: e.File})
+	}
+	if cps, err := authorship.ReadPendingCheckpoints(kdPath); err == nil {
+		for _, cp := range cps {
+			all = append(all, tsFile{ts: cp.Timestamp, file: cp.File})
+		}
+	}
+
 	var lastFile string
 	var lastTs int64
-	for _, e := range recent {
-		if e.Timestamp > lastTs {
-			lastTs = e.Timestamp
-			if e.File != "" {
-				lastFile = e.File
+	for _, x := range all {
+		if x.ts > lastTs {
+			lastTs = x.ts
+			if x.file != "" {
+				lastFile = x.file
 			}
 		}
-		if e.Timestamp < cutoff {
+		if x.ts < cutoff {
 			continue
 		}
-		idx := int((now.UnixMilli()-e.Timestamp)/(bucketSec*1000)) % buckets
+		idx := int((now.UnixMilli()-x.ts)/(bucketSec*1000)) % buckets
 		if idx < 0 || idx >= buckets {
 			continue
 		}
