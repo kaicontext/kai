@@ -2,6 +2,138 @@
 
 All notable changes to Kai are documented here.
 
+## [0.13.0] — 2026-04-26
+
+### CLI — `kai spawn` / `kai despawn` / `kai spawn list`
+- **`kai spawn`** stands up N disposable, sync-connected workspaces from a snapshot. Workspace 1 is materialized via `kai checkout` from the object store; workspaces 2..N are CoW-cloned (APFS clone on macOS, reflink on btrfs/xfs, fallback to `cp -R`) from workspace 1, with their cloned graph DBs rewritten in place to give each a fresh workspace ID, name, and agent name.
+- **`kai despawn`** refuses workspaces with unpushed checkpoints unless `--force`; pushes first if a remote is configured. Removes the dir, drops the registry entry, optionally runs `kai prune`.
+- **`kai spawn list`** reads the spawn registry at `~/.kai/spawned.json` (each spawned dir is its own independently-init'd repo, so there's no central `.kai/` to query).
+- **`kai push` writes a `.kai/last-push` marker** the despawn safety gate reads to decide whether the workspace has unpushed snapshots.
+- **Workspace metadata gains an `AgentName` field.** `kai checkpoint` falls back to it when neither `--agent` flag nor `KAI_CHECKPOINT_AGENT` env is set, so agents pre-registered at spawn time get correct attribution without threading `--agent` through every hook.
+- spawn/despawn/spawn list CLI (`8c38f4e`)
+- 0.13.0 release (`133989f`)
+
+## [0.12.5] — 2026-04-21
+
+### CLI
+- **MCP single-instance guard** prevents two `kai mcp serve` processes from racing for the same `.kai/`.
+- **`kai org list`** and **`kai org delete`** subcommands for managing organizations on the remote server (`bca2d59`).
+
+### Docs
+- **`docs/layout-livesync.sh`** plus a TL;DR run order for the 4-agent live-sync demo (`f58b7a6`).
+- 0.12.5 release (`bdadb79`)
+
+## [0.12.4] — 2026-04-21
+
+### CLI
+- **Fix `kai clone <org>/<repo>` shorthand** — parser now correctly resolves the shorthand against the default kaicontext server (`6bac4f7`, `45348b6`).
+
+### Docs
+- **`docs/setup-livesync.sh`** — extracted setup script that doesn't kill your terminal (`6183434`, `2c5c4fa`).
+- **4-agent live-sync demo script** with visible-change staging (`3ba26bd`).
+- **Sync-feed command fix** — replace nonexistent `kai activity --follow` with the actual JSONL tail (`c94ce6b`).
+- **90-second demo script** committed to unbreak the docs-site build (`1c0f771`).
+- **`push` usage messaging reframed** from "commits" to "agent sync events" (`2e2e6d2`).
+
+### CI
+- **Removed `.kailab/workflows/ci.yml`** — GitHub Actions runs the real CI (`8559a9d`).
+
+## [0.12.3] — 2026-04-20
+
+### CLI — Semantic diff polish
+- **Signature and value changes render as red/green pairs** in `kai diff`, matching the voiceover 30-second demo (`820348c`).
+- **`docs/demo-30s.md`** adds `kai intent` as the third beat of the demo (`ff86358`).
+
+## [0.12.2] — 2026-04-20
+
+### CLI
+- **Colorized `kai diff` output** in a TTY (`9eb3c80`, `0cf2406`).
+
+### Docs
+- **Demo script setup fix** — Scene 5 output now matches what actually runs; setup block lets Bob actually receive Alice's initial commit (`a81669f`, `b601b11`).
+
+## [0.12.1] — 2026-04-20
+
+### CLI — Telemetry overhaul
+- **Telemetry default-on (opt-out)** with a one-time first-run notice (`d4b04e7`).
+- **Events ship to PostHog** instead of a self-hosted endpoint (`a13f669`).
+- **Bridge import on `git pull` / `git checkout`**, not just direct commits (`30ca8ec`).
+- 0.12.1 release (`e4edf6c`)
+
+## [0.12.0] — 2026-04-20
+
+### CLI — kai↔git bridge end-to-end
+- **`kai init --git-bridge`** installs a `post-commit` hook so git commits authored outside kai are imported as kai snapshots via `kai bridge import` (`e3665da`).
+- **Milestone checkpoints become git commits** with `Kai-*` trailers via `kai bridge milestone` (`8822e46`).
+- **End-to-end bridge wiring** (`12881a7`).
+- **Smoke-init hook version assertions updated to v3** to keep CI green (`2126e41`).
+
+## [0.11.7] — 2026-04-19
+
+### CLI
+- **`kai clone --kai-only`** clones from kai only, skipping git; materializes files from the latest snapshot on the remote.
+- **`kai doctor --fix`** now installs missing kai-managed hooks in addition to upgrading stale ones.
+- **Live-sync line-merge fallback** for `json` / `yaml` / `md` (file types where AST merge isn't available) (`4bbc329`).
+
+## [0.11.6] — 2026-04-19
+
+### CLI
+- **`kai telemetry flush`** force-uploads spooled telemetry events, bypassing the 24-hour rate limit.
+- **Fix `bufio.Scanner` aliasing bug** in the telemetry spooler (`5cbf90c`).
+
+## [0.11.5] — 2026-04-18
+
+### CLI
+- **Fully exclude framework-generated code** from snapshots (`.svelte-kit/generated`, `.next/cache`, etc.) so Next/Sveltekit/etc. projects don't capture build artifacts (`56afa9b`).
+
+## [0.11.4] — 2026-04-18
+
+### CLI
+- **`kai push` sends ref metadata** (git info, file counts) to the server so the kaicontext history page can render it (`b2d912b`).
+
+## [0.11.3] — 2026-04-18
+
+### CLI — Cross-project authorship continued
+- **PostToolUse hook now writes checkpoints into foreign `.kai/` projects** when an agent edits a file outside its session's project root (`edc1686`).
+
+## [0.11.2] — 2026-04-17
+
+### CLI — Cross-project authorship
+- **Checkpoints route to a foreign `.kai/`** when the edited file is in another kai-init'd project, so AI authorship is captured even on cross-repo edits (`9427ac0`).
+
+## [0.11.1] — 2026-04-17
+
+### CI
+- **Smoke-test contract fix** — `kai init` now prints `Created repo:` so the smoke assertion passes (`ada9bfd`).
+
+## [0.11.0] — 2026-04-17
+
+### Spec — v3
+- **v3 spec:** session base, trust assertions, CI evidence, quiet init (`7c5942c`). Foundation for the upcoming trust-level model (`unverified` / `agent-claimed` / `CI-verified`).
+
+## [0.10.5] — 2026-04-16
+
+### CLI
+- **`kai purge <path-or-glob> --yes`** — escape hatch from immutability: remove a file from every snapshot in history. Supports glob patterns (`**/*.pem`, etc.). Snapshot nodes remain valid for navigation; purged file content is gone (`909bd30`).
+
+## [0.10.4] — 2026-04-15
+
+### CLI
+- **Semantic diff reports const value changes** in addition to symbol structural changes (`db88883`).
+
+## [0.10.3] — 2026-04-15
+
+### CLI — `kai resolve`
+- **Workspace conflict resolution flow** (`e7b4ee2`) — when `kai integrate` produces conflicts, `kai resolve <ws>` materializes them into editable `.HEAD` / `.TARGET` / `.BASE` files; `kai resolve --continue` re-runs the integration with your resolutions.
+- **Fall back to working tree + marker on missing blob** in resolve (`ca0104e`).
+- **Snapshot stores blob content for all file types**, not just text-recognized ones (`fc5969c`).
+- **Analyze on first capture after import** so freshly-imported git history gets symbols and call edges immediately (`9d873a4`).
+
+### CI
+- **Smoke test for `kai init` against staging kai-server** (`b632a64`).
+- **Smoke self-heal test** uses `kai doctor` instead of `kai --version` (`c3a9406`).
+- **Release-kai-cli gated on smoke** (`a2eba48`).
+
 ## [0.10.2] — 2026-04-14
 
 ### CLI — Git hooks can no longer block git
