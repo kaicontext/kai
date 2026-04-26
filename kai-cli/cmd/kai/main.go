@@ -71,7 +71,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.12.5"
+var Version = "0.13.0"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
