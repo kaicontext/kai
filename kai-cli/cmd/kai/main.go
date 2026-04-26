@@ -52,6 +52,7 @@ import (
 	"kai/internal/remote"
 	"kai/internal/review"
 	"kai/internal/snapshot"
+	spawnpkg "kai/internal/spawn"
 	"kai/internal/status"
 	"kai/internal/telemetry"
 	"kai/internal/util"
@@ -3622,6 +3623,8 @@ func init() {
 	checkoutCmd.GroupID = groupAdvanced
 	rootCmd.AddCommand(wsCmd)
 	rootCmd.AddCommand(integrateCmd)
+	rootCmd.AddCommand(spawnCmd)
+	rootCmd.AddCommand(despawnCmd)
 
 	resolveCmd.Flags().BoolVar(&resolveContinue, "continue", false, "Apply user-edited resolutions from .kai/conflicts/<workspace>/")
 	resolveCmd.Flags().BoolVar(&resolveAbort, "abort", false, "Discard pending conflict state for the workspace")
@@ -10892,10 +10895,13 @@ func runCheckpoint(cmd *cobra.Command, args []string) error {
 		return nil // file vanished or unreadable — nothing to checkpoint
 	}
 
-	// Agent name: flag > env > session file > "mcp-client".
+	// Agent name: flag > env > workspace metadata > session file > "mcp-client".
 	agent := checkpointAgent
 	if agent == "" {
 		agent = os.Getenv("KAI_CHECKPOINT_AGENT")
+	}
+	if agent == "" {
+		agent = readAgentFromCurrentWorkspace(kd)
 	}
 	if agent == "" {
 		agent = readAgentFromSessionFile(kd)
@@ -11054,6 +11060,31 @@ func readAgentFromSessionFile(kaiDir string) string {
 		return a
 	}
 	return ""
+}
+
+// readAgentFromCurrentWorkspace looks up the agent name stored in the
+// current workspace's metadata, written by `kai spawn --agent <name>`.
+// Returns "" on any failure so the checkpoint resolution ladder falls
+// through to the next source. Opens the graph DB read-only on the hot
+// path; this is the cost of avoiding state duplication.
+func readAgentFromCurrentWorkspace(kdPath string) string {
+	wsName, err := os.ReadFile(filepath.Join(kdPath, workspaceFile))
+	if err != nil || len(bytes.TrimSpace(wsName)) == 0 {
+		return ""
+	}
+	dbPath := filepath.Join(kdPath, dbFile)
+	objPath := filepath.Join(kdPath, objectsDir)
+	db, err := graph.Open(dbPath, objPath)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	mgr := workspace.NewManager(db)
+	ws, err := mgr.Get(strings.TrimSpace(string(wsName)))
+	if err != nil || ws == nil {
+		return ""
+	}
+	return ws.AgentName
 }
 
 func openDB() (*graph.DB, error) {
@@ -14877,6 +14908,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 	// CI dedup + edge creation: check if CI runs exist for the pushed snapshot
 	if localLatest, _ := refMgr.Get("snap.latest"); localLatest != nil {
 		snapHex := util.BytesToHex(localLatest.TargetID)
+		// Drop a marker so `kai despawn` can tell whether the workspace
+		// has unpushed snapshots without having to round-trip the server.
+		_ = os.WriteFile(filepath.Join(kaiDir, spawnpkg.LastPushFile), []byte(snapHex), 0644)
 		ctrl := remote.NewControlClient(client.BaseURL)
 		if runs, _, err := ctrl.ListCIRuns(client.Tenant, client.Repo, 10); err == nil {
 			for _, r := range runs {

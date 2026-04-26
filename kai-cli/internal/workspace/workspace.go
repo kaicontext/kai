@@ -29,6 +29,7 @@ type Workspace struct {
 	OpenChangeSets [][]byte
 	Description    string
 	CreatedAt      int64
+	AgentName      string
 }
 
 // Manager handles workspace operations.
@@ -79,6 +80,7 @@ func (m *Manager) Create(name string, baseSnapshotID []byte, description string)
 		"openChangeSets": []interface{}{},
 		"description":    description,
 		"createdAt":      now,
+		"agentName":      "",
 	}
 
 	tx, err := m.db.BeginTx()
@@ -432,6 +434,7 @@ func nodeToWorkspace(node *graph.Node) (*Workspace, error) {
 	status, _ := node.Payload["status"].(string)
 	description, _ := node.Payload["description"].(string)
 	createdAt, _ := node.Payload["createdAt"].(float64)
+	agentName, _ := node.Payload["agentName"].(string)
 
 	baseHex, _ := node.Payload["baseSnapshot"].(string)
 	headHex, _ := node.Payload["headSnapshot"].(string)
@@ -460,7 +463,30 @@ func nodeToWorkspace(node *graph.Node) (*Workspace, error) {
 		OpenChangeSets: openCSs,
 		Description:    description,
 		CreatedAt:      int64(createdAt),
+		AgentName:      agentName,
 	}, nil
+}
+
+// SetAgentName updates the agent name stored in workspace metadata.
+// Used by `kai spawn` to pre-register an agent so `kai checkpoint` can
+// fall back to this when no --agent flag is passed.
+func (m *Manager) SetAgentName(nameOrID, agentName string) error {
+	ws, err := m.Get(nameOrID)
+	if err != nil {
+		return err
+	}
+	if ws == nil {
+		return fmt.Errorf("workspace not found: %s", nameOrID)
+	}
+	node, err := m.db.GetNode(ws.ID)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		return fmt.Errorf("workspace node missing")
+	}
+	node.Payload["agentName"] = agentName
+	return m.db.UpdateNodePayload(ws.ID, node.Payload)
 }
 
 // IDToHex converts workspace ID to hex string.
