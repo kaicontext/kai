@@ -2,6 +2,11 @@
 
 All notable changes to Kai are documented here.
 
+## [0.13.1] — 2026-04-26
+
+### CLI — `kai ui`
+- **`kai ui`** opens a local dashboard in your default browser. Localhost-only HTTP server (`127.0.0.1`, random free port unless `--port` is set). Shows live status of every spawned workspace (agent name, last-checkpointed file, checkpoint count, uptime, 5-minute sync-event sparkline) and a real-time strip of recent sync events across all workspaces. Single-page vanilla-JS UI embedded in the binary; no Wails, no Electron, no extra install. Exit with Ctrl+C.
+
 ## [0.13.0] — 2026-04-26
 
 ### CLI — `kai spawn` / `kai despawn` / `kai spawn list`

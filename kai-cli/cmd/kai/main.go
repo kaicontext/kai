@@ -71,7 +71,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.13.0"
+var Version = "0.13.1"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -3625,6 +3625,7 @@ func init() {
 	rootCmd.AddCommand(integrateCmd)
 	rootCmd.AddCommand(spawnCmd)
 	rootCmd.AddCommand(despawnCmd)
+	rootCmd.AddCommand(uiCmd)
 
 	resolveCmd.Flags().BoolVar(&resolveContinue, "continue", false, "Apply user-edited resolutions from .kai/conflicts/<workspace>/")
 	resolveCmd.Flags().BoolVar(&resolveAbort, "abort", false, "Discard pending conflict state for the workspace")
