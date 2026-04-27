@@ -2,6 +2,12 @@
 
 All notable changes to Kai are documented here.
 
+## [0.13.3] — 2026-04-27
+
+### CLI
+- **`kai ci rerun` now accepts run numbers** (e.g. `kai ci rerun 291`), not just internal UUIDs. `runCIRerun` was the only CI subcommand missing the `resolveRunID` lookup that `run` / `logs` / `trace` / `cancel` already had — single-line fix.
+- **`docs/demo-livesync.md`** — escape angle-bracket placeholders so vitepress's vue-template parser doesn't read `<last line>` and `<n>` as unclosed HTML elements (broke kai-server's docs build, since it clones `kai/main` for its docs source).
+
 ## [0.13.2] — 2026-04-27
 
 ### CLI — `kai ui` multi-repo display

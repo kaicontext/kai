@@ -71,7 +71,7 @@ const (
 )
 
 // Version is the current kai CLI version
-var Version = "0.13.2"
+var Version = "0.13.3"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -21253,7 +21253,8 @@ func runCIRerun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	client := remote.NewControlClient(baseURL)
-	newID, err := client.RerunCI(org, repo, args[0])
+	runID := resolveRunID(client, org, repo, args[0])
+	newID, err := client.RerunCI(org, repo, runID)
 	if err != nil {
 		return err
 	}
