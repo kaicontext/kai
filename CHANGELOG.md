@@ -2,6 +2,14 @@
 
 All notable changes to Kai are documented here.
 
+## [0.13.2] — 2026-04-27
+
+### CLI — `kai ui` multi-repo display
+- **Per-card source repo** — each agent card now shows its source repo (e.g. `claude-1 · kaicontext/kai`) so a dashboard with agents spawned from multiple repos is legible at a glance.
+- **Smart header** — replaced the cwd-derived `repo · branch` label with a registry-summary: `N agents · <repo>` (single repo), `N agents across M repos` (multiple), or `no spawned agents` (empty). The dashboard is global across the machine; the cwd was misleading when agents came from different sources.
+- **`/api/header`** schema change: returns `{agent_count, repo_count, repos, sole_repo}` instead of `{repo, branch}`. `/api/agents` adds a `source_repo` field per entry.
+- **Surface checkpoints in the activity sparkline + event feed** (was 0.13.1 follow-up): the dashboard reflects local AI authorship even when no peer sync events have fired, fixing the "everything stays empty" UX in single-agent or sync-off demos.
+
 ## [0.13.1] — 2026-04-26
 
 ### CLI — `kai ui`

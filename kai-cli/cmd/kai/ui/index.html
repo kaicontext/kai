@@ -28,8 +28,7 @@
     </div>
     <span class="text-xl font-semibold tracking-tight ml-2">Kai</span>
     <span class="text-white/20 mx-2">|</span>
-    <span id="repo-label" class="mono text-sm text-white/70"></span>
-    <span id="branch-label" class="mono text-sm text-white/40"></span>
+    <span id="header-summary" class="mono text-sm text-white/70"></span>
   </div>
   <div class="flex items-center gap-3 text-white/40">
     <button class="p-2 rounded hover:bg-white/5" title="Settings (v1)">⚙</button>
@@ -107,8 +106,15 @@ async function loadHeader() {
   try {
     const r = await fetch('/api/header');
     const d = await r.json();
-    document.getElementById('repo-label').textContent = d.repo || '';
-    document.getElementById('branch-label').textContent = d.branch ? '· ' + d.branch : '';
+    const el = document.getElementById('header-summary');
+    if (!d.agent_count) {
+      el.textContent = 'no spawned agents';
+    } else if (d.repo_count <= 1) {
+      const repo = d.sole_repo || '—';
+      el.textContent = `${d.agent_count} agent${d.agent_count === 1 ? '' : 's'} · ${repo}`;
+    } else {
+      el.textContent = `${d.agent_count} agents across ${d.repo_count} repos`;
+    }
   } catch (_) {}
 }
 
@@ -139,11 +145,12 @@ function renderAgentCard(a) {
   return `
     <div class="rounded-xl border border-white/10 bg-white/[0.02] p-5 hover:border-white/20 transition-colors">
       <div class="flex items-start justify-between mb-3">
-        <div class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full" style="background:${a.color}"></span>
-          <span class="font-semibold text-white/90">${escapeHTML(a.name || a.workspace || '?')}</span>
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="w-2 h-2 rounded-full shrink-0" style="background:${a.color}"></span>
+          <span class="font-semibold text-white/90 truncate">${escapeHTML(a.name || a.workspace || '?')}</span>
+          ${a.source_repo ? `<span class="mono text-xs text-white/30 truncate">· ${escapeHTML(a.source_repo)}</span>` : ''}
         </div>
-        <span class="w-1.5 h-1.5 rounded-full ${dotClass}"></span>
+        <span class="w-1.5 h-1.5 rounded-full ${dotClass} shrink-0"></span>
       </div>
       <div class="mono text-sm text-white/80 truncate mb-1" title="${escapeHTML(lastFile)}">${escapeHTML(lastFile)}</div>
       <div class="text-sm text-white/30 mb-4 truncate">${escapeHTML(taskHint)}</div>
@@ -201,6 +208,7 @@ function escapeHTML(s) {
 loadHeader();
 loadAgents();
 loadEvents();
+setInterval(loadHeader, POLL_AGENTS_MS);
 setInterval(loadAgents, POLL_AGENTS_MS);
 setInterval(loadEvents, POLL_EVENTS_MS);
 </script>

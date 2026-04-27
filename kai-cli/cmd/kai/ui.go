@@ -86,6 +86,7 @@ type agentDTO struct {
 	Path        string `json:"path"`
 	Workspace   string `json:"workspace"`
 	SyncMode    string `json:"sync_mode"`
+	SourceRepo  string `json:"source_repo,omitempty"` // e.g. "kaicontext/kai"
 	Checkpoints int    `json:"checkpoints"`
 	UptimeSec   int64  `json:"uptime_sec"`
 	LastFile    string `json:"last_file,omitempty"`
@@ -108,11 +109,12 @@ func handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		kdPath := filepath.Join(e.Path, ".kai")
 		dto := agentDTO{
-			Name:      displayAgentName(e.Agent, e.WorkspaceName),
-			Color:     uiPalette[colorIdx%len(uiPalette)],
-			Path:      e.Path,
-			Workspace: e.WorkspaceName,
-			SyncMode:  e.SyncMode,
+			Name:       displayAgentName(e.Agent, e.WorkspaceName),
+			Color:      uiPalette[colorIdx%len(uiPalette)],
+			Path:       e.Path,
+			Workspace:  e.WorkspaceName,
+			SyncMode:   e.SyncMode,
+			SourceRepo: e.RepoChannel,
 		}
 		colorIdx++
 		dto.Checkpoints = countCheckpointFiles(kdPath)
@@ -190,23 +192,34 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 type headerDTO struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
+	AgentCount int      `json:"agent_count"`
+	RepoCount  int      `json:"repo_count"`
+	Repos      []string `json:"repos"`            // distinct source repos, sorted
+	SoleRepo   string   `json:"sole_repo,omitempty"` // set when RepoCount == 1
 }
 
+// handleHeader summarizes the spawned-workspace registry: how many
+// agents are live and which source repos they came from. The dashboard
+// is global across the machine — it doesn't care about cwd.
 func handleHeader(w http.ResponseWriter, r *http.Request) {
-	cwd, _ := os.Getwd()
-	dto := headerDTO{Repo: filepath.Base(cwd), Branch: ""}
-	if data, err := os.ReadFile(filepath.Join(cwd, ".git", "HEAD")); err == nil {
-		s := strings.TrimSpace(string(data))
-		if strings.HasPrefix(s, "ref: refs/heads/") {
-			dto.Branch = strings.TrimPrefix(s, "ref: refs/heads/")
+	entries, _ := spawnpkg.List()
+	seen := map[string]bool{}
+	repos := []string{}
+	live := 0
+	for _, e := range entries {
+		if _, err := os.Stat(e.Path); err != nil {
+			continue
+		}
+		live++
+		if e.RepoChannel != "" && !seen[e.RepoChannel] {
+			seen[e.RepoChannel] = true
+			repos = append(repos, e.RepoChannel)
 		}
 	}
-	// Prefer remote tenant/repo if available (matches the mockup's
-	// "kaicontext/kai" form). Falls back to dir basename above.
-	if rem, err := remoteOriginEntry(); err == nil && rem != "" {
-		dto.Repo = rem
+	sort.Strings(repos)
+	dto := headerDTO{AgentCount: live, RepoCount: len(repos), Repos: repos}
+	if len(repos) == 1 {
+		dto.SoleRepo = repos[0]
 	}
 	writeJSON(w, dto)
 }
@@ -344,27 +357,6 @@ func summarizeActivity(kdPath string, now time.Time) (string, int64, []int) {
 		hist[buckets-1-idx]++
 	}
 	return lastFile, lastTs, hist
-}
-
-func remoteOriginEntry() (string, error) {
-	// Cheapest: read .kai/remotes.json directly.
-	data, err := os.ReadFile(filepath.Join(".kai", "remotes.json"))
-	if err != nil {
-		return "", err
-	}
-	var cfg struct {
-		Remotes map[string]struct {
-			Tenant string `json:"tenant"`
-			Repo   string `json:"repo"`
-		} `json:"remotes"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", err
-	}
-	if r, ok := cfg.Remotes["origin"]; ok && r.Tenant != "" && r.Repo != "" {
-		return r.Tenant + "/" + r.Repo, nil
-	}
-	return "", nil
 }
 
 func openBrowser(url string) {
