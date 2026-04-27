@@ -193,19 +193,19 @@ Have these ready in your paste buffer — each one goes into its specific window
 
 ### Agent A — backend
 
-> You are the backend agent. Your job is to implement `src/greet.js` so the function `greet(name)` returns `` `hi, ${name}` `` when called. No frills. After writing the file, call `kai_checkpoint` with `file="src/greet.js"`, `start_line=1`, `end_line=<last line of the file you just wrote>`, `action="modify"` so your authorship is recorded for `kai blame`. Then call `kai_checkpoint_now` with `label="greet: implementation"`. Finally, to verify tests pass, call `kai_live_sync` with `action="on"` again, wait ~15s, read `tests/greet.test.js`, and if it contains real test cases (not just the TODO scaffold), run them mentally against your implementation and report pass/fail.
+> You are the backend agent. Your job is to implement `src/greet.js` so the function `greet(name)` returns `` `hi, ${name}` `` when called. No frills. After writing the file, call `kai_checkpoint` with `file="src/greet.js"`, `start_line=1`, `end_line=N` (where N is the last line of the file you just wrote), `action="modify"` so your authorship is recorded for `kai blame`. Then call `kai_checkpoint_now` with `label="greet: implementation"`. Finally, to verify tests pass, call `kai_live_sync` with `action="on"` again, wait ~15s, read `tests/greet.test.js`, and if it contains real test cases (not just the TODO scaffold), run them mentally against your implementation and report pass/fail.
 
 ### Agent B — tests
 
-> You are the tests agent. Your job is to fill in `tests/greet.test.js` with at least two test cases for `greet(name)`: one for a normal name, one for an empty string. Before writing, call `kai_live_sync` with `action="on"` to force a sync, then read `src/greet.js` — agent A should have written the implementation. If `src/greet.js` is still the TODO scaffold, wait ~20s and re-read once; if it's still a TODO, assume the expected return is `` `hi, ${name}` `` and write tests for that. After writing your tests, call `kai_checkpoint` with `file="tests/greet.test.js"`, `start_line=1`, `end_line=<last line>`, `action="modify"` so authorship is recorded, then call `kai_checkpoint_now` with `label="greet: tests"`.
+> You are the tests agent. Your job is to fill in `tests/greet.test.js` with at least two test cases for `greet(name)`: one for a normal name, one for an empty string. Before writing, call `kai_live_sync` with `action="on"` to force a sync, then read `src/greet.js` — agent A should have written the implementation. If `src/greet.js` is still the TODO scaffold, wait ~20s and re-read once; if it's still a TODO, assume the expected return is `` `hi, ${name}` `` and write tests for that. After writing your tests, call `kai_checkpoint` with `file="tests/greet.test.js"`, `start_line=1`, `end_line=N`, `action="modify"` so authorship is recorded, then call `kai_checkpoint_now` with `label="greet: tests"`.
 
 ### Agent C — frontend
 
-> You are the frontend agent. Before writing anything, call `kai_live_sync` with `action="on"` to force a sync, then read `src/greet.js`. If it's still the TODO scaffold, wait ~20s and try once more. Then create `src/App.jsx` that imports `greet` from `./greet` and renders `<h1>{greet("world")}</h1>`. After writing, call `kai_checkpoint` with `file="src/App.jsx"`, `start_line=1`, `end_line=<last line>`, `action="insert"` (it's a new file), then call `kai_checkpoint_now` with `label="greet: frontend wired"`.
+> You are the frontend agent. Before writing anything, call `kai_live_sync` with `action="on"` to force a sync, then read `src/greet.js`. If it's still the TODO scaffold, wait ~20s and try once more. Then create `src/App.jsx` that imports `greet` from `./greet` and renders an `h1` with `greet("world")` as its text. After writing, call `kai_checkpoint` with `file="src/App.jsx"`, `start_line=1`, `end_line=N`, `action="insert"` (it's a new file), then call `kai_checkpoint_now` with `label="greet: frontend wired"`.
 
 ### Agent D — docs
 
-> You are the docs agent. Your job is to update `docs/greet.md` based on what the other agents produce. Work in a loop: (1) call `kai_live_sync` with `action="on"` to force a sync, (2) read `src/greet.js`, `tests/greet.test.js`, and `src/App.jsx`, (3) update `docs/greet.md` with whatever you have — signature, behavior, one call-site example — noting any files that are still TODO scaffolds. After each write to `docs/greet.md`, call `kai_checkpoint` with `file="docs/greet.md"`, `start_line=1`, `end_line=<last line>`, `action="modify"`. Repeat the loop once after ~30s so you catch late arrivals. When all three source files have real content and your docs reference all of them, call `kai_checkpoint_now` with `label="greet: docs"`.
+> You are the docs agent. Your job is to update `docs/greet.md` based on what the other agents produce. Work in a loop: (1) call `kai_live_sync` with `action="on"` to force a sync, (2) read `src/greet.js`, `tests/greet.test.js`, and `src/App.jsx`, (3) update `docs/greet.md` with whatever you have — signature, behavior, one call-site example — noting any files that are still TODO scaffolds. After each write to `docs/greet.md`, call `kai_checkpoint` with `file="docs/greet.md"`, `start_line=1`, `end_line=N`, `action="modify"`. Repeat the loop once after ~30s so you catch late arrivals. When all three source files have real content and your docs reference all of them, call `kai_checkpoint_now` with `label="greet: docs"`.
 
 None of these prompts mentions the other agents by name. They only know the files on disk. Sync + explicit re-polling makes the choreography work.
 
@@ -221,7 +221,7 @@ kai blame src/App.jsx          # Agent C
 kai blame docs/greet.md        # Agent D
 ```
 
-If `kai blame` still returns "no authorship data", the agent skipped the `kai_checkpoint` call — re-prompt it with "call `kai_checkpoint` for the file you just wrote, with line range 1 through <n>".
+If `kai blame` still returns "no authorship data", the agent skipped the `kai_checkpoint` call — re-prompt it with "call `kai_checkpoint` for the file you just wrote, with line range 1 through N".
 
 ---
 
@@ -290,7 +290,7 @@ Hit the `[beat]` pauses between sentences. The hero shot in Scene 4 — file app
 
 ## What's actually happening under the hood
 
-1. **`kai_live_sync` (MCP tool)** — opens an SSE connection from the agent's kai session to `kaicontext.com/<org>/<repo>/v1/sync/live`. Every file the agent writes is pushed via `/v1/sync/push`; every file the channel receives is applied to the local working tree.
+1. **`kai_live_sync` (MCP tool)** — opens an SSE connection from the agent's kai session to `kaicontext.com/{org}/{repo}/v1/sync/live`. Every file the agent writes is pushed via `/v1/sync/push`; every file the channel receives is applied to the local working tree.
 2. **Merge strategy** — when two agents change the same file, kai runs a semantic 3-way merge against the last common snapshot. For JS/TS/Python/Ruby/Rust/Go that's function-level. For JSON/YAML/Markdown it's a naive line-merge that applies cleanly when the edited regions don't overlap. A true conflict logs to `kai activity` and leaves the local edits preserved.
 3. **`kai_checkpoint_now` (MCP tool)** — emits a labeled milestone on the sync channel. No file write, just a marker. Other agents' activity feeds show it and can use it as a coordination signal.
 4. **No coordination protocol between agents.** There's no mutex, no lock, no chat. Each agent reads the filesystem, writes the filesystem, and kai ferries the bytes and merges when they collide. That's the whole thing.
