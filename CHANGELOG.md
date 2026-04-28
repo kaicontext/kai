@@ -2,6 +2,28 @@
 
 All notable changes to Kai are documented here.
 
+## [0.14.0] — 2026-04-28
+
+### CLI — new commands
+- **`kai live on / kai live off`** — CLI surface for the live-sync toggle that was previously only exposed as the `kai_live_sync` MCP tool. Writes/removes `.kai/sync-state.json` which the MCP server reads on startup. Useful for scripting and for getting `kai spawn --sync full` to take effect end-to-end.
+
+### CLI — bug fixes
+- **`kai integrate --into <ref>` now advances `<ref>`.** Previously the operation created a new merged snapshot but never moved the named target ref, so the second integrate from a parallel workspace fast-forwarded past the first one's result. As a consequence the conflict-detection branch was skipped entirely. Two parallel JS edits to the same function body would both report "Integration successful" with no conflict surfaced.
+- **`kai resolve <ws> --continue` now advances the target ref** as well. Same root cause as above; the resolve path had its own copy of the ref-update gap. Skips `ws.*` auto-refs to avoid leaking into other workspaces' state.
+- **`kai resolve --help` example fixed** — used to show `kai integrate myws --target snap.main`, now correctly shows `kai integrate --ws myws --into snap.main` (the actual flags).
+
+### CLI — quality of life
+- **`kai spawn list` auto-cleans stale entries** from `~/.kai/spawned.json` under an exclusive flock. The file no longer accumulates dead paths.
+
+### Packages — public API surface
+- **Lifted `internal/spawn` and `internal/synclog` to `pkg/spawn` and `pkg/synclog`.** Same code, importable by other modules (e.g. the new `kai-desktop`). `RewriteClonedWorkspace` (which depends on the graph DB internals) stays in `internal/spawnclone`.
+
+### Desktop — new `Kai.app`
+- **First-class macOS app** (`kai-desktop/`) — Wails-wrapped local dashboard. Same data model as `kai ui` (reads spawn registry + sync logs + checkpoints) but ships as a 7.7 MB `.app` with a real dock icon, traffic lights, and Cmd-Q. Builds cross-platform via `wails build` once you set up the runtime; for now Mac is the validated target.
+
+### Cleanup
+- **Removed `scripts/changelog-update.js`.** The 1medium-scheduled job hadn't run since 2026-03-06; manual changelog entries written as part of the release ritual produce better output anyway.
+
 ## [0.13.3] — 2026-04-27
 
 ### CLI
