@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"kai/internal/graph"
+	"kai/internal/ref"
 	"kai/internal/util"
 	"kai/internal/workspace"
 )
@@ -186,6 +189,34 @@ func resolveContinueFlow(mgr *workspace.Manager, db dbHandle, wsArg string, stat
 	fmt.Printf("  Applied %d changeset(s)\n", len(result.AppliedChangeSets))
 	if result.AutoResolved > 0 {
 		fmt.Printf("  Auto-resolved: %d change(s)\n", result.AutoResolved)
+	}
+
+	// Advance any ref currently pointing at the original target — same
+	// fix as runIntegrate, but here we don't have the original ref name
+	// string (conflict state stored only the snapshot ID), so we look up
+	// every ref pointing at targetID and advance each. In practice that's
+	// usually just snap.latest plus the workspace's own ws.<name>.head.
+	if realDB, ok := db.(*graph.DB); ok {
+		refMgr := ref.NewRefManager(realDB)
+		if refs, err := refMgr.List(nil); err == nil {
+			targetHex := util.BytesToHex(targetID)
+			for _, r := range refs {
+				// Only advance user-named refs (snap.latest, snap.main, etc.)
+				// — NOT other workspaces' auto-refs (ws.<other>.head/.base)
+				// that happen to point at the same target.
+				if strings.HasPrefix(r.Name, "ws.") {
+					continue
+				}
+				if util.BytesToHex(r.TargetID) == targetHex {
+					if err := refMgr.Set(r.Name, result.ResultSnapshot, ref.KindSnapshot); err == nil {
+						fmt.Printf("  %s -> %s\n", r.Name, util.BytesToHex(result.ResultSnapshot)[:12])
+					}
+				}
+			}
+		}
+		if ws, err := mgr.Get(wsArg); err == nil && ws != nil {
+			_ = ref.NewAutoRefManager(realDB).OnWorkspaceHeadChanged(ws.Name, result.ResultSnapshot)
+		}
 	}
 	return nil
 }

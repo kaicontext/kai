@@ -12765,6 +12765,26 @@ func runIntegrate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Auto-resolved: %d change(s)\n", result.AutoResolved)
 	}
 
+	// Advance the target ref to the merged snapshot if --into named a
+	// ref (e.g. snap.latest). Without this the second integrate from a
+	// parallel workspace fast-forwards past the first one's result —
+	// because the target ref still points at the original base, so
+	// base == target trips the no-conflict shortcut in integrateInternal.
+	refMgr := ref.NewRefManager(db)
+	if existing, _ := refMgr.Get(wsTarget); existing != nil {
+		if err := refMgr.Set(wsTarget, result.ResultSnapshot, ref.KindSnapshot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to advance ref %s: %v\n", wsTarget, err)
+		} else {
+			fmt.Printf("  %s -> %s\n", wsTarget, util.BytesToHex(result.ResultSnapshot)[:12])
+		}
+	}
+
+	// Advance the workspace's own head ref (ws.<name>.head) so subsequent
+	// queries see the merged state, not the pre-merge head.
+	if ws, err := workspace.NewManager(db).Get(wsName); err == nil && ws != nil {
+		_ = ref.NewAutoRefManager(db).OnWorkspaceHeadChanged(ws.Name, result.ResultSnapshot)
+	}
+
 	return nil
 }
 
