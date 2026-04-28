@@ -17,8 +17,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"kai/internal/authorship"
-	spawnpkg "kai/internal/spawn"
-	"kai/internal/synclog"
+	spawnpkg "kai/pkg/spawn"
+	"kai/pkg/synclog"
 )
 
 // `kai ui` — v0 dashboard. Localhost-only, polls JSON endpoints,
@@ -31,7 +31,7 @@ var uiHTML embed.FS
 var (
 	uiPort       int
 	uiNoBrowser  bool
-	uiOpenLater  bool
+	uiApp        bool
 	uiPalette    = []string{"#ef4444", "#3b82f6", "#22c55e", "#a855f7", "#f97316", "#14b8a6", "#eab308", "#ec4899"}
 	syncLogLimit = 200
 )
@@ -50,6 +50,7 @@ The server runs in the foreground; Ctrl+C exits.`,
 func init() {
 	uiCmd.Flags().IntVar(&uiPort, "port", 0, "Port to listen on (0 = random free port)")
 	uiCmd.Flags().BoolVar(&uiNoBrowser, "no-browser", false, "Don't auto-open a browser")
+	uiCmd.Flags().BoolVar(&uiApp, "app", false, "Open in a Chromium-based browser's app mode (borderless single window, dock icon)")
 }
 
 func runUI(cmd *cobra.Command, args []string) error {
@@ -360,6 +361,12 @@ func summarizeActivity(kdPath string, now time.Time) (string, int64, []int) {
 }
 
 func openBrowser(url string) {
+	if uiApp {
+		if openAppMode(url) {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "kai ui: --app requested but no Chromium-based browser found, falling back to default browser")
+	}
 	var c *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -370,4 +377,62 @@ func openBrowser(url string) {
 		c = exec.Command("xdg-open", url)
 	}
 	_ = c.Start()
+}
+
+// openAppMode launches the URL in a Chromium-based browser's "app mode"
+// (--app=<url>) — borderless single window, no tabs/address bar, gets
+// its own dock icon. Tries Chrome → Edge → Brave → Arc → Vivaldi →
+// Chromium until one launches. Returns true on success.
+func openAppMode(url string) bool {
+	type candidate struct {
+		appName string   // for `open -a` on darwin
+		bin     []string // executables to try via PATH on linux/windows
+	}
+	candidates := []candidate{
+		{"Google Chrome", []string{"google-chrome", "chrome", "chrome.exe"}},
+		{"Microsoft Edge", []string{"microsoft-edge", "msedge", "msedge.exe"}},
+		{"Brave Browser", []string{"brave-browser", "brave", "brave.exe"}},
+		{"Arc", nil},
+		{"Vivaldi", []string{"vivaldi", "vivaldi.exe"}},
+		{"Chromium", []string{"chromium", "chromium-browser"}},
+	}
+	for _, c := range candidates {
+		if runtime.GOOS == "darwin" && c.appName != "" {
+			if appExistsDarwin(c.appName) {
+				cmd := exec.Command("open", "-na", c.appName, "--args", "--app="+url)
+				if err := cmd.Start(); err == nil {
+					return true
+				}
+			}
+			continue
+		}
+		for _, b := range c.bin {
+			if path, err := exec.LookPath(b); err == nil {
+				cmd := exec.Command(path, "--app="+url)
+				if err := cmd.Start(); err == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// appExistsDarwin checks whether a macOS .app bundle is installed in
+// any of the standard locations. We use a direct filesystem check
+// rather than `mdfind` because Spotlight indexing can be paused or
+// missing on dev machines, returning false negatives even for apps
+// that are clearly installed.
+func appExistsDarwin(appName string) bool {
+	bundle := appName + ".app"
+	roots := []string{"/Applications", "/System/Applications"}
+	if home, err := os.UserHomeDir(); err == nil {
+		roots = append(roots, filepath.Join(home, "Applications"))
+	}
+	for _, root := range roots {
+		if _, err := os.Stat(filepath.Join(root, bundle)); err == nil {
+			return true
+		}
+	}
+	return false
 }

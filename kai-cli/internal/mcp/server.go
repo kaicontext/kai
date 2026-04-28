@@ -37,7 +37,7 @@ import (
 	"kai/internal/ref"
 	"kai/internal/remote"
 	"kai/internal/snapshot"
-	"kai/internal/synclog"
+	"kai/pkg/synclog"
 	"kai/internal/watcher"
 )
 

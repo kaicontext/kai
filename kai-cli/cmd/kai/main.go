@@ -52,7 +52,7 @@ import (
 	"kai/internal/remote"
 	"kai/internal/review"
 	"kai/internal/snapshot"
-	spawnpkg "kai/internal/spawn"
+	spawnpkg "kai/pkg/spawn"
 	"kai/internal/status"
 	"kai/internal/telemetry"
 	"kai/internal/util"
@@ -1710,6 +1710,87 @@ the last 'kai capture' and what's actually on everyone's disk right now.
 Examples:
   kai live status             # How far ahead of the last snapshot are we?
   kai live status --since 42  # Only count events after seq 42`,
+}
+
+var liveOnCmd = &cobra.Command{
+	Use:   "on",
+	Short: "Enable live sync for this workspace",
+	Long: `Mark live sync as enabled for the current repo by writing
+.kai/sync-state.json. The MCP server picks this up on startup and
+auto-subscribes to the sync channel; pass --files to scope the
+subscription to specific files.
+
+This is the CLI sibling of the kai_live_sync MCP tool. The CLI just
+writes the intent file — for changes to take effect in an already-
+running MCP server, restart the agent session.
+
+Examples:
+  kai live on
+  kai live on --files src/auth.go,src/db.go`,
+	RunE: runLiveOn,
+}
+
+var liveOffCmd = &cobra.Command{
+	Use:   "off",
+	Short: "Disable live sync for this workspace",
+	Long:  `Remove .kai/sync-state.json so the next MCP server startup does not auto-subscribe.`,
+	RunE:  runLiveOff,
+}
+
+// liveSyncState mirrors internal/mcp.persistedSyncState; kept private
+// here so cmd/kai doesn't have to depend on internal/mcp.
+type liveSyncState struct {
+	Enabled bool     `json:"enabled"`
+	Files   []string `json:"files,omitempty"`
+	LastSeq int64    `json:"last_seq,omitempty"`
+}
+
+func runLiveOn(cmd *cobra.Command, args []string) error {
+	if _, err := os.Stat(kaiDir); err != nil {
+		return fmt.Errorf("not in a kai repo: run `kai init` first")
+	}
+	filesStr, _ := cmd.Flags().GetString("files")
+	var files []string
+	for _, f := range strings.Split(filesStr, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			files = append(files, f)
+		}
+	}
+	// Preserve LastSeq if there's already a state file (matches the
+	// behavior of internal/mcp.saveSyncState).
+	var lastSeq int64
+	if data, err := os.ReadFile(filepath.Join(kaiDir, "sync-state.json")); err == nil {
+		var prev liveSyncState
+		if json.Unmarshal(data, &prev) == nil {
+			lastSeq = prev.LastSeq
+		}
+	}
+	st := liveSyncState{Enabled: true, Files: files, LastSeq: lastSeq}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(kaiDir, "sync-state.json"), data, 0644); err != nil {
+		return fmt.Errorf("writing sync-state: %w", err)
+	}
+	if len(files) > 0 {
+		fmt.Printf("Live sync enabled (%d files watched). Restart your MCP session to apply.\n", len(files))
+	} else {
+		fmt.Println("Live sync enabled. Restart your MCP session to apply.")
+	}
+	return nil
+}
+
+func runLiveOff(cmd *cobra.Command, args []string) error {
+	if _, err := os.Stat(kaiDir); err != nil {
+		return fmt.Errorf("not in a kai repo: run `kai init` first")
+	}
+	path := filepath.Join(kaiDir, "sync-state.json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing sync-state: %w", err)
+	}
+	fmt.Println("Live sync disabled. Restart your MCP session to apply.")
+	return nil
 }
 
 var liveStatusCmd = &cobra.Command{
@@ -3677,6 +3758,9 @@ func init() {
 
 	liveCmd.GroupID = groupRemote
 	liveCmd.AddCommand(liveStatusCmd)
+	liveCmd.AddCommand(liveOnCmd)
+	liveCmd.AddCommand(liveOffCmd)
+	liveOnCmd.Flags().String("files", "", "Comma-separated file paths to scope sync to (default: all files)")
 	liveStatusCmd.Flags().Int64("since", 0, "Only count sync_events with seq greater than this")
 	liveStatusCmd.Flags().Int("limit", 100, "Max files listed")
 	liveStatusCmd.Flags().Bool("no-files", false, "Skip listing touched files (summary only)")

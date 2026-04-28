@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Kai</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #000; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+    .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+    .pulse { animation: pulse-dot 2s ease-in-out infinite }
+    .no-scrollbar::-webkit-scrollbar { display: none }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<header class="flex items-center justify-between px-6 py-4 border-b border-white/5">
+  <div class="flex items-center gap-3">
+    <span class="text-xl font-semibold tracking-tight">Kai</span>
+    <span class="text-white/20 mx-2">|</span>
+    <span id="header-summary" class="mono text-sm text-white/70"></span>
+  </div>
+  <div class="flex items-center gap-3 text-white/40">
+    <button class="p-2 rounded hover:bg-white/5" title="Settings (v1)">⚙</button>
+    <button class="p-2 rounded hover:bg-white/5" title="Notifications (v1)">🔔</button>
+    <button class="p-2 rounded hover:bg-white/5" title="Account (v1)">👤</button>
+  </div>
+</header>
+
+<main class="px-6 py-8 pb-32">
+  <div id="agent-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5"></div>
+  <div id="empty-state" class="hidden text-center text-white/30 py-20">
+    No spawned workspaces yet. Run <code class="mono text-white/60">kai spawn --count 4</code> in a repo.
+  </div>
+</main>
+
+<footer class="fixed bottom-0 left-0 right-0 bg-black/80 backdrop-blur border-t border-white/5 px-6 py-4">
+  <div class="flex items-center gap-4">
+    <div class="flex items-center gap-2 text-xs uppercase tracking-widest text-white/40 shrink-0">
+      <span>Live sync</span>
+      <span class="w-2 h-2 rounded-full bg-green-500 pulse"></span>
+    </div>
+    <div id="event-feed" class="flex gap-2 overflow-x-auto no-scrollbar"></div>
+  </div>
+</footer>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

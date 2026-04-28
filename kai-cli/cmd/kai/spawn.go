@@ -16,9 +16,10 @@ import (
 	"kai/internal/graph"
 	"kai/internal/ref"
 	"kai/internal/remote"
-	spawnpkg "kai/internal/spawn"
+	"kai/internal/spawnclone"
 	"kai/internal/util"
 	"kai/internal/workspace"
+	spawnpkg "kai/pkg/spawn"
 )
 
 // ---------------------------------------------------------------------------
@@ -208,7 +209,7 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 		}
 		nameN := workspaceNameFor(dst, i+1)
 		agentN := agentNameFor(spawnAgent, i+1, len(targets))
-		if err := spawnpkg.RewriteClonedWorkspace(filepath.Join(dst, kaiDir), nameN, agentN); err != nil {
+		if err := spawnclone.RewriteClonedWorkspace(filepath.Join(dst, kaiDir), nameN, agentN); err != nil {
 			return fmt.Errorf("rewriting clone %s: %w", dst, err)
 		}
 		// Update the .kai/workspace pointer file inside the clone.

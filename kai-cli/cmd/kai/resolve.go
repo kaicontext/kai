@@ -38,7 +38,7 @@ that you can edit, then re-run the integration with your resolutions.
 
 Workflow:
 
-  $ kai integrate myws --target snap.main
+  $ kai integrate --ws myws --into snap.main
   ✗ Integration produced 2 conflicts. Run 'kai resolve myws' to address them.
 
   $ kai resolve myws
