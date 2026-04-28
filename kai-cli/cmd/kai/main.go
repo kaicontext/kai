@@ -5814,7 +5814,7 @@ func computeCaptureSummary(db *graph.DB, newSnapshotID []byte, matcher *module.M
 					case "json":
 						changes, _ = classify.DetectJSONChanges(path, beforeContent, afterContent)
 					case "ts", "js", "tsx", "jsx", "go", "py":
-						changes, _ = detector.DetectChanges(path, beforeContent, afterContent, "")
+						changes, _ = detector.DetectChanges(path, beforeContent, afterContent, "", lang)
 					default:
 						changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
 					}
@@ -10178,7 +10178,7 @@ func createChangesetFromSnapshots(db *graph.DB, baseSnapID, headSnapID []byte, m
 				changes, err = classify.DetectYAMLChanges(path, beforeContent, afterContent)
 			case "ts", "js":
 				// Use tree-sitter based detection
-				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]))
+				changes, err = detector.DetectChanges(path, beforeContent, afterContent, util.BytesToHex(changedFileIDs[i]), lang)
 			default:
 				// Non-parseable files get FILE_CONTENT_CHANGED
 				changes = []*classify.ChangeType{classify.NewFileChange(classify.FileContentChanged, path)}
