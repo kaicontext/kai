@@ -2,6 +2,16 @@
 
 All notable changes to Kai are documented here.
 
+## [0.15.0] — 2026-04-29
+
+### CLI — `.git/kai/` is the new default
+- **`kai init` in a git repo now puts the kai data directory at `.git/kai/` instead of `.kai/`.** Two practical wins: git auto-ignores everything under `.git/`, so we no longer maintain a `.kai` entry in `.gitignore` for new repos, and `git clean -fdx` doesn't nuke kai state.
+- Already-initialized projects keep their existing `.kai/` (backward compat — no migration required).
+- `$KAI_DIR` overrides everything for explicit cases.
+- Worktrees and submodules (where `.git` is a file, not a dir) currently fall through to `.kai/`. Resolving via `git rev-parse --git-common-dir` is a follow-up.
+- New `kai/internal/kaipath` package centralizes the resolution; the previous `kaiDir` constant is gone in favour of a runtime-resolved package var.
+- Bash hooks (pre-commit, pre-push, post-commit, post-merge, post-checkout) updated to short-circuit on either layout: `[ ! -d .git/kai ] && [ ! -d .kai ]`.
+
 ## [0.14.0] — 2026-04-28
 
 ### CLI — new commands
