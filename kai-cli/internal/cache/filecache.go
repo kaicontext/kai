@@ -8,6 +8,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"kai/internal/kaipath"
 	"kai/internal/util"
 )
 
@@ -29,9 +30,10 @@ CREATE INDEX IF NOT EXISTS idx_cache_path ON file_cache(path);
 `
 
 // Open opens or creates a file cache in the given directory.
-// The cache database is stored at {baseDir}/.kai/cache/files.db
+// The cache database is stored at <kaiDir>/cache/files.db, where kaiDir
+// resolves to .git/kai or .kai depending on the project layout.
 func Open(baseDir string) (*FileCache, error) {
-	cacheDir := filepath.Join(baseDir, ".kai", "cache")
+	cacheDir := filepath.Join(kaipath.Resolve(baseDir), "cache")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return nil, err
 	}

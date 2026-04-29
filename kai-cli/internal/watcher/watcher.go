@@ -20,6 +20,7 @@ import (
 	"kai/internal/dirio"
 	"kai/internal/graph"
 	"kai/internal/ignore"
+	"kai/internal/kaipath"
 	"kai/internal/snapshot"
 	"kai-core/parse"
 )
@@ -65,7 +66,7 @@ type Watcher struct {
 
 // New creates a new file watcher for the given project directory.
 func New(workDir string, db *graph.DB) (*Watcher, error) {
-	kaiDir := filepath.Join(workDir, ".kai")
+	kaiDir := kaipath.Resolve(workDir)
 
 	matcher, err := ignore.LoadFromDir(workDir)
 	if err != nil {

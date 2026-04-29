@@ -33,6 +33,7 @@ import (
 	"kai/internal/authorship"
 	"kai/internal/dirio"
 	"kai/internal/graph"
+	"kai/internal/kaipath"
 	"kai/internal/module"
 	"kai/internal/ref"
 	"kai/internal/remote"
@@ -120,10 +121,11 @@ type Server struct {
 }
 
 // NewServer creates a new MCP server for the given project directory.
-// If .kai already exists and contains a valid database, it opens immediately.
-// Otherwise, initialization is deferred until the first data request.
+// If the kai data directory already exists and contains a valid database,
+// it opens immediately. Otherwise, initialization is deferred until the
+// first data request.
 func NewServer(workDir, version string) *Server {
-	kaiDir := filepath.Join(workDir, ".kai")
+	kaiDir := kaipath.Resolve(workDir)
 	sessionID := fmt.Sprintf("mcp_%d_%d", os.Getpid(), time.Now().UnixMilli())
 	s := &Server{
 		workDir:        workDir,
@@ -170,7 +172,7 @@ func NewServerWithDB(db *graph.DB, workDir, version string) *Server {
 		resolver: ref.NewResolver(db),
 		snap:     snapshot.NewCreator(db, nil),
 		workDir:  workDir,
-		kaiDir:   filepath.Join(workDir, ".kai"),
+		kaiDir:   kaipath.Resolve(workDir),
 		version:  version,
 	}
 }
@@ -2244,12 +2246,12 @@ func (s *Server) handleCheckpoint(ctx context.Context, req mcp.CallToolRequest) 
 	return jsonResult(result)
 }
 
-// findKaiDir walks up from a file path looking for a .kai/ directory.
-// Returns the .kai path if found, empty string otherwise.
+// findKaiDir walks up from a file path looking for a kai data directory
+// (.kai/ or .git/kai/). Returns the path if found, empty string otherwise.
 func findKaiDir(absFilePath string) string {
 	dir := filepath.Dir(absFilePath)
 	for {
-		candidate := filepath.Join(dir, ".kai")
+		candidate := kaipath.Resolve(dir)
 		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
 			// Verify it's a real Kai project (has db.sqlite)
 			if _, err := os.Stat(filepath.Join(candidate, "db.sqlite")); err == nil {
@@ -2881,7 +2883,7 @@ func (s *Server) handleCheckpointNow(ctx context.Context, req mcp.CallToolReques
 	// no git repo, no bridge, or kai-binary-not-on-PATH all result in silent
 	// skip. The bridge subcommand sets KAI_BRIDGE_INPROGRESS=1 internally so
 	// we don't re-enter pre-commit / pre-push here.
-	bridgeSentinel := filepath.Join(s.workDir, ".kai", "bridge-enabled")
+	bridgeSentinel := filepath.Join(s.kaiDir, "bridge-enabled")
 	gitDir := filepath.Join(s.workDir, ".git")
 	if _, err := os.Stat(bridgeSentinel); err == nil {
 		if _, err := os.Stat(gitDir); err == nil {

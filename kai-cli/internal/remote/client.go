@@ -18,6 +18,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"kai-core/cas"
+	"kai/internal/kaipath"
 )
 
 // DefaultServer is the production Kailab server URL.
@@ -736,12 +737,15 @@ type Config struct {
 	Remotes map[string]*RemoteEntry `json:"remotes"` // name -> entry
 }
 
-// LocalConfigPath returns the project-local remote config path (.kai/remotes.json).
-// Resolves to an absolute path based on the current working directory.
+// LocalConfigPath returns the project-local remote config path
+// (<kaiDir>/remotes.json — typically .git/kai/remotes.json in a git
+// repo, .kai/remotes.json otherwise). Resolves to an absolute path
+// based on the current working directory.
 func LocalConfigPath() string {
-	abs, err := filepath.Abs(filepath.Join(".kai", "remotes.json"))
+	rel := filepath.Join(kaipath.Resolve("."), "remotes.json")
+	abs, err := filepath.Abs(rel)
 	if err != nil {
-		return filepath.Join(".kai", "remotes.json")
+		return rel
 	}
 	return abs
 }
@@ -807,13 +811,14 @@ func LoadConfig() (*Config, error) {
 	return &Config{Remotes: make(map[string]*RemoteEntry)}, nil
 }
 
-// SaveConfig saves the remote configuration to the project-local .kai/remotes.json.
-// Returns an error if .kai/ doesn't exist (project must be initialized first).
+// SaveConfig saves the remote configuration to the project-local
+// <kaiDir>/remotes.json. Returns an error if the kai data directory
+// doesn't exist (project must be initialized first).
 func SaveConfig(cfg *Config) error {
 	path := LocalConfigPath()
-	kaiDir, _ := filepath.Abs(".kai")
-	if _, err := os.Stat(kaiDir); os.IsNotExist(err) {
-		return fmt.Errorf("no .kai directory — run 'kai init' first")
+	kaiAbs, _ := filepath.Abs(kaipath.Resolve("."))
+	if _, err := os.Stat(kaiAbs); os.IsNotExist(err) {
+		return fmt.Errorf("no kai data directory — run 'kai init' first")
 	}
 
 	dir := filepath.Dir(path)

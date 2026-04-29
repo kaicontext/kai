@@ -46,6 +46,7 @@ import (
 	"kai/internal/gitio"
 	"kai/internal/graph"
 	"kai/internal/intent"
+	"kai/internal/kaipath"
 	"kai/internal/module"
 	"kai/internal/parse"
 	"kai/internal/ref"
@@ -60,15 +61,22 @@ import (
 )
 
 const (
-	kaiDir               = ".kai"
 	dbFile               = "db.sqlite"
 	objectsDir           = "objects"
 	schemaDir            = "schema"
 	modulesFile          = "kai.modules.yaml"
-	ciPolicyFile         = ".kai/rules/ci-policy.yaml" // Primary location
-	ciPolicyFileFallback = "kai.ci-policy.yaml"        // Legacy location for backwards compat
-	workspaceFile        = "workspace"                 // stores current workspace name
+	ciPolicyFileFallback = "kai.ci-policy.yaml" // Legacy location for backwards compat
+	workspaceFile        = "workspace"          // stores current workspace name
 )
+
+// kaiDir is the project's kai data directory, resolved against cwd at
+// process start. New git repos land in .git/kai (auto-ignored by git);
+// already-initialized projects keep .kai for backward compat.
+// Set $KAI_DIR to override.
+var kaiDir = kaipath.Resolve(".")
+
+// ciPolicyFile is the primary CI policy location (inside kaiDir).
+var ciPolicyFile = filepath.Join(kaiDir, "rules", "ci-policy.yaml")
 
 // Version is the current kai CLI version
 var Version = "0.14.0"
@@ -2320,9 +2328,9 @@ func runBench(cmd *cobra.Command, args []string) error {
 	}
 
 	// Ensure Kai is initialized so the MCP server has a graph to serve
-	kaiPath := filepath.Join(cwd, ".kai")
+	kaiPath := kaipath.Resolve(cwd)
 	if _, err := os.Stat(kaiPath); os.IsNotExist(err) {
-		fmt.Fprintln(os.Stderr, "No .kai directory found — running 'kai capture' first...")
+		fmt.Fprintln(os.Stderr, "No kai data directory found — running 'kai capture' first...")
 		captureCmd := exec.Command("kai", "capture", ".")
 		captureCmd.Dir = cwd
 		captureCmd.Stdout = os.Stderr
@@ -2645,7 +2653,7 @@ fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
-if [ ! -d .kai ]; then
+if [ ! -d .git/kai ] && [ ! -d .kai ]; then
   exit 0
 fi
 kai capture >/dev/null 2>&1 || true
@@ -2664,7 +2672,7 @@ fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
-if [ ! -d .kai ]; then
+if [ ! -d .git/kai ] && [ ! -d .kai ]; then
   exit 0
 fi
 kai push >/dev/null 2>&1 || true
@@ -2686,7 +2694,7 @@ fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
-if [ ! -d .kai ]; then
+if [ ! -d .git/kai ] && [ ! -d .kai ]; then
   exit 0
 fi
 SHA=$(git rev-parse HEAD 2>/dev/null) || exit 0
@@ -2708,7 +2716,7 @@ fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
-if [ ! -d .kai ]; then
+if [ ! -d .git/kai ] && [ ! -d .kai ]; then
   exit 0
 fi
 # Walk new commits (oldest first) and import each. ORIG_HEAD is set by
@@ -2733,7 +2741,7 @@ fi
 if ! command -v kai >/dev/null 2>&1; then
   exit 0
 fi
-if [ ! -d .kai ]; then
+if [ ! -d .git/kai ] && [ ! -d .kai ]; then
   exit 0
 fi
 # Only act on branch switches (arg 3 = 1), not file checkouts.
@@ -2770,11 +2778,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s kai binary not on PATH (you're running it somehow, but child processes may not find it)\n", warn)
 	}
 
-	// .kai directory
-	if _, err := os.Stat(".kai"); err == nil {
-		fmt.Printf("%s .kai directory present\n", ok)
+	// kai data directory
+	if _, err := os.Stat(kaiDir); err == nil {
+		fmt.Printf("%s kai data directory present (%s)\n", ok, kaiDir)
 	} else {
-		fmt.Printf("%s .kai directory missing — run 'kai init'\n", bad)
+		fmt.Printf("%s kai data directory missing — run 'kai init'\n", bad)
 	}
 
 	// git repo + hooks
@@ -2879,10 +2887,10 @@ func selfHealHooks() {
 }
 
 // bridgeEnabled reports whether the kai↔git bridge is turned on for this
-// repo. Presence of .kai/bridge-enabled is the sentinel; the file is written
-// by 'kai init --git-bridge' (or 'kai bridge enable', future).
+// repo. Presence of <kaiDir>/bridge-enabled is the sentinel; the file is
+// written by 'kai init --git-bridge' (or 'kai bridge enable', future).
 func bridgeEnabled() bool {
-	_, err := os.Stat(filepath.Join(".kai", "bridge-enabled"))
+	_, err := os.Stat(filepath.Join(kaiDir, "bridge-enabled"))
 	return err == nil
 }
 
@@ -4053,14 +4061,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 		ctx.Print(os.Stdout)
 	}
 
-	// Create .kai directory
-	debugf("creating .kai directory at %s", kaiDir)
+	// Create the kai data directory
+	debugf("creating kai data directory at %s", kaiDir)
 	if err := os.MkdirAll(kaiDir, 0755); err != nil {
-		return fmt.Errorf("creating .kai directory: %w", err)
+		return fmt.Errorf("creating kai data directory: %w", err)
 	}
 
-	// Ensure .kai is in .gitignore
-	ensureGitignore(".kai")
+	// Maintain a .gitignore entry only when the data dir lives in the
+	// worktree (.kai); the .git/kai layout is auto-ignored by git so we
+	// skip touching .gitignore there.
+	if kaipath.NeedsGitignore(kaiDir) {
+		ensureGitignore(filepath.Base(kaiDir))
+	}
 
 	// --git-bridge: mark bridge enabled before runHookInstall runs so the
 	// post-commit hook gets written. Requires .git/ to actually exist.
@@ -5132,8 +5144,8 @@ func runGitImport(db *graph.DB) error {
 		autoRefMgr.OnSnapshotCreated(snapshotID)
 
 		// Store commit message for push
-		os.MkdirAll(".kai", 0755)
-		os.WriteFile(".kai/message", []byte(msg), 0644)
+		os.MkdirAll(kaiDir, 0755)
+		os.WriteFile(filepath.Join(kaiDir, "message"), []byte(msg), 0644)
 
 		_ = refMgr
 	}
@@ -5364,7 +5376,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	phaseStart := time.Now()
 
 	// Load stat cache for incremental file reading
-	cacheDir := filepath.Join(capturePath, ".kai")
+	cacheDir := kaipath.Resolve(capturePath)
 	statCache := dirio.LoadStatCache(cacheDir)
 
 	if !initMode {
@@ -5645,9 +5657,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 
 	// Save capture message for push (like git stores commit message)
 	if captureMessage != "" {
-		kaiDir := filepath.Join(capturePath, ".kai")
-		os.MkdirAll(kaiDir, 0755)
-		os.WriteFile(filepath.Join(kaiDir, "message"), []byte(captureMessage), 0644)
+		dataDir := kaipath.Resolve(capturePath)
+		os.MkdirAll(dataDir, 0755)
+		os.WriteFile(filepath.Join(dataDir, "message"), []byte(captureMessage), 0644)
 	}
 
 	// Summary — quiet by default, verbose for details
@@ -10897,12 +10909,13 @@ type hookToolInput struct {
 // that came through the AI's tool runner — user keystrokes in the
 // editor (including comments the user types while Claude is idle) never
 // fire this hook and therefore never get attributed to the agent.
-// findForeignKaiDir walks up from a file path looking for a .kai/ directory
-// with a db.sqlite (a real Kai project). Returns the .kai path or "" if none.
+// findForeignKaiDir walks up from a file path looking for a kai data
+// directory (.kai/ or .git/kai/) with a db.sqlite — a real Kai project.
+// Returns the data-dir path or "" if none.
 func findForeignKaiDir(absFilePath string) string {
 	dir := filepath.Dir(absFilePath)
 	for {
-		candidate := filepath.Join(dir, ".kai")
+		candidate := kaipath.Resolve(dir)
 		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
 			if _, err := os.Stat(filepath.Join(candidate, "db.sqlite")); err == nil {
 				return candidate
@@ -14239,9 +14252,10 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get push message: prefer kai capture -m, fall back to git commit message
-	if msgBytes, err := os.ReadFile(".kai/message"); err == nil && len(msgBytes) > 0 {
+	msgPath := filepath.Join(kaiDir, "message")
+	if msgBytes, err := os.ReadFile(msgPath); err == nil && len(msgBytes) > 0 {
 		client.Message = strings.TrimSpace(string(msgBytes))
-		os.Remove(".kai/message") // consumed
+		os.Remove(msgPath) // consumed
 	} else if gitMsg, err := exec.Command("git", "log", "-1", "--format=%s").Output(); err == nil {
 		client.Message = strings.TrimSpace(string(gitMsg))
 	}
@@ -15500,11 +15514,11 @@ func runCloneKaiOnly(args []string) error {
 
 	fmt.Printf("Cloning %s/%s from %s into %s...\n", tenant, repo, serverURL, dirName)
 
-	// Set up .kai/ directory and DB inside the target
-	kaiPath := filepath.Join(absDir, ".kai")
+	// Set up the kai data directory and DB inside the target
+	kaiPath := kaipath.Resolve(absDir)
 	objPath := filepath.Join(kaiPath, objectsDir)
 	if err := os.MkdirAll(objPath, 0755); err != nil {
-		return fmt.Errorf("creating .kai directory: %w", err)
+		return fmt.Errorf("creating kai data directory: %w", err)
 	}
 	dbPath := filepath.Join(kaiPath, dbFile)
 	db, err := graph.Open(dbPath, objPath)
@@ -15648,8 +15662,12 @@ func runCloneKaiOnly(args []string) error {
 	}
 	fmt.Printf("  Wrote %d files\n", result.FilesWritten)
 
-	// Add .kai to .gitignore so a future `git init` plays nicely
-	ensureGitignore(".kai")
+	// Add the data dir to .gitignore so a future `git init` plays nicely.
+	// Only needed when the data dir lives in the worktree (.kai); when it
+	// lands in .git/kai, git ignores it automatically.
+	if kaipath.NeedsGitignore(kaiPath) {
+		ensureGitignore(filepath.Base(kaiPath))
+	}
 
 	fmt.Println()
 	fmt.Printf("✓ Cloned %s/%s into %s\n", tenant, repo, dirName)
@@ -17997,7 +18015,7 @@ func fetchReviewFromRemote(db *graph.DB, client *remote.Client, remoteName, revi
 
 // Modules command implementations
 
-const modulesRulesPath = ".kai/rules/modules.yaml"
+var modulesRulesPath = filepath.Join(kaiDir, "rules", "modules.yaml")
 
 // loadModuleCategorizer returns a FileCategorizer that groups files by module name.
 // Falls back to nil (use heuristic) if no modules are configured.
@@ -18396,7 +18414,7 @@ func contains(slice []string, val string) bool {
 
 // ========== Coverage Ingestion ==========
 
-const coverageMapFile = ".kai/coverage-map.json"
+var coverageMapFile = filepath.Join(kaiDir, "coverage-map.json")
 
 // runCIIngestCoverage ingests coverage reports to build file→test mappings
 func runCIIngestCoverage(cmd *cobra.Command, args []string) error {
@@ -18736,7 +18754,7 @@ func mapKeysToSortedSlice(m map[string]bool) []string {
 
 // ========== Contract Ingestion ==========
 
-const contractsFile = ".kai/contracts.json"
+var contractsFile = filepath.Join(kaiDir, "contracts.json")
 
 // runCIIngestContracts registers contract schemas and their tests
 func runCIIngestContracts(cmd *cobra.Command, args []string) error {

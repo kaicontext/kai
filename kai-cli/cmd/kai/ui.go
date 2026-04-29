@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"kai/internal/authorship"
+	"kai/internal/kaipath"
 	spawnpkg "kai/pkg/spawn"
 	"kai/pkg/synclog"
 )
@@ -108,7 +109,7 @@ func handleAgents(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(e.Path); err != nil {
 			continue
 		}
-		kdPath := filepath.Join(e.Path, ".kai")
+		kdPath := kaipath.Resolve(e.Path)
 		dto := agentDTO{
 			Name:       displayAgentName(e.Agent, e.WorkspaceName),
 			Color:      uiPalette[colorIdx%len(uiPalette)],
@@ -157,7 +158,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(e.Path); err != nil {
 			continue
 		}
-		kdPath := filepath.Join(e.Path, ".kai")
+		kdPath := kaipath.Resolve(e.Path)
 		displayName := displayAgentName(e.Agent, e.WorkspaceName)
 		// Sync events (peer push/recv/merge/conflict).
 		for _, ev := range readRecentSyncLog(kdPath, 50) {
