@@ -104,6 +104,14 @@ func Build(task planner.AgentTask, ctx Context) string {
   - Other agents may be working in sibling workspaces; live sync keeps the graph current.
   - If the kai_checkpoint tool is available, call it whenever you finish a logical unit of work.
   - When your task is done, exit cleanly. The orchestrator will integrate your changes through the safety gate.
+
+Graph tools (in-process kai agent only — silently absent for external runners):
+  - kai_callers(symbol, file?) — who calls this function. Use BEFORE editing a function to see who depends on it.
+  - kai_dependents(file) — files that import the given file (depth 1). Use BEFORE editing a heavily-imported file.
+  - kai_context(file) — top-level symbols + depth-1 dependents. Cheap orientation step before view on large files.
+
+Shell:
+  - bash(command, timeout?) — run a shell command in the workspace. Output is capped at ~30 KB; redirect long output to a file and view it. Use this to run tests, lint, build commands while you work.
 `)
 
 	return b.String()

@@ -23,18 +23,22 @@ type Config struct {
 	Planner PlannerConfig `yaml:"planner"`
 }
 
-// AgentConfig controls how the orchestrator launches an agent process
-// inside a spawned workspace.
+// AgentConfig controls how kai's in-process agent runner behaves.
+//
+// Note: post-Slice 6, kai owns the full agent loop in-process —
+// there's no external `agent.command` to configure. The yaml field
+// is gone; pre-Slice 6 configs that set it will have the value
+// silently ignored at load time (yaml.v3 tolerates unknown fields).
 type AgentConfig struct {
-	// Command is the argv template. The literal "{prompt}" token (if
-	// present) is replaced with the path to a temp file containing
-	// the agent's full prompt. Default invokes Claude Code in
-	// non-interactive mode so the process exits when the task is done.
-	Command []string `yaml:"command"`
-
 	// TimeoutSeconds caps any single agent run. 0 means no timeout
 	// (not recommended — agents can hang).
 	TimeoutSeconds int `yaml:"timeout"`
+
+	// BashAllow is the in-process bash tool's allowlist. When
+	// non-empty, the first token of any `bash` tool call must match
+	// one of these (e.g. ["npm", "go", "git", "make"]). Empty list
+	// allows everything.
+	BashAllow []string `yaml:"bash_allow"`
 }
 
 // PlannerConfig controls the natural-language planner.
@@ -47,13 +51,10 @@ type PlannerConfig struct {
 	MaxAgents int `yaml:"max_agents"`
 }
 
-// Default returns the config used when no file is present. Sensible
-// for solo developers running Claude Code; teams override via the
-// yaml file.
+// Default returns the config used when no file is present.
 func Default() Config {
 	return Config{
 		Agent: AgentConfig{
-			Command:        []string{"claude", "-p", "{prompt}"},
 			TimeoutSeconds: 600, // 10 minutes
 		},
 		Planner: PlannerConfig{
@@ -82,13 +83,6 @@ func Load(kaiDir string) (Config, error) {
 	}
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing %s: %w", p, err)
-	}
-	// Hand-fix obvious mistakes that would brick the orchestrator
-	// silently — empty command means "run nothing." Restore the
-	// default rather than failing hard, but log via the returned
-	// config (caller can detect if Command is the default).
-	if len(cfg.Agent.Command) == 0 {
-		cfg.Agent.Command = Default().Agent.Command
 	}
 	if cfg.Planner.Model == "" {
 		cfg.Planner.Model = Default().Planner.Model

@@ -28,11 +28,6 @@ type PlannerServices struct {
 	PromptCtx      agentprompt.Context
 	MainRepo       string
 	KaiDir         string
-	// IsKnownCommand reports whether the first whitespace-split token
-	// matches a registered cobra subcommand. The TUI parent populates
-	// this from rootCmd.Commands(); v1 falls back to "always shell
-	// out" if nil.
-	IsKnownCommand func(string) bool
 }
 
 // PlanReadyMsg is emitted when the LLM returns a parseable plan.
@@ -128,6 +123,19 @@ func formatPlan(p *planner.WorkPlan) string {
 	return b.String()
 }
 
+// stripPlannerPrefix avoids double-prefixing in the REPL. Errors
+// returned by planner.Plan / Replan already start with "planner: "
+// (either ErrTooVague's literal or fmt.Errorf("planner: ...")), so
+// re-prepending in the REPL renders "planner: planner: ...". Strip
+// once if present; leave anything else untouched.
+func stripPlannerPrefix(s string) string {
+	const p = "planner: "
+	if strings.HasPrefix(s, p) {
+		return s[len(p):]
+	}
+	return s
+}
+
 // formatExecuteResult renders the final orchestrator output.
 func formatExecuteResult(res *orchestrator.Result, err error) string {
 	if err != nil {
@@ -140,28 +148,42 @@ func formatExecuteResult(res *orchestrator.Result, err error) string {
 	fmt.Fprintf(&b, "Done: %d auto-promoted, %d held, %d failed\n",
 		res.AutoPromoted, res.Held, res.Failed)
 	for _, r := range res.Runs {
+		// Compact one-line summary of which files landed; full list
+		// in `git status` / `kai status` if the user wants more.
+		filesNote := ""
+		switch n := len(r.ChangedPaths); {
+		case n == 1:
+			filesNote = " — " + r.ChangedPaths[0]
+		case n > 1:
+			filesNote = fmt.Sprintf(" — %d files (incl. %s)", n, r.ChangedPaths[0])
+		}
+
 		switch {
 		case r.ExitErr != nil:
-			fmt.Fprintf(&b, "  • %s — %s\n", r.Task.Name,
-				styleError.Render("agent error: "+r.ExitErr.Error()))
+			fmt.Fprintf(&b, "  • %s — %s\n    %s\n", r.Task.Name,
+				styleError.Render("agent error: "+r.ExitErr.Error()),
+				styleDim.Render("logs: "+r.SpawnDir+"/.kai/agent.log"))
 		case r.IntegrateErr != nil:
-			fmt.Fprintf(&b, "  • %s — %s\n", r.Task.Name,
-				styleError.Render("integrate error: "+r.IntegrateErr.Error()))
+			fmt.Fprintf(&b, "  • %s — %s\n    %s\n", r.Task.Name,
+				styleError.Render("integrate error: "+r.IntegrateErr.Error()),
+				styleDim.Render("logs: "+r.SpawnDir+"/.kai/agent.log"))
 		case r.Verdict == nil:
-			fmt.Fprintf(&b, "  • %s — %s\n", r.Task.Name, styleDim.Render("no verdict"))
+			// Agent ran but produced no observable changes.
+			fmt.Fprintf(&b, "  • %s — %s\n", r.Task.Name,
+				styleDim.Render("no changes"))
 		case r.Verdict.Verdict == string(safetygate.Auto):
-			fmt.Fprintf(&b, "  • %s — auto, advanced %s\n", r.Task.Name,
-				strings.Join(r.AdvancedRefs, ", "))
+			fmt.Fprintf(&b, "  • %s — applied to your repo (snap.latest advanced)%s\n",
+				r.Task.Name, filesNote)
 		case r.Verdict.Verdict == string(safetygate.Block):
-			fmt.Fprintf(&b, "  • %s — %s (blast %d)\n", r.Task.Name,
-				styleError.Render("BLOCKED"), r.Verdict.BlastRadius)
+			fmt.Fprintf(&b, "  • %s — %s (blast %d)%s\n", r.Task.Name,
+				styleError.Render("BLOCKED — kept in working tree"), r.Verdict.BlastRadius, filesNote)
 		default:
-			fmt.Fprintf(&b, "  • %s — %s (blast %d)\n", r.Task.Name,
-				styleWarn.Render("review"), r.Verdict.BlastRadius)
+			fmt.Fprintf(&b, "  • %s — %s (blast %d)%s\n", r.Task.Name,
+				styleWarn.Render("HELD for review"), r.Verdict.BlastRadius, filesNote)
 		}
 	}
 	if res.Held > 0 {
-		b.WriteString(styleDim.Render("`kai gate list` to inspect held integrations."))
+		b.WriteString(styleDim.Render("Held changes are in your working tree. `kai gate list` to inspect, `kai gate approve <id>` to publish."))
 	}
 	return b.String()
 }

@@ -54,6 +54,24 @@ func Run(ctx context.Context, opts Options) error {
 		defer w.Stop()
 	}
 
+	// Wire the orchestrator's per-spawn agent activity into the same
+	// sync channel the main-repo watcher uses. Tagged with the spawn
+	// name so the user can see which agent did what; non-blocking
+	// send drops on backpressure (better to lose a render than stall
+	// the agent's session).
+	if opts.Planner != nil && opts.Planner.OrchestratorCfg.OnActivity == nil {
+		opts.Planner.OrchestratorCfg.OnActivity = func(spawnName, relPath, op string) {
+			select {
+			case syncCh <- views.SyncEvent{
+				Path: spawnName + ": " + relPath,
+				Op:   op,
+				When: time.Now(),
+			}:
+			default:
+			}
+		}
+	}
+
 	m := initialModel(opts, syncCh, watcherErr)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()

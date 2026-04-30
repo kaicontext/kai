@@ -21162,9 +21162,45 @@ func runCIRuns(cmd *cobra.Command, args []string) error {
 		if r.Conclusion != "" {
 			status = r.Conclusion
 		}
-		fmt.Printf("%s #%-4d %-12s %-10s %s %s\n", icon, r.RunNumber, r.WorkflowName, status, ref, sha)
+		// Prefer StartedAt ("when it began"); fall back to CreatedAt
+		// for queued runs that haven't started yet.
+		when := r.StartedAt
+		if when == "" {
+			when = r.CreatedAt
+		}
+		fmt.Printf("%s #%-4d %-12s %-10s %s %-9s %s\n",
+			icon, r.RunNumber, r.WorkflowName, status, ref, sha, ciRunWhen(when))
 	}
 	return nil
+}
+
+// ciRunWhen formats an ISO-8601 timestamp from the server as a relative
+// age ("2m ago", "1h ago"), or absolute date if older than a day. Empty
+// or unparseable input renders as "—" so the column stays aligned.
+func ciRunWhen(iso string) string {
+	if iso == "" {
+		return "—"
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return "—"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 0:
+		// Server clock skew / future timestamp; show absolute.
+		return t.Local().Format("2006-01-02 15:04")
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	default:
+		return t.Local().Format("2006-01-02")
+	}
 }
 
 func runCIRun(cmd *cobra.Command, args []string) error {

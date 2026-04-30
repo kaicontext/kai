@@ -56,7 +56,7 @@ type REPL struct {
 // language requests via the planner; nil means shell-out-only.
 func NewREPL(binary, workDir string, services *PlannerServices) REPL {
 	in := textinput.New()
-	in.Placeholder = "type a command, or describe a change in plain English"
+	in.Placeholder = "describe a change, or /command (e.g. /gate list, /push)"
 	in.Prompt = "› "
 	in.Focus()
 	in.CharLimit = 4096
@@ -70,7 +70,7 @@ func NewREPL(binary, workDir string, services *PlannerServices) REPL {
 		services: services,
 	}
 	if services != nil {
-		r.write(styleDim.Render("kai TUI — type a command, or describe a change. ↑/↓ history, Esc to switch panes."))
+		r.write(styleDim.Render("kai TUI — describe a change in English, or /command for kai subcommands. ↑/↓ history, Esc to switch panes."))
 	} else {
 		r.write(replGreeting())
 	}
@@ -153,7 +153,9 @@ func (r REPL) Update(msg tea.Msg) (REPL, tea.Cmd) {
 		r.planning = false
 		switch {
 		case msg.Err != nil:
-			r.write(styleError.Render("planner: " + msg.Err.Error()))
+			// stripPlannerPrefix avoids "planner: planner: ..." since
+			// errors from the planner package already carry that prefix.
+			r.write(styleError.Render("planner: " + stripPlannerPrefix(msg.Err.Error())))
 			r.pendingPlan = nil
 		case msg.Plan == nil:
 			r.write(styleError.Render("planner: empty result"))
@@ -190,22 +192,24 @@ func (r REPL) View() string {
 	)
 }
 
-// dispatch routes user input to one of three paths:
+// dispatch routes user input. The discipline is simple and explicit:
 //
-//  1. Pending-plan state: "go" → orchestrator, "cancel" → discard,
-//     anything else → replan with the input as feedback.
-//  2. First token matches a known cobra subcommand → shell out
-//     (preserves every existing CLI command).
-//  3. No subcommand match and planner is configured → treat the
-//     entire line as a natural-language request.
-//  4. No subcommand match and no planner → shell out anyway so the
-//     kai binary can print its usual "unknown command" message.
-//
-// Returns the REPL (with state mutations) and the tea.Cmd that drives
-// the chosen path. The caller (Update) propagates both.
+//   - Lines that start with "/" are kai subcommands (the leading "/"
+//     is stripped, then shelled out). Examples:
+//        /gate list           → kai gate list
+//        /integrate --ws feat → kai integrate --ws feat
+//   - Everything else is a natural-language request for the planner
+//     (when configured) — a request like "Update index.js to have
+//     multiple greetings" goes straight to the LLM, no ambiguity.
+//   - With no planner services available, non-slash lines fall through
+//     to shellout so the bare kai binary surfaces its own "unknown
+//     command" error rather than swallowing the input silently.
+//   - The pending-plan state machine takes priority over routing —
+//     while a plan is awaiting confirmation, any input is "go",
+//     "cancel", or feedback to replan.
 func (r REPL) dispatch(line string) (REPL, tea.Cmd) {
-	// Pending-plan state machine takes priority — once a plan is up
-	// for confirmation, any input is interpreted in that context.
+	// Pending-plan state machine: once a plan is up for confirmation,
+	// any input is interpreted in that context.
 	if r.pendingPlan != nil {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		switch lower {
@@ -220,8 +224,6 @@ func (r REPL) dispatch(line string) (REPL, tea.Cmd) {
 			r.write(styleDim.Render("plan canceled"))
 			return r, nil
 		default:
-			// Treat as feedback. Replan combines original + feedback
-			// in one new LLM call.
 			original := r.originalReq
 			r.planning = true
 			r.write(styleDim.Render("replanning…"))
@@ -229,29 +231,21 @@ func (r REPL) dispatch(line string) (REPL, tea.Cmd) {
 		}
 	}
 
-	// First-word lookup. If the planner isn't configured we fall
-	// through to shellout so unknown commands surface kai's own
-	// error rather than panicking.
-	first := firstToken(line)
-	if r.services != nil && r.services.IsKnownCommand != nil && !r.services.IsKnownCommand(first) {
+	if strings.HasPrefix(line, "/") {
+		// Strip the leading "/" before handing to cobra. We trim only
+		// the single leading slash; arguments preserve their own
+		// punctuation.
+		return r, runShellCommand(r.binary, strings.TrimPrefix(line, "/"), r.workDir)
+	}
+
+	// No slash → planner if configured, else fall back to shellout
+	// so the bare kai binary can render its own usage message.
+	if r.services != nil {
 		r.planning = true
 		r.write(styleDim.Render("planning…"))
 		return r, runPlan(r.services, line)
 	}
 	return r, runShellCommand(r.binary, line, r.workDir)
-}
-
-// firstToken returns the leading whitespace-separated word, lowercased
-// for case-insensitive command matching. Empty input yields empty.
-func firstToken(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	if i := strings.IndexAny(s, " \t"); i > 0 {
-		s = s[:i]
-	}
-	return strings.ToLower(s)
 }
 
 // write appends a line to both the shadow buffer and the viewport,
@@ -327,7 +321,7 @@ var (
 )
 
 func replGreeting() string {
-	return styleDim.Render("kai TUI — type a command, ↑/↓ for history, Esc to switch panes")
+	return styleDim.Render("kai TUI — /command for kai subcommands, ↑/↓ for history, Esc to switch panes")
 }
 
 func replPrompt() string         { return stylePrompt.Render("› ") }

@@ -44,7 +44,7 @@ func TestServerCompleter_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewServerCompleter(srv.URL, "test-token")
+	c := NewServerCompleter(srv.URL, "test-token", "")
 	out, err := c.Complete("you are a planner", []ai.Message{
 		{Role: "user", Content: "do something"},
 	}, 100)
@@ -66,7 +66,7 @@ func TestServerCompleter_PropagatesUpstreamError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewServerCompleter(srv.URL, "test-token")
+	c := NewServerCompleter(srv.URL, "test-token", "")
 	_, err := c.Complete("", []ai.Message{{Role: "user", Content: "x"}}, 50)
 	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "rate_limited") {
 		t.Fatalf("expected upstream-error message, got %v", err)
@@ -76,7 +76,7 @@ func TestServerCompleter_PropagatesUpstreamError(t *testing.T) {
 // TestServerCompleter_RejectsMissingAuth: a sane error fires before
 // hitting the network when the user isn't logged in.
 func TestServerCompleter_RejectsMissingAuth(t *testing.T) {
-	c := NewServerCompleter("https://example.invalid", "")
+	c := NewServerCompleter("https://example.invalid", "", "")
 	_, err := c.Complete("", []ai.Message{{Role: "user", Content: "x"}}, 50)
 	if err == nil || !strings.Contains(err.Error(), "auth") {
 		t.Fatalf("expected auth error, got %v", err)
@@ -85,7 +85,7 @@ func TestServerCompleter_RejectsMissingAuth(t *testing.T) {
 
 // TestServerCompleter_RejectsMissingURL same shape, missing baseURL.
 func TestServerCompleter_RejectsMissingURL(t *testing.T) {
-	c := NewServerCompleter("", "tok")
+	c := NewServerCompleter("", "tok", "")
 	_, err := c.Complete("", []ai.Message{{Role: "user", Content: "x"}}, 50)
 	if err == nil || !strings.Contains(err.Error(), "BaseURL") {
 		t.Fatalf("expected URL error, got %v", err)

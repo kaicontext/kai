@@ -24,17 +24,24 @@ import (
 type ServerCompleter struct {
 	BaseURL    string        // kailab-control base URL, e.g. https://kaicontext.com
 	AuthToken  string        // Bearer token from ~/.kai/credentials.json
+	Model      string        // Anthropic model id (e.g. "claude-sonnet-4-6")
 	HTTPClient *http.Client  // optional; defaults to a 120s-timeout client
 }
 
 // NewServerCompleter constructs a Completer that routes through the
-// kai-server. Both args are required: BaseURL must be the
-// kailab-control endpoint (NOT a per-repo data-plane URL); AuthToken
-// must be a valid bearer token (typically from remote.GetValidAccessToken).
-func NewServerCompleter(baseURL, authToken string) *ServerCompleter {
+// kai-server. BaseURL must be the kailab-control endpoint (NOT a
+// per-repo data-plane URL); AuthToken must be a valid bearer token
+// (typically from remote.GetValidAccessToken); model picks which
+// Anthropic model to use ("claude-sonnet-4-6", "claude-haiku-4-5",
+// etc.). Empty model falls back to a sensible default.
+func NewServerCompleter(baseURL, authToken, model string) *ServerCompleter {
+	if model == "" {
+		model = "claude-sonnet-4-6"
+	}
 	return &ServerCompleter{
 		BaseURL:   strings.TrimSuffix(baseURL, "/"),
 		AuthToken: authToken,
+		Model:     model,
 		HTTPClient: &http.Client{
 			// 120s matches the server-side timeout to api.anthropic.com.
 			// One end timing out before the other masks the real cause.
@@ -59,7 +66,7 @@ func (c *ServerCompleter) Complete(system string, messages []ai.Message, maxToke
 	// to a sane default; the planner caller will eventually thread
 	// its config through if model selection moves into the wire.
 	body, err := json.Marshal(map[string]interface{}{
-		"model":      "claude-sonnet-4-5", // server can override; client picks default
+		"model":      c.Model,
 		"max_tokens": maxTokens,
 		"system":     system,
 		"messages":   messages,

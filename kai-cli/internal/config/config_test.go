@@ -21,8 +21,8 @@ func TestLoad_FullOverride(t *testing.T) {
 	dir := t.TempDir()
 	yaml := []byte(`
 agent:
-  command: ["cursor-agent", "--prompt-file", "{prompt}"]
   timeout: 1200
+  bash_allow: [npm, go]
 planner:
   model: claude-opus-4-7
   max_agents: 8
@@ -36,8 +36,8 @@ planner:
 	}
 	want := Config{
 		Agent: AgentConfig{
-			Command:        []string{"cursor-agent", "--prompt-file", "{prompt}"},
 			TimeoutSeconds: 1200,
+			BashAllow:      []string{"npm", "go"},
 		},
 		Planner: PlannerConfig{
 			Model:     "claude-opus-4-7",
@@ -74,12 +74,16 @@ func TestLoad_PartialOverrideKeepsDefaults(t *testing.T) {
 	}
 }
 
-// TestLoad_EmptyCommandFallsBackToDefault: an explicit empty command
-// would brick the orchestrator. We restore the default rather than
-// failing because the rest of the config might be valid.
-func TestLoad_EmptyCommandFallsBackToDefault(t *testing.T) {
+// TestLoad_LegacyCommandFieldIgnored: pre-Slice 6 configs may have
+// `agent.command: [...]` set. yaml.v3 silently ignores unknown fields,
+// so existing configs load without error. The non-deprecated fields
+// still parse normally.
+func TestLoad_LegacyCommandFieldIgnored(t *testing.T) {
 	dir := t.TempDir()
-	yaml := []byte("agent:\n  command: []\n  timeout: 60\n")
+	yaml := []byte(`agent:
+  command: ["claude", "-p", "{prompt}"]
+  timeout: 60
+`)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), yaml, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -87,11 +91,27 @@ func TestLoad_EmptyCommandFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(cfg.Agent.Command, Default().Agent.Command) {
-		t.Errorf("expected default command, got %v", cfg.Agent.Command)
-	}
 	if cfg.Agent.TimeoutSeconds != 60 {
 		t.Errorf("timeout override lost: %d", cfg.Agent.TimeoutSeconds)
+	}
+}
+
+// TestLoad_BashAllowParses verifies the bash_allow allowlist round-trips
+// from yaml so the in-process agent's bash tool can pick it up.
+func TestLoad_BashAllowParses(t *testing.T) {
+	dir := t.TempDir()
+	yaml := []byte(`agent:
+  bash_allow: [npm, go, git, make]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), yaml, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Agent.BashAllow, []string{"npm", "go", "git", "make"}) {
+		t.Errorf("bash_allow: %v", cfg.Agent.BashAllow)
 	}
 }
 

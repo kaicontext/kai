@@ -9,35 +9,32 @@ import (
 	"testing"
 	"time"
 
+	"kai/internal/agent/message"
+	"kai/internal/agent/provider"
 	"kai/internal/agentprompt"
 	"kai/internal/graph"
 	"kai/internal/planner"
 	"kai/internal/safetygate"
 )
 
-// TestExecuteE2E_SpawnAndAgent runs the orchestrator against a real
-// kai binary with a fake-agent shell command. The test stops short of
-// push/pull/integrate because kai's remote is HTTP-only (kailab) and
-// standing up a mock kailab server in a unit test is more harness
-// than the value justifies for v1.
+// TestExecuteE2E_SpawnAndInProcessAgent runs the orchestrator against a
+// real kai binary using the in-process agent runner with a fake LLM
+// provider. Stops short of push/pull/integrate because kai's remote
+// is HTTP-only (kailab) and a mock kailab server is more harness than
+// the value justifies in this test.
 //
-// What this verifies:
+// What this verifies post-Slice 6 (the external-subprocess path is gone):
 //
 //   - orchestrator.Execute calls `kai spawn` correctly
-//   - the agent subprocess is exec'd with the substituted prompt path
-//   - the prompt file lands at <spawn>/.kai/agent.prompt
-//   - the agent's writes survive in the spawn workspace
-//   - the agent.log captures stdout/stderr
-//   - push fails predictably (no remote configured) — proving we got
-//     all the way to the integrate phase before hitting infra limits
+//   - the in-process runner is invoked with the workspace + prompt
+//   - the agent's tool calls (write/edit) actually modify files in
+//     the spawn workspace
+//   - push/pull/integrate fail predictably with no remote configured,
+//     proving we reached the integrate phase
 //
-// Skipped unless KAI_BIN points at a buildable kai binary. The CI
-// matrix (when it exists) sets KAI_BIN so this runs there; locally
-// it's opt-in to keep the default `go test ./...` fast and dep-free.
-//
-// Push/pull/integrate end-to-end is covered by manual testing for now;
-// see docs/phase-3-plan.md for the recipe.
-func TestExecuteE2E_SpawnAndAgent(t *testing.T) {
+// Skipped unless KAI_BIN points at a buildable kai binary. CI sets
+// KAI_BIN so the test runs there; locally it's opt-in.
+func TestExecuteE2E_SpawnAndInProcessAgent(t *testing.T) {
 	kaiBin := os.Getenv("KAI_BIN")
 	if kaiBin == "" {
 		t.Skip("KAI_BIN not set — skipping e2e (set to a built kai binary path)")
@@ -46,62 +43,59 @@ func TestExecuteE2E_SpawnAndAgent(t *testing.T) {
 		t.Skipf("KAI_BIN=%s not stat-able: %v", kaiBin, err)
 	}
 
-	// 1. Set up a temp source repo. `kai init` makes it a kai repo;
-	//    `kai capture` produces a baseline snapshot we can spawn from.
+	// 1. Set up a temp source repo + capture a baseline so spawn has
+	//    a snapshot to clone from.
 	src := t.TempDir()
 	mustRun(t, src, kaiBin, "init")
-	// Drop a tiny file so capture has something to snapshot.
 	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mustRun(t, src, kaiBin, "capture", "-m", "baseline")
 
-	// 2. Open the source DB so the orchestrator can run the in-process
-	//    integrate path. .kai/ is wherever kaipath.Resolve put it
-	//    (.kai/ for non-git repos like this temp dir).
 	kaiDir := filepath.Join(src, ".kai")
-	dbPath := filepath.Join(kaiDir, "db.sqlite")
-	objPath := filepath.Join(kaiDir, "objects")
-	db, err := graph.Open(dbPath, objPath)
+	db, err := graph.Open(filepath.Join(kaiDir, "db.sqlite"), filepath.Join(kaiDir, "objects"))
 	if err != nil {
 		t.Fatalf("opening db: %v", err)
 	}
 	defer db.Close()
 
-	// 3. Build the plan. One agent, fake command that writes a
-	//    sentinel file and exits.
+	// 2. Plan + fake provider that scripts a single tool-use turn
+	//    (call `write` to overwrite hello.txt) followed by end_turn.
 	plan := &planner.WorkPlan{
 		Summary: "fake change for e2e",
 		Agents: []planner.AgentTask{
-			{
-				Name:   "writer",
-				Prompt: "write a sentinel file to confirm the agent ran",
-				Files:  []string{"hello.txt"},
+			{Name: "writer", Prompt: "overwrite hello.txt", Files: []string{"hello.txt"}},
+		},
+	}
+
+	fakeLLM := &scriptedProvider{queue: []provider.Response{
+		{
+			Parts: []message.ContentPart{
+				message.ToolCall{
+					ID:    "c1",
+					Name:  "write",
+					Input: `{"file_path":"hello.txt","content":"v2 from agent\n"}`,
+					Type:  "tool_use",
+				},
 			},
+			FinishReason: message.FinishReasonToolUse,
 		},
-	}
+		{
+			Parts:        []message.ContentPart{message.TextContent{Text: "done"}},
+			FinishReason: message.FinishReasonEndTurn,
+		},
+	}}
 
-	// 4. The "agent" is a tiny shell command. {prompt} is substituted
-	//    with the prompt-file path; the script writes a sentinel and
-	//    appends a line to hello.txt so the spawn workspace has a
-	//    real change to integrate.
-	agentScript := `set -e; echo "agent ran" > .agent-ran; echo "v2 from agent" >> hello.txt`
 	cfg := Config{
-		AgentCommand: []string{"/bin/sh", "-c", agentScript, "{prompt}"},
-		AgentTimeout: 30 * time.Second,
-		KaiBinary:    kaiBin,
-		SpawnPrefix:  filepath.Join(t.TempDir(), "kai-e2e-"),
-		PushRemote:   "origin", // nothing configured; push will fail predictably
-		GateConfig:   safetygate.DefaultConfig(),
-		PromptContext: agentprompt.Context{
-			RepoRoot: src,
-		},
+		AgentTimeout:  30 * time.Second,
+		KaiBinary:     kaiBin,
+		SpawnPrefix:   filepath.Join(t.TempDir(), "kai-e2e-"),
+		PushRemote:    "origin", // nothing configured; push will fail
+		GateConfig:    safetygate.DefaultConfig(),
+		AgentProvider: fakeLLM,
+		PromptContext: agentprompt.Context{RepoRoot: src},
 	}
 
-	// 5. Execute. We expect the orchestrator to:
-	//    - spawn successfully (real kai binary)
-	//    - run the fake agent (writes .agent-ran + appends to hello.txt)
-	//    - fail at the capture/push step because no remote is configured
 	res, err := Execute(context.Background(), plan, cfg, db, src, kaiDir)
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
@@ -111,46 +105,53 @@ func TestExecuteE2E_SpawnAndAgent(t *testing.T) {
 	}
 	run := res.Runs[0]
 
-	// Phase A assertions — spawn + agent ran cleanly.
 	if run.SpawnDir == "" {
 		t.Fatal("spawn dir not populated; spawn step failed")
 	}
 	if run.ExitErr != nil {
 		t.Fatalf("agent exited with error: %v", run.ExitErr)
 	}
-	if _, err := os.Stat(filepath.Join(run.SpawnDir, ".agent-ran")); err != nil {
-		t.Errorf("sentinel file missing — agent didn't run in spawn dir: %v", err)
+
+	// Agent should have overwritten hello.txt with "v2 from agent".
+	body, err := os.ReadFile(filepath.Join(run.SpawnDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("reading spawn hello.txt: %v", err)
 	}
-	if body, _ := os.ReadFile(filepath.Join(run.SpawnDir, "hello.txt")); !strings.Contains(string(body), "v2 from agent") {
-		t.Errorf("agent's hello.txt edit didn't land: %q", string(body))
-	}
-	logPath := filepath.Join(run.SpawnDir, ".kai", "agent.log")
-	if _, err := os.Stat(logPath); err != nil {
-		t.Errorf("agent.log missing: %v", err)
-	}
-	promptPath := filepath.Join(run.SpawnDir, ".kai", "agent.prompt")
-	if _, err := os.Stat(promptPath); err != nil {
-		t.Errorf("agent.prompt missing: %v", err)
-	} else if body, _ := os.ReadFile(promptPath); !strings.Contains(string(body), "writer") {
-		t.Errorf("agent.prompt missing identity: %q", string(body))
+	if !strings.Contains(string(body), "v2 from agent") {
+		t.Errorf("agent's write didn't land: %q", string(body))
 	}
 
-	// Phase B — without a kailab remote configured, push must fail.
-	// That's the expected outcome for v1; flagging it tells us the
-	// pipeline got past the agent. A green push here would actually
-	// be suspicious (it'd mean push silently no-op'd).
+	// Phase B — without a kailab remote configured, push fails.
+	// That's the expected outcome: it tells us the pipeline got past
+	// the agent and reached integrate.
 	if run.IntegrateErr == nil {
 		t.Errorf("expected integrate err (no remote configured), got nil")
 	}
 	if run.Verdict != nil {
 		t.Errorf("expected nil verdict (integrate skipped on push fail), got %+v", run.Verdict)
 	}
-
-	// Result aggregation should treat this as a failure (verdict nil
-	// + IntegrateErr non-nil → res.Failed++).
 	if res.Failed != 1 {
 		t.Errorf("expected res.Failed=1, got %d (auto=%d held=%d)", res.Failed, res.AutoPromoted, res.Held)
 	}
+}
+
+// scriptedProvider returns canned Responses in order. Tiny duplicate
+// of the runner's fakeProvider — kept here to avoid cross-package
+// test fixture sharing (which Go discourages).
+type scriptedProvider struct {
+	queue []provider.Response
+}
+
+func (s *scriptedProvider) Send(_ context.Context, _ provider.Request) (provider.Response, error) {
+	if len(s.queue) == 0 {
+		return provider.Response{
+			Parts:        []message.ContentPart{message.TextContent{Text: "queue empty"}},
+			FinishReason: message.FinishReasonEndTurn,
+		}, nil
+	}
+	r := s.queue[0]
+	s.queue = s.queue[1:]
+	return r, nil
 }
 
 // mustRun execs cmd in dir, fatal on non-zero. Used by the e2e test

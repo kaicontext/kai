@@ -7,73 +7,53 @@ import (
 	"kai/internal/planner"
 )
 
-// TestDispatch_ShellOutWithoutPlanner: nil services means every input
-// gets shelled out, regardless of whether it looks like a known
-// command. Preserves the v1 behavior for users who don't set
-// ANTHROPIC_API_KEY.
-func TestDispatch_ShellOutWithoutPlanner(t *testing.T) {
-	r := NewREPL("/usr/bin/true", "/tmp", nil)
-	_, cmd := r.dispatch("anything goes here")
+// TestDispatch_SlashRoutesToShellout: a leading "/" identifies the
+// input as a kai subcommand, regardless of planner state.
+func TestDispatch_SlashRoutesToShellout(t *testing.T) {
+	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
+	r2, cmd := r.dispatch("/gate list")
 	if cmd == nil {
-		t.Fatal("expected a tea.Cmd for shellout, got nil")
+		t.Fatal("expected a tea.Cmd for shellout")
 	}
-	// We can't easily inspect the Cmd; reaching here without panic
-	// confirms the dispatch took the shellout branch.
-}
-
-// TestDispatch_KnownCommandShellsOut: when the planner is configured,
-// known commands still shell out (preserving every existing CLI flow).
-func TestDispatch_KnownCommandShellsOut(t *testing.T) {
-	knownCalls := 0
-	services := &PlannerServices{
-		IsKnownCommand: func(name string) bool {
-			knownCalls++
-			return name == "gate"
-		},
-	}
-	r := NewREPL("/usr/bin/true", "/tmp", services)
-	_, cmd := r.dispatch("gate list")
-	if cmd == nil {
-		t.Fatal("expected tea.Cmd")
-	}
-	if knownCalls == 0 {
-		t.Error("IsKnownCommand was never consulted")
-	}
-	if r.planning {
-		t.Error("known command should not enter planning state")
+	if r2.planning {
+		t.Error("slash-prefixed input should not enter planning state")
 	}
 }
 
-// TestDispatch_UnknownCommandStartsPlanning: a string that isn't a
-// known cobra subcommand and isn't a pending-plan response gets
-// routed to the planner.
-func TestDispatch_UnknownCommandStartsPlanning(t *testing.T) {
-	services := &PlannerServices{
-		IsKnownCommand: func(name string) bool { return false },
-		// LLM is nil but the test only inspects state transition,
-		// not the eventual PlanReadyMsg.
-	}
-	r := NewREPL("/usr/bin/true", "/tmp", services)
-	r2, cmd := r.dispatch("add rate limiting to the API")
+// TestDispatch_NoSlashGoesToPlanner: anything that isn't slash-prefixed
+// is treated as a natural-language request and routed to the planner.
+func TestDispatch_NoSlashGoesToPlanner(t *testing.T) {
+	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
+	r2, cmd := r.dispatch("Update README.md to mention the new TUI")
 	if cmd == nil {
 		t.Fatal("expected tea.Cmd")
 	}
 	if !r2.planning {
-		t.Error("expected planning=true after unknown-command dispatch")
+		t.Error("expected planning=true for an unprefixed sentence")
+	}
+}
+
+// TestDispatch_NoServicesShellsOut: without a planner configured, even
+// non-slash input shells out so the user sees kai's own usage error
+// rather than silent no-op.
+func TestDispatch_NoServicesShellsOut(t *testing.T) {
+	r := NewREPL("/usr/bin/true", "/tmp", nil)
+	r2, cmd := r.dispatch("anything")
+	if cmd == nil {
+		t.Fatal("expected tea.Cmd")
+	}
+	if r2.planning {
+		t.Error("with no services, planning state must not engage")
 	}
 }
 
 // TestDispatch_PendingPlanGo: with a pending plan, "go" triggers
-// orchestrator.Execute (we just verify the state transition; the
-// actual run is covered by orchestrator tests + e2e).
+// orchestrator.Execute regardless of slash prefix (slash inside
+// pending-plan state is irrelevant).
 func TestDispatch_PendingPlanGo(t *testing.T) {
-	services := &PlannerServices{
-		IsKnownCommand: func(name string) bool { return false },
-	}
-	r := NewREPL("/usr/bin/true", "/tmp", services)
+	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
 	r.pendingPlan = &planner.WorkPlan{Agents: []planner.AgentTask{{Name: "x", Prompt: "p"}}}
 	r.originalReq = "do something"
-
 	r2, cmd := r.dispatch("go")
 	if cmd == nil {
 		t.Fatal("expected tea.Cmd")
@@ -83,14 +63,11 @@ func TestDispatch_PendingPlanGo(t *testing.T) {
 	}
 }
 
-// TestDispatch_PendingPlanCancel clears the pending plan and never
-// runs anything.
+// TestDispatch_PendingPlanCancel clears the pending plan.
 func TestDispatch_PendingPlanCancel(t *testing.T) {
-	services := &PlannerServices{}
-	r := NewREPL("/usr/bin/true", "/tmp", services)
+	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
 	r.pendingPlan = &planner.WorkPlan{Agents: []planner.AgentTask{{Name: "x"}}}
-	r.originalReq = "earlier request"
-
+	r.originalReq = "earlier"
 	r2, cmd := r.dispatch("cancel")
 	if cmd != nil {
 		t.Errorf("cancel should not produce a tea.Cmd")
@@ -100,15 +77,13 @@ func TestDispatch_PendingPlanCancel(t *testing.T) {
 	}
 }
 
-// TestDispatch_PendingPlanFeedbackReplans: anything that's not "go"
-// or "cancel" while a plan is pending becomes feedback.
+// TestDispatch_PendingPlanFeedbackReplans: anything that isn't go/cancel
+// while a plan is pending becomes feedback for replan.
 func TestDispatch_PendingPlanFeedbackReplans(t *testing.T) {
-	services := &PlannerServices{}
-	r := NewREPL("/usr/bin/true", "/tmp", services)
+	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
 	r.pendingPlan = &planner.WorkPlan{Agents: []planner.AgentTask{{Name: "x"}}}
 	r.originalReq = "add rate limiting"
-
-	r2, cmd := r.dispatch("actually only the public endpoints")
+	r2, cmd := r.dispatch("only the public endpoints")
 	if cmd == nil {
 		t.Fatal("expected tea.Cmd for replan")
 	}
@@ -117,26 +92,8 @@ func TestDispatch_PendingPlanFeedbackReplans(t *testing.T) {
 	}
 }
 
-// TestFirstToken handles a few normalization cases: empty, with
-// whitespace, mixed case, single token.
-func TestFirstToken(t *testing.T) {
-	cases := map[string]string{
-		"":                  "",
-		"   ":               "",
-		"gate":              "gate",
-		"  gate list  ":     "gate",
-		"GATE list":         "gate",
-		"integrate\t--ws x": "integrate",
-	}
-	for in, want := range cases {
-		if got := firstToken(in); got != want {
-			t.Errorf("firstToken(%q): got %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestPlanReadyMsg_PopulatesPendingPlan: after PlanReadyMsg lands the
-// REPL holds the plan and renders it in scrollback.
+// REPL holds the plan and renders it.
 func TestPlanReadyMsg_PopulatesPendingPlan(t *testing.T) {
 	r := NewREPL("/usr/bin/true", "/tmp", &PlannerServices{})
 	r.planning = true
