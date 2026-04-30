@@ -2,13 +2,31 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 
 	"kai-core/merge"
 
 	"kai/internal/graph"
+	"kai/internal/safetygate"
 	"kai/internal/util"
 )
+
+// IntegrateOptions controls how a workspace is integrated. The zero
+// value is equivalent to plain Integrate: no resolutions, gate runs
+// with default config.
+type IntegrateOptions struct {
+	// Resolutions, when non-nil, supplies merged content for paths that
+	// would otherwise conflict. Used by `kai resolve`.
+	Resolutions map[string][]byte
+	// SkipGate bypasses safety classification and forces Verdict=Auto.
+	// Used by `kai review approve` (the human already approved) and by
+	// tests that intentionally bypass the gate.
+	SkipGate bool
+	// GateConfig overrides the default gate configuration. nil → defaults.
+	// CLI callers should populate this from safetygate.LoadConfig.
+	GateConfig *safetygate.Config
+}
 
 // IntegrateResult contains the result of integrating a workspace.
 type IntegrateResult struct {
@@ -16,23 +34,65 @@ type IntegrateResult struct {
 	AppliedChangeSets [][]byte
 	Conflicts         []Conflict
 	AutoResolved      int
+
+	// Decision is the safety gate's verdict on this integration. It is
+	// populated by integrateInternal once the gate is wired in (task 3).
+	// Until then it is nil; PublishToRef / PublishAtTarget treat nil as
+	// "no gate ran" and allow the publish, preserving today's behavior.
+	Decision *IntegrationDecision
+}
+
+// IntegrationDecision is a workspace-package-local view of the safety
+// gate's output. We keep a thin local type rather than importing
+// safetygate.Decision directly so this package stays free of any
+// gate-specific dependencies — the gate populates these fields and
+// callers (kai integrate, kai resolve, kai review) read Verdict.
+//
+// The string values must match safetygate.Verdict ("auto"/"review"/"block").
+type IntegrationDecision struct {
+	Verdict     string
+	BlastRadius int
+	Reasons     []string
+	Touches     []string
 }
 
 // Integrate merges a workspace's changes into a target snapshot.
 func (m *Manager) Integrate(nameOrID string, targetSnapshotID []byte) (*IntegrateResult, error) {
-	return m.integrateInternal(nameOrID, targetSnapshotID, nil)
+	return m.integrateInternal(nameOrID, targetSnapshotID, IntegrateOptions{})
 }
 
 // IntegrateWithResolutions merges a workspace's changes into a target snapshot,
 // using the provided resolutions for conflicting paths. Paths in the resolutions
 // map contain the resolved file content and will be used instead of reporting a conflict.
 func (m *Manager) IntegrateWithResolutions(nameOrID string, targetSnapshotID []byte, resolutions map[string][]byte) (*IntegrateResult, error) {
-	return m.integrateInternal(nameOrID, targetSnapshotID, resolutions)
+	return m.integrateInternal(nameOrID, targetSnapshotID, IntegrateOptions{Resolutions: resolutions})
 }
 
-// integrateInternal is the shared implementation for Integrate and IntegrateWithResolutions.
-// If resolutions is non-nil, conflicting paths with matching entries use the provided content.
-func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, resolutions map[string][]byte) (*IntegrateResult, error) {
+// IntegrateWithOptions is the full-control entry point. Used by `kai
+// review approve` (SkipGate=true) and by callers that need to override
+// the gate config.
+func (m *Manager) IntegrateWithOptions(nameOrID string, targetSnapshotID []byte, opts IntegrateOptions) (*IntegrateResult, error) {
+	return m.integrateInternal(nameOrID, targetSnapshotID, opts)
+}
+
+// integrateInternal is the shared implementation. Behavior:
+//
+//   1. Validate workspace and target snapshot.
+//   2. Compute wsModified (paths where ws head ≠ ws base).
+//   3. Run the safety gate on wsModified, producing a Decision.
+//   4. Fast-forward case (base == target, no resolutions): create a
+//      new snapshot node carrying the gate metadata, with HAS_FILE
+//      edges copied from ws head. (We don't reuse ws.HeadSnapshot
+//      directly so every integration produces a tagged snapshot —
+//      uniform model for `kai review`.)
+//   5. Non-FF case: detect conflicts, semantic merge, build merged
+//      snapshot with gate metadata, commit.
+//
+// The gate's verdict is attached to the result snapshot's payload AND
+// returned in IntegrateResult.Decision. Publish consults Decision to
+// decide whether to advance team-visible refs.
+func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, opts IntegrateOptions) (*IntegrateResult, error) {
+	resolutions := opts.Resolutions
 	ws, err := m.Get(nameOrID)
 	if err != nil {
 		return nil, err
@@ -59,43 +119,24 @@ func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, re
 		return nil, fmt.Errorf("target must be a snapshot, got %s", targetSnap.Kind)
 	}
 
-	// For now, we do a simple fast-forward if possible:
-	// If target == base, we can just use head as the result
-	// Otherwise, we need to do a proper merge (future enhancement)
-
 	baseHex := util.BytesToHex(ws.BaseSnapshot)
 	targetHex := util.BytesToHex(targetSnapshotID)
 
-	if baseHex == targetHex && resolutions == nil {
-		// Fast-forward: target hasn't changed since we branched
-		// The workspace head becomes the new target
-		return &IntegrateResult{
-			ResultSnapshot:    ws.HeadSnapshot,
-			AppliedChangeSets: ws.OpenChangeSets,
-			AutoResolved:      0,
-		}, nil
-	}
-
-	// Non-fast-forward case: need to check for conflicts
-	// For now, we detect if any files were modified in both target and workspace
-
-	// Get files from base, target, and head
+	// Load base and head files up-front. Both the FF and merge paths
+	// need them: FF needs head to copy HAS_FILE edges and the wsModified
+	// set for the gate; merge needs all three. Loading target lazily
+	// below to avoid an extra read on FF.
 	baseFiles, err := m.getSnapshotFileMap(ws.BaseSnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("getting base files: %w", err)
 	}
-
-	targetFiles, err := m.getSnapshotFileMap(targetSnapshotID)
-	if err != nil {
-		return nil, fmt.Errorf("getting target files: %w", err)
-	}
-
 	headFiles, err := m.getSnapshotFileMap(ws.HeadSnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("getting head files: %w", err)
 	}
 
-	// Find files modified in workspace (base -> head)
+	// Find files modified in workspace (base -> head). Computed once
+	// and shared by the gate, the FF path, and the merge path.
 	wsModified := make(map[string]bool)
 	for path, headDigest := range headFiles {
 		baseDigest, exists := baseFiles[path]
@@ -108,6 +149,39 @@ func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, re
 		if _, exists := headFiles[path]; !exists {
 			wsModified[path] = true
 		}
+	}
+
+	// Run the safety gate on the workspace's contribution. The verdict
+	// applies to both FF and merge paths — the agent's intent is the
+	// same regardless of how it lands.
+	decision, err := classifyForGate(m.db, sortedKeys(wsModified), opts)
+	if err != nil {
+		return nil, fmt.Errorf("classifying integration: %w", err)
+	}
+
+	// Fast-forward: target hasn't changed since we branched. Build a
+	// new snapshot identical to ws.HeadSnapshot but tagged with gate
+	// metadata. We don't reuse ws.HeadSnapshot directly because the
+	// integration snapshot must carry the verdict and have its own id
+	// for `kai review` to reference later.
+	if baseHex == targetHex && resolutions == nil {
+		snapID, err := m.buildFFSnapshot(ws, targetHex, decision)
+		if err != nil {
+			return nil, fmt.Errorf("building fast-forward snapshot: %w", err)
+		}
+		return &IntegrateResult{
+			ResultSnapshot:    snapID,
+			AppliedChangeSets: ws.OpenChangeSets,
+			AutoResolved:      0,
+			Decision:          decision,
+		}, nil
+	}
+
+	// Non-FF: load target files now (deferred above to skip an extra
+	// read on the FF path).
+	targetFiles, err := m.getSnapshotFileMap(targetSnapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("getting target files: %w", err)
 	}
 
 	// Find files modified in target (base -> target)
@@ -285,6 +359,7 @@ func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, re
 	if autoResolved > 0 {
 		mergedSnapPayload["autoResolved"] = autoResolved
 	}
+	applyDecisionToPayload(mergedSnapPayload, decision)
 
 	mergedSnapID, err := m.db.InsertNode(tx, graph.KindSnapshot, mergedSnapPayload)
 	if err != nil {
@@ -324,6 +399,7 @@ func (m *Manager) integrateInternal(nameOrID string, targetSnapshotID []byte, re
 		ResultSnapshot:    mergedSnapID,
 		AppliedChangeSets: ws.OpenChangeSets,
 		AutoResolved:      autoResolved,
+		Decision:          decision,
 	}, nil
 }
 
@@ -370,4 +446,112 @@ func (m *Manager) getSnapshotFileNodes(snapshotID []byte) (map[string]*graph.Nod
 	}
 
 	return nodeMap, nil
+}
+
+// classifyForGate runs the safety gate on the workspace's modified
+// paths and returns a workspace-local IntegrationDecision. SkipGate
+// short-circuits to an Auto verdict so review-approval re-runs and
+// tests don't pay the classification cost.
+func classifyForGate(g safetygate.Grapher, wsModified []string, opts IntegrateOptions) (*IntegrationDecision, error) {
+	if opts.SkipGate {
+		return &IntegrationDecision{
+			Verdict: string(safetygate.Auto),
+			Reasons: []string{"gate skipped (explicit caller opt-in)"},
+		}, nil
+	}
+	cfg := safetygate.DefaultConfig()
+	if opts.GateConfig != nil {
+		cfg = *opts.GateConfig
+	}
+	d, err := safetygate.Classify(context.Background(), wsModified, g, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &IntegrationDecision{
+		Verdict:     string(d.Verdict),
+		BlastRadius: d.BlastRadius,
+		Reasons:     d.Reasons,
+		Touches:     d.Touches,
+	}, nil
+}
+
+// applyDecisionToPayload writes the gate verdict onto a snapshot
+// payload map in place. Persisting on the snapshot lets `kai review`
+// list and inspect held integrations later without re-running the
+// gate.
+func applyDecisionToPayload(payload map[string]interface{}, d *IntegrationDecision) {
+	if payload == nil || d == nil {
+		return
+	}
+	payload["gateVerdict"] = d.Verdict
+	payload["gateBlastRadius"] = d.BlastRadius
+	if len(d.Reasons) > 0 {
+		payload["gateReasons"] = d.Reasons
+	}
+	if len(d.Touches) > 0 {
+		payload["gateTouches"] = d.Touches
+	}
+}
+
+// buildFFSnapshot creates a new Snapshot node identical in file content
+// to ws.HeadSnapshot but tagged with gate metadata. The HAS_FILE edges
+// are copied from ws.HeadSnapshot. Used on the fast-forward path so
+// every integration produces a tagged snapshot — uniform model.
+func (m *Manager) buildFFSnapshot(ws *Workspace, targetHex string, decision *IntegrationDecision) ([]byte, error) {
+	headFileNodes, err := m.getSnapshotFileNodes(ws.HeadSnapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := m.db.BeginTx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	payload := map[string]interface{}{
+		"sourceType":     "merged-ff",
+		"sourceRef":      fmt.Sprintf("integrate-ff:%s->%s", util.BytesToHex(ws.ID)[:12], targetHex[:12]),
+		"fileCount":      len(headFileNodes),
+		"createdAt":      util.NowMs(),
+		"integratedFrom": util.BytesToHex(ws.ID),
+		"targetSnapshot": targetHex,
+	}
+	applyDecisionToPayload(payload, decision)
+
+	snapID, err := m.db.InsertNode(tx, graph.KindSnapshot, payload)
+	if err != nil {
+		return nil, fmt.Errorf("inserting fast-forward snapshot: %w", err)
+	}
+
+	for _, fileNode := range headFileNodes {
+		if fileNode == nil {
+			continue
+		}
+		if err := m.db.InsertEdge(tx, snapID, graph.EdgeHasFile, fileNode.ID, nil); err != nil {
+			return nil, fmt.Errorf("inserting HAS_FILE edge: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing fast-forward snapshot: %w", err)
+	}
+	return snapID, nil
+}
+
+// sortedKeys returns the keys of a string-keyed set in deterministic order.
+// Used to make gate input order-independent across map iterations.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	// stdlib sort.Strings would do, but avoiding the import for a
+	// trivial in-place sort.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }

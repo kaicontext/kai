@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "kai": {
-      "command": "/Users/jacobschatz/projects/kai/kai-cli/kai",
+      "command": "/opt/homebrew/bin/kai",
       "args": ["mcp", "serve"]
     }
   }

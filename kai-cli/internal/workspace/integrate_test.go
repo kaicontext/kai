@@ -39,8 +39,18 @@ func TestIntegrateFastForward(t *testing.T) {
 	if len(result.Conflicts) != 0 {
 		t.Fatalf("expected no conflicts, got %d", len(result.Conflicts))
 	}
-	if !bytes.Equal(result.ResultSnapshot, headSnap) {
-		t.Fatalf("fast-forward should use head snapshot as result")
+	// FF now produces a fresh tagged snapshot (not ws.HeadSnapshot
+	// directly) so every integration carries gate metadata. The
+	// result's HAS_FILE edges point at the same file nodes as
+	// ws.HeadSnapshot, but the snapshot id itself is new.
+	if len(result.ResultSnapshot) == 0 {
+		t.Fatalf("fast-forward should produce a result snapshot")
+	}
+	if bytes.Equal(result.ResultSnapshot, headSnap) {
+		t.Fatalf("fast-forward should mint a new snapshot id, not reuse ws head")
+	}
+	if result.Decision == nil {
+		t.Fatalf("fast-forward should populate a gate Decision")
 	}
 	if len(result.AppliedChangeSets) != 1 {
 		t.Fatalf("expected 1 applied changeset, got %d", len(result.AppliedChangeSets))

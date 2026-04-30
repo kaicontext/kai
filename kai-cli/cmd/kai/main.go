@@ -52,6 +52,7 @@ import (
 	"kai/internal/ref"
 	"kai/internal/remote"
 	"kai/internal/review"
+	"kai/internal/safetygate"
 	"kai/internal/snapshot"
 	spawnpkg "kai/pkg/spawn"
 	"kai/internal/status"
@@ -79,7 +80,7 @@ var kaiDir = kaipath.Resolve(".")
 var ciPolicyFile = filepath.Join(kaiDir, "rules", "ci-policy.yaml")
 
 // Version is the current kai CLI version
-var Version = "0.15.0"
+var Version = "0.16.0"
 
 // verbose enables debug output when --verbose/-v flag or KAI_VERBOSE env var is set
 var verbose bool
@@ -172,6 +173,10 @@ var rootCmd = &cobra.Command{
 	Short:   "Kai - semantic, intent-based version control",
 	Long:    `Kai is a local CLI that creates semantic snapshots from Git refs, computes changesets, classifies change types, and generates intent sentences.`,
 	Version: Version,
+	// Bare `kai` prints help. The TUI is launched explicitly via
+	// `kai code` (see cmd/kai/tui.go).
+	SilenceUsage:  true,
+	SilenceErrors: false,
 }
 
 // Command groups for organized help output
@@ -3719,6 +3724,11 @@ func init() {
 	resolveCmd.Flags().BoolVar(&resolveContinue, "continue", false, "Apply user-edited resolutions from .kai/conflicts/<workspace>/")
 	resolveCmd.Flags().BoolVar(&resolveAbort, "abort", false, "Discard pending conflict state for the workspace")
 	rootCmd.AddCommand(resolveCmd)
+
+	gateCmd.AddCommand(gateListCmd, gateShowCmd, gateApproveCmd, gateRejectCmd)
+	rootCmd.AddCommand(gateCmd)
+
+	rootCmd.AddCommand(codeCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(checkoutCmd)
 
@@ -12756,7 +12766,16 @@ func runIntegrate(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := workspace.NewManager(db)
-	result, err := mgr.Integrate(wsName, targetID)
+
+	// Load the gate config from the kai data dir. Missing file is fine —
+	// safetygate.LoadConfig returns DefaultConfig() in that case.
+	gateCfg, err := safetygate.LoadConfig(kaiDir)
+	if err != nil {
+		return fmt.Errorf("loading gate config: %w", err)
+	}
+	result, err := mgr.IntegrateWithOptions(wsName, targetID, workspace.IntegrateOptions{
+		GateConfig: &gateCfg,
+	})
 	if err != nil {
 		return fmt.Errorf("integrating workspace: %w", err)
 	}
@@ -12777,25 +12796,36 @@ func runIntegrate(cmd *cobra.Command, args []string) error {
 	if result.AutoResolved > 0 {
 		fmt.Printf("  Auto-resolved: %d change(s)\n", result.AutoResolved)
 	}
-
-	// Advance the target ref to the merged snapshot if --into named a
-	// ref (e.g. snap.latest). Without this the second integrate from a
-	// parallel workspace fast-forwards past the first one's result —
-	// because the target ref still points at the original base, so
-	// base == target trips the no-conflict shortcut in integrateInternal.
-	refMgr := ref.NewRefManager(db)
-	if existing, _ := refMgr.Get(wsTarget); existing != nil {
-		if err := refMgr.Set(wsTarget, result.ResultSnapshot, ref.KindSnapshot); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to advance ref %s: %v\n", wsTarget, err)
-		} else {
-			fmt.Printf("  %s -> %s\n", wsTarget, util.BytesToHex(result.ResultSnapshot)[:12])
+	if result.Decision != nil {
+		switch result.Decision.Verdict {
+		case "review":
+			fmt.Printf("  Gate: review (blast radius %d)\n", result.Decision.BlastRadius)
+		case "block":
+			fmt.Printf("  Gate: BLOCKED (blast radius %d)\n", result.Decision.BlastRadius)
+		}
+		for _, r := range result.Decision.Reasons {
+			fmt.Printf("    · %s\n", r)
 		}
 	}
 
-	// Advance the workspace's own head ref (ws.<name>.head) so subsequent
-	// queries see the merged state, not the pre-merge head.
-	if ws, err := workspace.NewManager(db).Get(wsName); err == nil && ws != nil {
-		_ = ref.NewAutoRefManager(db).OnWorkspaceHeadChanged(ws.Name, result.ResultSnapshot)
+	// Advance refs via the workspace publish helper. PublishToRef advances
+	// the named target ref (e.g. snap.latest) and the workspace's own
+	// head ref. Without advancing the target, a second integrate from a
+	// parallel workspace would fast-forward past this one because the
+	// target still points at the original base, tripping the no-conflict
+	// shortcut in integrateInternal.
+	if ws, err := mgr.Get(wsName); err == nil && ws != nil {
+		report, err := mgr.PublishToRef(ws, result, wsTarget, workspace.PublishOptions{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: publish: %v\n", err)
+		} else {
+			for _, name := range report.AdvancedRefs {
+				fmt.Printf("  %s -> %s\n", name, util.BytesToHex(result.ResultSnapshot)[:12])
+			}
+			if report.HeldByGate {
+				fmt.Println("  Change held: run `kai review` to inspect.")
+			}
+		}
 	}
 
 	return nil

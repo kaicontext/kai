@@ -796,3 +796,41 @@ func TestPruneKeepFlag(t *testing.T) {
 		t.Fatal("prune command should have --keep flag")
 	}
 }
+
+// TestGateCommand verifies the gate command tree is registered with
+// the four expected subcommands. The actual list/approve/reject logic
+// is covered by internal/workspace/gate_e2e_test.go which exercises
+// the full DB lifecycle.
+func TestGateCommand(t *testing.T) {
+	if gateCmd == nil {
+		t.Fatal("gateCmd should not be nil")
+	}
+	if gateCmd.Use != "gate" {
+		t.Errorf("expected Use 'gate', got %q", gateCmd.Use)
+	}
+	want := map[string]bool{"list": false, "show": false, "approve": false, "reject": false}
+	for _, sub := range gateCmd.Commands() {
+		// sub.Use can be "show <snapshot-id>" — split on whitespace.
+		name := sub.Use
+		if i := indexSpace(name); i >= 0 {
+			name = name[:i]
+		}
+		if _, ok := want[name]; ok {
+			want[name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("missing gate subcommand: %s", name)
+		}
+	}
+}
+
+func indexSpace(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' {
+			return i
+		}
+	}
+	return -1
+}

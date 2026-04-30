@@ -4,12 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
-	"kai/internal/graph"
-	"kai/internal/ref"
+	"kai/internal/safetygate"
 	"kai/internal/util"
 	"kai/internal/workspace"
 )
@@ -164,7 +162,14 @@ func resolveContinueFlow(mgr *workspace.Manager, db dbHandle, wsArg string, stat
 		return fmt.Errorf("parsing target snapshot id: %w", err)
 	}
 
-	result, err := mgr.IntegrateWithResolutions(wsArg, targetID, resolutions)
+	gateCfg, err := safetygate.LoadConfig(kaiDir)
+	if err != nil {
+		return fmt.Errorf("loading gate config: %w", err)
+	}
+	result, err := mgr.IntegrateWithOptions(wsArg, targetID, workspace.IntegrateOptions{
+		Resolutions: resolutions,
+		GateConfig:  &gateCfg,
+	})
 	if err != nil {
 		return fmt.Errorf("integrating with resolutions: %w", err)
 	}
@@ -190,32 +195,34 @@ func resolveContinueFlow(mgr *workspace.Manager, db dbHandle, wsArg string, stat
 	if result.AutoResolved > 0 {
 		fmt.Printf("  Auto-resolved: %d change(s)\n", result.AutoResolved)
 	}
-
-	// Advance any ref currently pointing at the original target — same
-	// fix as runIntegrate, but here we don't have the original ref name
-	// string (conflict state stored only the snapshot ID), so we look up
-	// every ref pointing at targetID and advance each. In practice that's
-	// usually just snap.latest plus the workspace's own ws.<name>.head.
-	if realDB, ok := db.(*graph.DB); ok {
-		refMgr := ref.NewRefManager(realDB)
-		if refs, err := refMgr.List(nil); err == nil {
-			targetHex := util.BytesToHex(targetID)
-			for _, r := range refs {
-				// Only advance user-named refs (snap.latest, snap.main, etc.)
-				// — NOT other workspaces' auto-refs (ws.<other>.head/.base)
-				// that happen to point at the same target.
-				if strings.HasPrefix(r.Name, "ws.") {
-					continue
-				}
-				if util.BytesToHex(r.TargetID) == targetHex {
-					if err := refMgr.Set(r.Name, result.ResultSnapshot, ref.KindSnapshot); err == nil {
-						fmt.Printf("  %s -> %s\n", r.Name, util.BytesToHex(result.ResultSnapshot)[:12])
-					}
-				}
-			}
+	if result.Decision != nil {
+		switch result.Decision.Verdict {
+		case "review":
+			fmt.Printf("  Gate: review (blast radius %d)\n", result.Decision.BlastRadius)
+		case "block":
+			fmt.Printf("  Gate: BLOCKED (blast radius %d)\n", result.Decision.BlastRadius)
 		}
-		if ws, err := mgr.Get(wsArg); err == nil && ws != nil {
-			_ = ref.NewAutoRefManager(realDB).OnWorkspaceHeadChanged(ws.Name, result.ResultSnapshot)
+		for _, r := range result.Decision.Reasons {
+			fmt.Printf("    · %s\n", r)
+		}
+	}
+
+	// Advance any non-ws.* ref currently pointing at the original target
+	// to the merged snapshot, plus the workspace's own head. Conflict
+	// state stored only the snapshot ID — not the original ref name —
+	// so PublishAtTarget discovers all named refs at oldTargetID and
+	// advances each.
+	if ws, err := mgr.Get(wsArg); err == nil && ws != nil {
+		report, perr := mgr.PublishAtTarget(ws, result, targetID, workspace.PublishOptions{})
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "warning: publish: %v\n", perr)
+		} else {
+			for _, name := range report.AdvancedRefs {
+				fmt.Printf("  %s -> %s\n", name, util.BytesToHex(result.ResultSnapshot)[:12])
+			}
+			if report.HeldByGate {
+				fmt.Println("  Change held: run `kai review` to inspect.")
+			}
 		}
 	}
 	return nil

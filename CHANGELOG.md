@@ -2,6 +2,33 @@
 
 All notable changes to Kai are documented here.
 
+## [0.16.0] — 2026-04-30
+
+### Safety gate
+- **New `safetygate` package** classifies every workspace integration into Auto / Review / Block based on depth-1 blast radius (callers + importers, the same primitive `kai impact` uses) plus per-repo protected-path globs in `.kai/gate.yaml`.
+- **The gate is hooked at `Manager.Integrate` — the single chokepoint where private workspace work becomes team-visible.** Verdict is persisted on the resulting snapshot's payload and `IntegrateResult.Decision`.
+- **Refuse-to-promote, never roll back.** A non-Auto verdict leaves the merged snapshot in the DB and the agent's CoW workspace untouched; only the `refMgr.Set` step on the team-visible ref is skipped. Approval re-runs the publish with `SkipGate=true`.
+- **New `Manager.{PublishToRef, PublishAtTarget}`** — single helpers that wrap the ref-advance patterns previously inlined in `kai integrate` and `kai resolve`. Both consult the verdict so callers can't accidentally bypass the gate.
+- **New `kai gate list / show / approve / reject`** — the human-facing surface for the hold queue.
+- License switched to BSL (matches the kai-server repo).
+
+### TUI — new `kai code` launcher
+- **`kai code`** opens a Bubble Tea three-pane interface: REPL (top of input + scrollback output), Sync (live file-watcher activity), Gate (held integrations with `a`/`r` approve/reject hotkeys). Bare `kai` continues to print help.
+- REPL shells out to existing kai subcommands by default; with `ANTHROPIC_API_KEY` set it routes unrecognized input to the planner instead.
+- TTY detection — piped or redirected contexts get help instead of a doomed TUI.
+
+### Planner + agent orchestrator
+- **New `internal/planner`** — one-shot LLM call (Claude Sonnet) that turns a natural-language request into a structured `WorkPlan`. Resolves files via substring match against the graph, surfaces depth-1 callers and protected globs to the model, refuses vague requests with `ErrTooVague`.
+- **New `internal/orchestrator`** — owns agent subprocess lifecycle. Phase A (parallel): `kai spawn` per task → write prompt file → exec configured agent command. Phase B (sequential): `kai capture` / `push` / `pull` / in-process `Manager.Integrate` per agent.
+- **New `internal/agentprompt`** — pure prompt builder; identity, allowed/forbidden files (DontTouch + Protected merged), graph context, coordination notes.
+- **Configurable agent command** via `.kai/config.yaml` (`agent.command: ["claude", "-p", "{prompt}"]` by default; pluggable for any runner).
+- All-parallel agent execution; no DependsOn ordering in v1.
+
+### Internals
+- New `internal/config` for `.kai/config.yaml` (planner + agent runner sections).
+- New `internal/tui` and `internal/tui/views` packages.
+- `IntegrateOptions{Resolutions, SkipGate, GateConfig}` and `IntegrateWithOptions` entry point on `workspace.Manager`.
+
 ## [0.15.0] — 2026-04-29
 
 ### CLI — `.git/kai/` is the new default
