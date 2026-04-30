@@ -10,11 +10,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"kai/internal/agentprompt"
-	"kai/internal/ai"
 	"kai/internal/config"
 	"kai/internal/graph"
 	"kai/internal/orchestrator"
 	"kai/internal/planner"
+	"kai/internal/remote"
 	"kai/internal/safetygate"
 	"kai/internal/tui"
 	"kai/internal/tui/views"
@@ -67,15 +67,23 @@ func runCodeTUI(cmd *cobra.Command, args []string) error {
 }
 
 // buildPlannerServices wires up the engine handles the REPL needs for
-// natural-language input. Returns nil if anything required is missing
-// (typically ANTHROPIC_API_KEY) — the REPL gracefully falls back to
-// shell-out-only mode in that case.
+// natural-language input.
+//
+// LLM completions route through kailab-control's POST /api/v1/llm/messages
+// rather than calling api.anthropic.com directly. That means the user
+// must be logged in (`kai auth login`) — they don't need a personal
+// ANTHROPIC_API_KEY. Returns nil with a warning if login is missing
+// or any required config can't load; the REPL then falls back to
+// shellout-only mode.
 func buildPlannerServices(db *graph.DB, kaiDir, workDir string) *views.PlannerServices {
-	if !ai.IsConfigured() {
+	creds, err := remote.LoadCredentials()
+	if err != nil || creds == nil || creds.AccessToken == "" || creds.ServerURL == "" {
+		fmt.Fprintf(os.Stderr, "warning: not logged in — natural-language input disabled (run `kai auth login`)\n")
 		return nil
 	}
-	llmClient, err := ai.NewClient()
+	authToken, err := remote.GetValidAccessToken()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v (planner disabled)\n", err)
 		return nil
 	}
 	cfg, err := config.Load(kaiDir)
@@ -93,7 +101,7 @@ func buildPlannerServices(db *graph.DB, kaiDir, workDir string) *views.PlannerSe
 
 	return &views.PlannerServices{
 		DB:         db,
-		LLM:        planner.NewAIAdapter(llmClient),
+		LLM:        planner.NewServerCompleter(creds.ServerURL, authToken),
 		GateConfig: gateCfg,
 		PlannerCfg: planner.Config{
 			Model:     cfg.Planner.Model,
