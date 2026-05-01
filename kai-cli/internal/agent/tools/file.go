@@ -11,7 +11,143 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
+
+// diffContext is the number of unchanged lines emitted around each
+// changed region, mirroring `diff -u`'s default. Big enough to
+// orient the reader; small enough that a one-line edit doesn't
+// flood the REPL with the whole file.
+const diffContext = 3
+
+// diffLine is one record in the flattened diff: marker is '+', '-',
+// or ' '; text is the original line content (line-terminated).
+// oldNum / newNum are 1-indexed positions in the source files (0
+// means "doesn't exist on that side").
+type diffLine struct {
+	marker  byte
+	text    string
+	oldNum  int
+	newNum  int
+}
+
+// unifiedDiff renders a hunked unified diff between old and new
+// content. Only the changed lines plus `diffContext` lines of
+// surrounding context appear; large unchanged regions between
+// hunks are skipped and rendered as a "@@" separator the TUI shows
+// as a visual break.
+//
+// File creation (oldContent == "") still emits every new line as
+// "+", since by definition every line is new context.
+func unifiedDiff(relPath, oldContent, newContent string) (patch string, added, removed int) {
+	if oldContent == newContent {
+		return "", 0, 0
+	}
+	dmp := diffmatchpatch.New()
+	chrA, chrB, lines := dmp.DiffLinesToChars(oldContent, newContent)
+	diffs := dmp.DiffMain(chrA, chrB, false)
+	diffs = dmp.DiffCharsToLines(diffs, lines)
+
+	all := make([]diffLine, 0, len(diffs))
+	oldNum, newNum := 1, 1
+	for _, d := range diffs {
+		var marker byte
+		switch d.Type {
+		case diffmatchpatch.DiffInsert:
+			marker = '+'
+		case diffmatchpatch.DiffDelete:
+			marker = '-'
+		default:
+			marker = ' '
+		}
+		for _, line := range splitKeepNewlines(d.Text) {
+			rec := diffLine{marker: marker, text: line}
+			switch marker {
+			case '+':
+				rec.newNum = newNum
+				newNum++
+				added++
+			case '-':
+				rec.oldNum = oldNum
+				oldNum++
+				removed++
+			default:
+				rec.oldNum = oldNum
+				rec.newNum = newNum
+				oldNum++
+				newNum++
+			}
+			all = append(all, rec)
+		}
+	}
+
+	// Build hunk ranges: indices [start,end] inclusive that should
+	// appear in the patch. Walk all lines; for each change, mark a
+	// window of [change-context, change+context]. Merge overlapping
+	// windows so adjacent edits don't duplicate context.
+	type rng struct{ start, end int }
+	var ranges []rng
+	for i, ln := range all {
+		if ln.marker == ' ' {
+			continue
+		}
+		s := i - diffContext
+		if s < 0 {
+			s = 0
+		}
+		e := i + diffContext
+		if e >= len(all) {
+			e = len(all) - 1
+		}
+		if len(ranges) > 0 && s <= ranges[len(ranges)-1].end+1 {
+			ranges[len(ranges)-1].end = e
+		} else {
+			ranges = append(ranges, rng{start: s, end: e})
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", relPath, relPath)
+	for hi, r := range ranges {
+		if hi > 0 {
+			b.WriteString("@@\n")
+		}
+		for i := r.start; i <= r.end; i++ {
+			// Format: "<lineNum>\x1f<marker><text>" — 0x1f
+			// (Information Separator One) splits the metadata from
+			// the content unambiguously, regardless of leading
+			// whitespace in source lines. The renderer splits on
+			// the first 0x1f. For deletes we show the old-file
+			// line number (since the line is gone from the new
+			// file); for adds and context, the new-file number.
+			ln := all[i].newNum
+			if all[i].marker == '-' {
+				ln = all[i].oldNum
+			}
+			fmt.Fprintf(&b, "%d\x1f%c%s", ln, all[i].marker, all[i].text)
+			if !strings.HasSuffix(all[i].text, "\n") {
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String(), added, removed
+}
+
+// splitKeepNewlines splits on "\n" but keeps the trailing newline on
+// each segment so the unified-diff renderer doesn't double up.
+func splitKeepNewlines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.SplitAfter(s, "\n")
+	// SplitAfter leaves an empty trailing element when s ends with
+	// "\n"; strip it so we don't emit a phantom blank line.
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
 
 // contentDigest returns the hex-encoded sha256 of the given content.
 // Used by the live-sync broadcast hook so the receiver can dedupe
@@ -46,6 +182,17 @@ type FileTools struct {
 	Workspace   string
 	OnChange    func(relPath, op string)
 	OnBroadcast func(relPath, digest, contentBase64 string)
+	// OnDiff fires after each successful write or edit with a unified
+	// diff of the change. The TUI uses it to render an inline
+	// "Update(path) — Added N lines" entry like Claude Code's. addedLines
+	// / removedLines are pre-computed so consumers don't reparse.
+	// Optional — leave nil to skip.
+	OnDiff func(relPath, op, unifiedDiff string, addedLines, removedLines int)
+	// ReadOnly omits write and edit from the tool set. Used by the
+	// chat fallback in the REPL so a quick "what files are here?"
+	// query can call view and bash without risking accidental
+	// modifications to the user's actual repo.
+	ReadOnly bool
 }
 
 // View returns the read-only file viewer.
@@ -53,16 +200,21 @@ func (f *FileTools) View() BaseTool { return &viewTool{ws: f.Workspace} }
 
 // Write returns the file-create / overwrite tool.
 func (f *FileTools) Write() BaseTool {
-	return &writeTool{ws: f.Workspace, onChange: f.OnChange, onBroadcast: f.OnBroadcast}
+	return &writeTool{ws: f.Workspace, onChange: f.OnChange, onBroadcast: f.OnBroadcast, onDiff: f.OnDiff}
 }
 
 // Edit returns the patch-style editor.
 func (f *FileTools) Edit() BaseTool {
-	return &editTool{ws: f.Workspace, onChange: f.OnChange, onBroadcast: f.OnBroadcast}
+	return &editTool{ws: f.Workspace, onChange: f.OnChange, onBroadcast: f.OnBroadcast, onDiff: f.OnDiff}
 }
 
-// All returns the three tools together for easy registration.
+// All returns the available file tools. ReadOnly mode returns only
+// the view tool — write and edit are intentionally absent so an
+// agent in chat-fallback mode can't mutate files even if asked.
 func (f *FileTools) All() []BaseTool {
+	if f.ReadOnly {
+		return []BaseTool{f.View()}
+	}
 	return []BaseTool{f.View(), f.Write(), f.Edit()}
 }
 
@@ -172,6 +324,7 @@ type writeTool struct {
 	ws          string
 	onChange    func(relPath, op string)
 	onBroadcast func(relPath, digest, contentBase64 string)
+	onDiff      func(relPath, op, unifiedDiff string, addedLines, removedLines int)
 }
 
 type writeParams struct {
@@ -210,7 +363,10 @@ func (w *writeTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error
 	}
 
 	op := "modified"
-	if _, err := os.Stat(abs); os.IsNotExist(err) {
+	var prior string
+	if existing, err := os.ReadFile(abs); err == nil {
+		prior = string(existing)
+	} else if os.IsNotExist(err) {
 		op = "created"
 	}
 
@@ -227,6 +383,10 @@ func (w *writeTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error
 	if w.onBroadcast != nil {
 		w.onBroadcast(relForward, contentDigest(p.Content), encodeBase64(p.Content))
 	}
+	if w.onDiff != nil {
+		patch, added, removed := unifiedDiff(relForward, prior, p.Content)
+		w.onDiff(relForward, op, patch, added, removed)
+	}
 	return NewTextResponse(fmt.Sprintf("wrote %d bytes to %s (%s)", len(p.Content), p.FilePath, op)), nil
 }
 
@@ -236,6 +396,7 @@ type editTool struct {
 	ws          string
 	onChange    func(relPath, op string)
 	onBroadcast func(relPath, digest, contentBase64 string)
+	onDiff      func(relPath, op, unifiedDiff string, addedLines, removedLines int)
 }
 
 type editParams struct {
@@ -321,6 +482,10 @@ func (e *editTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error)
 	}
 	if e.onBroadcast != nil {
 		e.onBroadcast(relForward, contentDigest(updated), encodeBase64(updated))
+	}
+	if e.onDiff != nil {
+		patch, added, removed := unifiedDiff(relForward, src, updated)
+		e.onDiff(relForward, "modified", patch, added, removed)
 	}
 	delta := len(updated) - len(src)
 	sign := "+"

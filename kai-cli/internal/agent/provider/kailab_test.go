@@ -6,11 +6,110 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"kai/internal/agent/message"
 	"kai/internal/agent/tools"
 )
+
+// TestKailab_RetriesTransientThenSucceeds: a 429 followed by a 200
+// completes in two attempts. Backoff is shrunk to a millisecond so
+// the test stays fast.
+func TestKailab_RetriesTransientThenSucceeds(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"type":"rate_limit_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	k := NewKailab(srv.URL, "tok")
+	k.InitialBackoff = time.Millisecond
+	k.MaxBackoff = 5 * time.Millisecond
+
+	resp, err := k.Send(context.Background(), Request{
+		Model:     "claude",
+		MaxTokens: 10,
+		Messages:  []message.Message{{Role: message.RoleUser, Parts: []message.ContentPart{message.TextContent{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls (1 retry), got %d", calls)
+	}
+	if len(resp.Parts) != 1 {
+		t.Errorf("expected 1 content part, got %d", len(resp.Parts))
+	}
+}
+
+// TestKailab_DoesNotRetry400: 400 is a client mistake (bad model
+// name, malformed body). Retrying just wastes time and confuses the
+// user about the real error.
+func TestKailab_DoesNotRetry400(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
+	}))
+	defer srv.Close()
+
+	k := NewKailab(srv.URL, "tok")
+	k.InitialBackoff = time.Millisecond
+
+	_, err := k.Send(context.Background(), Request{
+		Model:     "claude",
+		MaxTokens: 10,
+		Messages:  []message.Message{{Role: message.RoleUser, Parts: []message.ContentPart{message.TextContent{Text: "hi"}}}},
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call (no retry on 400), got %d", calls)
+	}
+}
+
+// TestKailab_GivesUpAfterMaxAttempts: persistent 529 surfaces the
+// last error after exhausting the retry budget.
+func TestKailab_GivesUpAfterMaxAttempts(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(529)
+		_, _ = w.Write([]byte(`overloaded`))
+	}))
+	defer srv.Close()
+
+	k := NewKailab(srv.URL, "tok")
+	k.InitialBackoff = time.Millisecond
+	k.MaxBackoff = 5 * time.Millisecond
+	k.MaxAttempts = 3
+
+	_, err := k.Send(context.Background(), Request{
+		Model:     "claude",
+		MaxTokens: 10,
+		Messages:  []message.Message{{Role: message.RoleUser, Parts: []message.ContentPart{message.TextContent{Text: "hi"}}}},
+	})
+	if err == nil {
+		t.Fatalf("expected error after exhausted retries")
+	}
+	if !strings.Contains(err.Error(), "529") {
+		t.Errorf("expected 529 in error, got %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 attempts, got %d", calls)
+	}
+}
 
 // TestKailab_TranslatesRequestAndResponse drives a full round-trip
 // against a fake kai-server: sends an Anthropic-shaped request, gets

@@ -10,12 +10,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
 	"kai/internal/agent/message"
 	"kai/internal/agent/provider"
 	"kai/internal/agent/session"
+	"kai/internal/agent/tools"
 )
 
 // fakeProvider returns canned Responses in order. Lets the runner test
@@ -313,7 +315,7 @@ func TestRunLoop_ResumesFromExistingSession(t *testing.T) {
 
 	res, err := Run(context.Background(), Options{
 		Workspace:    t.TempDir(),
-		Prompt:       "(ignored when resuming)",
+		Prompt:       "follow-up question",
 		Provider:     p,
 		SessionStore: store,
 		SessionID:    prior.ID,
@@ -324,19 +326,176 @@ func TestRunLoop_ResumesFromExistingSession(t *testing.T) {
 	if res.SessionID != prior.ID {
 		t.Errorf("SessionID changed across resume: %s -> %s", prior.ID, res.SessionID)
 	}
-	// The provider must have received the prior user message in
-	// its first call's Messages, not the (ignored) Prompt.
-	if got := p.last.Messages; len(got) != 1 || got[0].Role != message.RoleUser {
-		t.Fatalf("expected one prior user message in first call, got %+v", got)
+	// The provider must have received both the prior user message
+	// AND the new user turn — the conversation must end with a user
+	// message or Anthropic rejects the call (no assistant prefill).
+	got := p.last.Messages
+	if len(got) != 2 || got[0].Role != message.RoleUser || got[1].Role != message.RoleUser {
+		t.Fatalf("expected prior + new user messages, got %+v", got)
 	}
-	if got := p.last.Messages[0].Parts[0].(message.TextContent).Text; got != "earlier message" {
-		t.Errorf("first message text: %q", got)
+	if t1 := got[0].Parts[0].(message.TextContent).Text; t1 != "earlier message" {
+		t.Errorf("first message text: %q", t1)
 	}
-	// And the new assistant turn lands as message #2.
+	if t2 := got[1].Parts[0].(message.TextContent).Text; t2 != "follow-up question" {
+		t.Errorf("second message text: %q", t2)
+	}
+	// History after the run: prior user + new user + assistant reply.
 	hist, _ := prior.History()
-	if len(hist) != 2 {
-		t.Errorf("expected 2 messages after resume run, got %d", len(hist))
+	if len(hist) != 3 {
+		t.Errorf("expected 3 messages after resume run, got %d", len(hist))
 	}
+}
+
+// TestRunLoop_BudgetContinuation: a max_tokens stop with no tool
+// calls injects a "continue" prompt and re-calls the provider. Caps
+// at 3 continuations.
+func TestRunLoop_BudgetContinuation(t *testing.T) {
+	p := &fakeProvider{queue: []provider.Response{
+		{
+			Parts:        []message.ContentPart{message.TextContent{Text: "first half"}},
+			FinishReason: message.FinishReasonMaxTokens,
+		},
+		{
+			Parts:        []message.ContentPart{message.TextContent{Text: "second half"}},
+			FinishReason: message.FinishReasonEndTurn,
+		},
+	}}
+	res, err := Run(context.Background(), Options{
+		Workspace: t.TempDir(),
+		Prompt:    "write a long essay",
+		Provider:  p,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if p.calls != 2 {
+		t.Errorf("expected 2 provider calls (truncated + continuation), got %d", p.calls)
+	}
+	// History should contain the injected "Continue from where you
+	// stopped" user message between the two assistant turns.
+	gotContinue := false
+	for _, m := range res.Transcript {
+		if m.Role != message.RoleUser {
+			continue
+		}
+		for _, part := range m.Parts {
+			if t, ok := part.(message.TextContent); ok && strings.Contains(t.Text, "Continue from where you stopped") {
+				gotContinue = true
+			}
+		}
+	}
+	if !gotContinue {
+		t.Errorf("continuation prompt not found in transcript")
+	}
+}
+
+// TestRunLoop_BudgetContinuationCap: after 3 continuations the runner
+// gives up rather than looping forever on a model that won't stop
+// truncating.
+func TestRunLoop_BudgetContinuationCap(t *testing.T) {
+	queue := make([]provider.Response, 0, 5)
+	for i := 0; i < 5; i++ {
+		queue = append(queue, provider.Response{
+			Parts:        []message.ContentPart{message.TextContent{Text: "more..."}},
+			FinishReason: message.FinishReasonMaxTokens,
+		})
+	}
+	p := &fakeProvider{queue: queue}
+	_, err := Run(context.Background(), Options{
+		Workspace: t.TempDir(),
+		Prompt:    "endless",
+		Provider:  p,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Initial call + 3 continuations = 4 total. Beyond that the
+	// runner returns the truncated reply rather than re-calling.
+	if p.calls != 4 {
+		t.Errorf("expected 4 calls (initial + 3 continuations), got %d", p.calls)
+	}
+}
+
+// TestRunLoop_ConcurrentReadDispatch verifies that read-only tools in
+// the same batch run in parallel. We measure by recording overlap
+// between two view tools' Run goroutines.
+func TestRunLoop_ConcurrentReadDispatch(t *testing.T) {
+	ws := t.TempDir()
+	for _, n := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(ws, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A tool that records when it starts/stops so we can detect
+	// overlap. Wraps view to keep behavior real.
+	starts := make(chan struct{}, 2)
+	releases := make(chan struct{})
+	slowView := &slowTool{
+		name: "view",
+		run: func(ctx context.Context, c tools.ToolCall) (tools.ToolResponse, error) {
+			starts <- struct{}{}
+			<-releases
+			return tools.ToolResponse{Content: "ok"}, nil
+		},
+	}
+
+	p := &fakeProvider{queue: []provider.Response{
+		{
+			Parts: []message.ContentPart{
+				message.ToolCall{ID: "1", Name: "view", Input: `{"file_path":"a.txt"}`, Type: "tool_use"},
+				message.ToolCall{ID: "2", Name: "view", Input: `{"file_path":"b.txt"}`, Type: "tool_use"},
+			},
+			FinishReason: message.FinishReasonToolUse,
+		},
+		{
+			Parts:        []message.ContentPart{message.TextContent{Text: "done"}},
+			FinishReason: message.FinishReasonEndTurn,
+		},
+	}}
+
+	// Drive the test: kick off Run in a goroutine, wait for both
+	// tools to be in-flight, then release them. If dispatch were
+	// serial the second start would block on the first's release
+	// and the test would deadlock.
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), Options{
+			Workspace:  ws,
+			Prompt:     "go",
+			Provider:   p,
+			ExtraTools: []tools.BaseTool{slowView},
+		})
+		done <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-starts:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d tool start(s) observed before timeout — dispatch is serial", i)
+		}
+	}
+	close(releases)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// slowTool is a controllable BaseTool used to verify dispatch
+// concurrency. The runner finds it by name in the registry; "view"
+// here shadows the real view tool for the duration of the test.
+type slowTool struct {
+	name string
+	run  func(ctx context.Context, c tools.ToolCall) (tools.ToolResponse, error)
+}
+
+func (s *slowTool) Info() tools.ToolInfo {
+	return tools.ToolInfo{Name: s.name, Description: "test", Parameters: map[string]any{}}
+}
+func (s *slowTool) Run(ctx context.Context, c tools.ToolCall) (tools.ToolResponse, error) {
+	return s.run(ctx, c)
 }
 
 // dbAdapter mirrors the one in session_test.go but local here because

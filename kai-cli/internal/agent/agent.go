@@ -22,6 +22,7 @@ import (
 	"kai/internal/agent/session"
 	"kai/internal/agent/tools"
 	"kai/internal/graph"
+	"kai/internal/safetygate"
 )
 
 // Hooks lets the orchestrator observe agent activity without coupling
@@ -55,6 +56,38 @@ type Hooks struct {
 	// the sync pane to render a "called kai_callers(file=router.go)"
 	// breadcrumb.
 	OnToolCall func(name, inputJSON string)
+
+	// OnTurnComplete fires after each provider response with the
+	// run's cumulative token counts. The TUI uses this to animate a
+	// live token counter as turns complete (the agent's billed
+	// usage climbs from 0 → final over the run). Fires once per
+	// model call regardless of whether the model also issued tool
+	// calls, so the counter ticks as work progresses.
+	OnTurnComplete func(tokensIn, tokensOut int)
+
+	// OnFileDiff fires after each successful write/edit with a
+	// unified diff (`--- a/path` / `+++ b/path` + `+/-/space`
+	// lines) plus pre-counted additions/removals. The TUI renders
+	// this as an inline "Update(path) — Added N lines" block,
+	// mirroring Claude Code's per-edit display. Distinct from
+	// OnFileChange so consumers that just need notification don't
+	// pay for diff computation.
+	OnFileDiff func(relPath, op, unifiedDiff string, added, removed int)
+
+	// OnBashOutput fires once per line of bash stdout/stderr while a
+	// command is running, so the TUI can stream long-running
+	// commands (brew install, npm test, go test ./...) inline
+	// instead of leaving the user staring at a frozen pane.
+	OnBashOutput func(line string)
+
+	// OnGateVerdict fires after every workspace mutation with the
+	// safety gate's classification (auto / review / block) plus
+	// blast radius and human-readable reasons. Lets the TUI render
+	// kai's per-edit verdict inline ("auto ✓ — 0 downstream", "held
+	// ⚠ — 3 callers affected"). Fires once per mutation event:
+	// once per write/edit tool call, and once per batch of files
+	// touched by a single bash invocation.
+	OnGateVerdict func(paths []string, verdict string, blastRadius int, reasons []string)
 }
 
 // Options configures one agent run.
@@ -104,10 +137,26 @@ type Options struct {
 	// commands. Production wiring (cmd/kai/tui.go) sets this true.
 	EnableBash bool
 
+	// ReadOnly registers only the view tool from the file set
+	// (write and edit are skipped). Used by the chat-fallback path
+	// where the agent should be able to inspect the workspace
+	// (`ls`, view a file) without risking modifications.
+	ReadOnly bool
+
 	// BashAllow is the optional first-token allowlist enforced by
 	// the bash tool. Empty (with EnableBash=true) means "no
 	// restriction". Only consulted when EnableBash is true.
 	BashAllow []string
+
+	// GateConfig drives in-loop safety classification. When non-zero
+	// (BlockThreshold > 0), every file mutation the agent makes —
+	// via write/edit tools and via bash — is run through
+	// safetygate.Classify against opts.Graph; the verdict (auto /
+	// review / block) fires Hooks.OnGateVerdict so the TUI can
+	// render it inline. Block verdicts also revert the offending
+	// edit before returning the tool result so the model sees the
+	// rollback. Leave Graph nil or BlockThreshold=0 to disable.
+	GateConfig safetygate.Config
 
 	// SessionStore, when set, persists every turn (assistant +
 	// tool-result) to the kai DB so the conversation survives

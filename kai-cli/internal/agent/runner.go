@@ -5,12 +5,131 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"kai/internal/agent/message"
 	"kai/internal/agent/provider"
 	"kai/internal/agent/session"
 	"kai/internal/agent/tools"
+	"kai/internal/safetygate"
 )
+
+// classifyAndEmit runs the safety gate on a freshly-mutated set of
+// paths and forwards the verdict to the TUI hook. Cheap no-op when
+// the gate isn't configured (no Graph or zero BlockThreshold) so
+// callers can invoke it unconditionally after each mutation.
+//
+// We don't revert on Block here — agent-side rollback would mean
+// re-reading the file's prior content per mutation, which we don't
+// keep around. The verdict is informational; the existing
+// orchestrator+gate path is the chokepoint that actually holds
+// changes back from publish. In chat mode the user sees the verdict
+// inline and can decide to revert, run /gate, or continue.
+func classifyAndEmit(opts Options, paths []string) {
+	if opts.Hooks.OnGateVerdict == nil {
+		return
+	}
+	if opts.Graph == nil || opts.GateConfig.BlockThreshold == 0 {
+		return
+	}
+	if len(paths) == 0 {
+		return
+	}
+	dec, err := safetygate.Classify(context.Background(), paths, opts.Graph, opts.GateConfig)
+	if err != nil {
+		// Surface as a verdict with a single reason — better than
+		// silently dropping the signal when the graph is mid-rebuild.
+		opts.Hooks.OnGateVerdict(paths, "error", 0, []string{err.Error()})
+		return
+	}
+	opts.Hooks.OnGateVerdict(paths, string(dec.Verdict), dec.BlastRadius, dec.Reasons)
+}
+
+// readOnlyTools is the set of tools safe to dispatch concurrently —
+// they don't mutate the workspace, don't depend on each other's
+// output, and don't compete for shared resources. Adding bash here
+// would be wrong even for "ls": users issue `bash` for arbitrary
+// commands and we don't introspect the command. Adding new read-only
+// tools is intentional, not automatic — verify before extending.
+var readOnlyTools = map[string]bool{
+	"view":           true,
+	"kai_callers":    true,
+	"kai_dependents": true,
+	"kai_context":    true,
+}
+
+// dispatchToolCalls runs the model's tool calls and returns one
+// tool_result per call, preserving call order in the result slice
+// (Anthropic matches by tool_use_id, but ordered results read better
+// when persisted to the transcript and replayed). Read-only calls
+// fan out into goroutines; mutating calls run inline. The two
+// classes are interleaved correctly because we collect a slot per
+// call and fill it in place — ordering is by call index, not finish
+// time.
+func dispatchToolCalls(
+	ctx context.Context,
+	calls []message.ToolCall,
+	registry map[string]tools.BaseTool,
+	onCall func(name, inputJSON string),
+) []message.ContentPart {
+	results := make([]message.ContentPart, len(calls))
+	var wg sync.WaitGroup
+
+	exec := func(idx int, call message.ToolCall) message.ToolResult {
+		if onCall != nil {
+			onCall(call.Name, call.Input)
+		}
+		tool, ok := registry[call.Name]
+		if !ok {
+			return message.ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Content:    fmt.Sprintf("unknown tool: %s", call.Name),
+				IsError:    true,
+			}
+		}
+		tr, err := tool.Run(ctx, tools.ToolCall{
+			ID:    call.ID,
+			Name:  call.Name,
+			Input: call.Input,
+		})
+		if err != nil {
+			return message.ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Content:    fmt.Sprintf("tool error: %s", err.Error()),
+				IsError:    true,
+			}
+		}
+		return message.ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Content:    tr.Content,
+			Metadata:   tr.Metadata,
+			IsError:    tr.IsError,
+		}
+	}
+
+	for i, call := range calls {
+		if readOnlyTools[call.Name] {
+			wg.Add(1)
+			go func(idx int, c message.ToolCall) {
+				defer wg.Done()
+				results[idx] = exec(idx, c)
+			}(i, call)
+			continue
+		}
+		// Mutating call: drain any in-flight reads so writes observe
+		// a consistent state, then run inline. Subsequent reads in
+		// the same batch will spawn fresh goroutines after the write
+		// completes — happens-before is by-call-index, which is the
+		// model's intent.
+		wg.Wait()
+		results[i] = exec(i, call)
+	}
+	wg.Wait()
+	return results
+}
 
 // runLoop is the in-process agent loop. It dispatches tool calls, feeds
 // results back to the model, and stops when the model emits an
@@ -56,16 +175,32 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(history) == 0 {
-		history = []message.Message{{
+	// Seed the new user turn. On a fresh session this is the only
+	// message; on a resumed session we append after the prior turns
+	// so the conversation ends with a user message (Anthropic rejects
+	// requests that end on assistant — assistant-prefill is opt-in
+	// and we don't use it here).
+	//
+	// Write-ahead: the AppendMessage below happens BEFORE provider.Send
+	// so a crash/SIGKILL mid-API-call leaves the user turn durable in
+	// SQLite. Resume picks up exactly where we left off — at worst the
+	// model re-answers the same question, never silently drops it.
+	// Don't reorder this with the for-loop below.
+	if strings.TrimSpace(user) != "" {
+		newUser := message.Message{
 			Role:  message.RoleUser,
 			Parts: []message.ContentPart{message.TextContent{Text: user}},
-		}}
+		}
+		history = append(history, newUser)
 		if sess != nil {
-			if err := sess.AppendMessage(history[0], 0, 0); err != nil {
+			if err := sess.AppendMessage(newUser, 0, 0); err != nil {
 				return nil, err
 			}
 		}
+	} else if len(history) == 0 {
+		// Caller passed an empty prompt and there's no prior history
+		// to continue from — nothing to send.
+		return nil, fmt.Errorf("agent: prompt empty and no session history to resume")
 	}
 	res := &Result{}
 	if sess != nil {
@@ -73,6 +208,24 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	const maxTurns = 25 // pathological loops shouldn't melt billing
+	// Budget-exhaustion continuation: when the model truncates a
+	// response because of MaxTokens (resp.FinishReason ==
+	// FinishReasonMaxTokens) and emitted no tool calls, we inject a
+	// "Continue from where you stopped. No recap." user message and
+	// re-call so the model can finish its thought. Cap at 3
+	// consecutive continuations — beyond that the response is
+	// genuinely too long and the user should split the request.
+	const maxContinuations = 3
+	continuations := 0
+
+	// Graph-context injector: before each provider.Send, scan the
+	// latest turn's content for file paths and prepend their
+	// depth-1 callers / dependents / protected status to the system
+	// role. Stops the model from having to call kai_callers itself
+	// — kai's graph signal arrives whether the model asks for it
+	// or not.
+	graphCtx := newGraphContextInjector(opts.Graph)
+
 	for turn := 0; turn < maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			res.FinishReason = message.FinishReasonCanceled
@@ -82,9 +235,18 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 			return res, err
 		}
 
+		systemForTurn := system
+		if extra := graphCtx.buildBlock(history, opts.GateConfig.Protected); extra != "" {
+			if systemForTurn == "" {
+				systemForTurn = extra
+			} else {
+				systemForTurn = systemForTurn + "\n\n" + extra
+			}
+		}
+
 		req := provider.Request{
 			Model:     model,
-			System:    system,
+			System:    systemForTurn,
 			Messages:  history,
 			Tools:     toolInfos(registry),
 			MaxTokens: maxTokensPerTurn,
@@ -99,6 +261,9 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 		}
 		res.TokensIn += resp.InputTokens
 		res.TokensOut += resp.OutputTokens
+		if opts.Hooks.OnTurnComplete != nil {
+			opts.Hooks.OnTurnComplete(res.TokensIn, res.TokensOut)
+		}
 
 		// Surface assistant-visible text via the hook so the TUI can
 		// render the agent narrating its work.
@@ -126,9 +291,30 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 			}
 		}
 
-		// If the model didn't ask for tools, we're done.
+		// If the model didn't ask for tools, we're either done or
+		// just truncated. A clean end_turn / stop_sequence finishes
+		// the run; a max_tokens stop with no tool calls is a
+		// truncated reply we can resume by nudging the model to
+		// continue. Tool-use stops always carry tool calls — handled
+		// below.
 		toolCalls := extractToolCalls(resp.Parts)
 		if len(toolCalls) == 0 {
+			if resp.FinishReason == message.FinishReasonMaxTokens && continuations < maxContinuations {
+				continuations++
+				cont := message.Message{
+					Role: message.RoleUser,
+					Parts: []message.ContentPart{
+						message.TextContent{Text: "Continue from where you stopped. No recap."},
+					},
+				}
+				history = append(history, cont)
+				if sess != nil {
+					if err := sess.AppendMessage(cont, 0, 0); err != nil {
+						return res, err
+					}
+				}
+				continue
+			}
 			res.FinishReason = resp.FinishReason
 			res.Transcript = history
 			if sess != nil {
@@ -136,6 +322,10 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 			}
 			return res, nil
 		}
+		// Model issued tool calls → it's making progress, reset the
+		// continuation counter so any later truncation gets its own
+		// fresh allotment of resumes.
+		continuations = 0
 
 		// Per-run token budget check. Enforce after a turn completes
 		// so we always include the model's final output in the total.
@@ -149,47 +339,18 @@ func runLoop(ctx context.Context, opts Options) (*Result, error) {
 				res.TokensIn+res.TokensOut, cap)
 		}
 
-		// Dispatch each tool call and append a single user-role
-		// message containing all the tool_result blocks. Anthropic's
-		// API accepts multiple tool_result parts per message; one
-		// message keeps the conversation graph small.
-		resultParts := make([]message.ContentPart, 0, len(toolCalls))
-		for _, call := range toolCalls {
-			if opts.Hooks.OnToolCall != nil {
-				opts.Hooks.OnToolCall(call.Name, call.Input)
-			}
-			tool, ok := registry[call.Name]
-			if !ok {
-				resultParts = append(resultParts, message.ToolResult{
-					ToolCallID: call.ID,
-					Name:       call.Name,
-					Content:    fmt.Sprintf("unknown tool: %s", call.Name),
-					IsError:    true,
-				})
-				continue
-			}
-			tr, err := tool.Run(ctx, tools.ToolCall{
-				ID:    call.ID,
-				Name:  call.Name,
-				Input: call.Input,
-			})
-			if err != nil {
-				resultParts = append(resultParts, message.ToolResult{
-					ToolCallID: call.ID,
-					Name:       call.Name,
-					Content:    fmt.Sprintf("tool error: %s", err.Error()),
-					IsError:    true,
-				})
-				continue
-			}
-			resultParts = append(resultParts, message.ToolResult{
-				ToolCallID: call.ID,
-				Name:       call.Name,
-				Content:    tr.Content,
-				Metadata:   tr.Metadata,
-				IsError:    tr.IsError,
-			})
-		}
+		// Dispatch tool calls. Read-only tools (view, kai_callers,
+		// kai_dependents, kai_context) run concurrently — they don't
+		// touch the workspace and don't depend on each other, so
+		// blocking any one of them on the others is wasted wall-
+		// clock. Mutating tools (write, edit, bash) run serially in
+		// the order the model emitted them — concurrent writes risk
+		// stale-read interactions and out-of-order edits to the same
+		// file. The OnToolCall hook fires from the dispatching
+		// goroutine; consumers must be safe for concurrent calls
+		// (the TUI's chat-activity channel is non-blocking, so it
+		// is).
+		resultParts := dispatchToolCalls(ctx, toolCalls, registry, opts.Hooks.OnToolCall)
 		toolMsg := message.Message{
 			Role:  message.RoleUser,
 			Parts: resultParts,
@@ -248,6 +409,7 @@ func buildToolRegistry(opts Options) map[string]tools.BaseTool {
 
 	ft := &tools.FileTools{
 		Workspace: opts.Workspace,
+		ReadOnly:  opts.ReadOnly,
 		OnChange: func(rel, op string) {
 			if opts.Hooks.OnFileChange != nil {
 				opts.Hooks.OnFileChange(rel, op)
@@ -257,6 +419,12 @@ func buildToolRegistry(opts Options) map[string]tools.BaseTool {
 			if opts.Hooks.OnFileBroadcast != nil {
 				opts.Hooks.OnFileBroadcast(rel, digest, contentBase64)
 			}
+		},
+		OnDiff: func(rel, op, patch string, added, removed int) {
+			if opts.Hooks.OnFileDiff != nil {
+				opts.Hooks.OnFileDiff(rel, op, patch, added, removed)
+			}
+			classifyAndEmit(opts, []string{rel})
 		},
 	}
 	for _, t := range ft.All() {
@@ -278,6 +446,14 @@ func buildToolRegistry(opts Options) map[string]tools.BaseTool {
 		bt := &tools.BashTool{
 			Workspace: opts.Workspace,
 			Allow:     opts.BashAllow,
+			OnOutput: func(line string) {
+				if opts.Hooks.OnBashOutput != nil {
+					opts.Hooks.OnBashOutput(line)
+				}
+			},
+			OnFilesChanged: func(paths []string) {
+				classifyAndEmit(opts, paths)
+			},
 		}
 		reg[bt.Info().Name] = bt
 	}

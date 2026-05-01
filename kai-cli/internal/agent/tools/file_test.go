@@ -138,6 +138,25 @@ func TestEdit_ReplaceAll(t *testing.T) {
 	}
 }
 
+// TestFileTools_ReadOnlyOmitsWriteAndEdit: ReadOnly mode should
+// register only the view tool. Used by the chat-fallback path so
+// "what's in this dir" answers can run view+bash without the
+// possibility of an accidental write or edit.
+func TestFileTools_ReadOnlyOmitsWriteAndEdit(t *testing.T) {
+	rw := (&FileTools{Workspace: t.TempDir(), ReadOnly: false}).All()
+	if len(rw) != 3 {
+		t.Errorf("read-write should expose 3 tools, got %d", len(rw))
+	}
+
+	ro := (&FileTools{Workspace: t.TempDir(), ReadOnly: true}).All()
+	if len(ro) != 1 {
+		t.Fatalf("read-only should expose 1 tool, got %d", len(ro))
+	}
+	if ro[0].Info().Name != "view" {
+		t.Errorf("read-only should expose view, got %q", ro[0].Info().Name)
+	}
+}
+
 func TestResolveInWorkspace_RejectsEscape(t *testing.T) {
 	_, err := resolveInWorkspace("/tmp/work", "../../../etc/passwd")
 	if err == nil {

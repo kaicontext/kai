@@ -168,6 +168,39 @@ func TestPlan_ResolvesFilesFromGraph(t *testing.T) {
 	}
 }
 
+// TestChat_OneShotReply confirms Chat sends a single completion with
+// the chat system prompt and returns the trimmed response.
+func TestChat_OneShotReply(t *testing.T) {
+	llm := &fakeLLM{response: "  hello there!  "}
+	got, err := Chat(context.Background(), "hi", Config{}, llm)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hello there!" {
+		t.Errorf("response not trimmed: %q", got)
+	}
+	if !strings.Contains(llm.system, "fallback") || !strings.Contains(llm.system, "kai CLI") {
+		t.Errorf("chat system prompt missing key phrases:\n%s", llm.system)
+	}
+	if llm.user != "hi" {
+		t.Errorf("user message: %q", llm.user)
+	}
+}
+
+func TestChat_RejectsEmpty(t *testing.T) {
+	_, err := Chat(context.Background(), "   ", Config{}, &fakeLLM{})
+	if err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("expected empty-request error, got %v", err)
+	}
+}
+
+func TestChat_RejectsNilLLM(t *testing.T) {
+	_, err := Chat(context.Background(), "hi", Config{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no LLM") {
+		t.Fatalf("expected nil-llm error, got %v", err)
+	}
+}
+
 func TestReplan_AppendsFeedback(t *testing.T) {
 	llm := &fakeLLM{response: `{"summary":"x","agents":[{"name":"a","prompt":"p"}]}`}
 	_, err := Replan(context.Background(), "original request", "actually use middleware", nil,

@@ -111,6 +111,50 @@ func Plan(ctx context.Context, request string, g GraphAccess, gateCfg safetygate
 	return plan, nil
 }
 
+// Chat runs a one-shot conversational reply for input that's too
+// vague to plan ("hi", "what can you do?", "thanks"). The REPL falls
+// back to this when Plan returns ErrTooVague so users don't get
+// stuck on the error message.
+//
+// Intentionally simple: no graph context, no tools, no streaming —
+// just a system-prompted single completion. If the user actually
+// wants a change, the system prompt nudges them toward describing
+// a file or feature.
+func Chat(ctx context.Context, request string, cfg Config, llm Completer) (string, error) {
+	if llm == nil {
+		return "", fmt.Errorf("planner: no LLM client")
+	}
+	request = strings.TrimSpace(request)
+	if request == "" {
+		return "", fmt.Errorf("planner: empty chat request")
+	}
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	resp, err := llm.Complete(chatSystemPrompt(), []ai.Message{
+		{Role: "user", Content: request},
+	}, maxTokens)
+	if err != nil {
+		return "", fmt.Errorf("planner: chat: %w", err)
+	}
+	return strings.TrimSpace(resp), nil
+}
+
+// chatSystemPrompt instructs the model to be brief and to nudge the
+// user toward planner-friendly requests when they're trying to make
+// a change. Kept short so it doesn't eat tokens.
+func chatSystemPrompt() string {
+	return `You are the conversational fallback for the kai CLI's REPL. The user typed something that wasn't a recognized command and wasn't concrete enough to plan a code change.
+
+Reply briefly (1–3 sentences) and helpfully:
+  - For greetings or chitchat, respond naturally.
+  - For questions about kai, answer if you can.
+  - If they seem to want a code change, ask them to name a file, package, or specific behavior so the planner can act (e.g. "Add a /health endpoint to index.js", "Update README to mention X").
+
+Don't write code. Don't propose plans. Just chat.`
+}
+
 // Replan combines the original request with feedback and re-plans.
 // One LLM call, no conversation. If the user wants more rounds they
 // can keep providing feedback in the REPL — each round is independent.

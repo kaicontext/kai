@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,6 +50,17 @@ func Run(ctx context.Context, opts Options) error {
 	// Buffered so the watcher's callback (which fires from its event
 	// loop goroutine) never blocks waiting for the pump to drain.
 	syncCh := make(chan views.SyncEvent, 256)
+
+	// Chat-activity channel: the chat-fallback agent's tool/file
+	// hooks push tool dispatches and file mutations through here so
+	// REPL renders them inline ("→ write package.json"). Sized large
+	// enough that a chatty turn doesn't drop events; non-blocking
+	// sends in the hook handle overflow gracefully.
+	chatCh := make(chan views.ChatActivityEvent, 64)
+	if opts.Planner != nil {
+		opts.Planner.ChatActivityCh = chatCh
+	}
+
 	w, watcherErr := startWatcher(opts, syncCh)
 	if w != nil {
 		defer w.Stop()
@@ -72,8 +84,17 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	m := initialModel(opts, syncCh, watcherErr)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	m := initialModel(opts, syncCh, chatCh, watcherErr)
+	// WithMouseCellMotion enables wheel events; the REPL routes
+	// MouseMsg to its viewport so scrollback works regardless of
+	// which pane the cursor is over (Claude Code-style "whole page
+	// scrolls"). WithAltScreen keeps the alternate screen so we
+	// don't dirty the user's terminal scrollback.
+	p := tea.NewProgram(m,
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithContext(ctx),
+	)
 	_, err := p.Run()
 	return err
 }
@@ -113,7 +134,9 @@ type model struct {
 	repl    views.REPL
 	gate    views.Gate
 	sync    views.Sync
+	status  views.StatusBar
 	syncCh  <-chan views.SyncEvent
+	chatCh  <-chan views.ChatActivityEvent
 	focused focus
 }
 
@@ -125,17 +148,21 @@ const (
 	focusSync
 )
 
-func initialModel(opts Options, syncCh <-chan views.SyncEvent, watcherErr error) model {
+func initialModel(opts Options, syncCh <-chan views.SyncEvent, chatCh <-chan views.ChatActivityEvent, watcherErr error) model {
 	s := views.NewSync(200)
+	var status views.StatusBar
 	if watcherErr != nil {
 		s, _ = s.Update(views.SyncErrorMsg{Err: watcherErr})
+		status = status.Update(views.SyncErrorMsg{Err: watcherErr})
 	}
 	return model{
 		opts:    opts,
 		repl:    views.NewREPL(opts.Binary, opts.WorkDir, opts.Planner),
 		gate:    views.NewGate(opts.DB),
 		sync:    s,
+		status:  status,
 		syncCh:  syncCh,
+		chatCh:  chatCh,
 		focused: focusREPL,
 	}
 }
@@ -148,6 +175,9 @@ func (m model) Init() tea.Cmd {
 	if m.syncCh != nil {
 		cmds = append(cmds, views.PumpEvents(m.syncCh))
 	}
+	if m.chatCh != nil {
+		cmds = append(cmds, views.PumpChatActivity(m.chatCh))
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -157,8 +187,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		return m, nil
+
+	case tea.MouseMsg:
+		// Whole-page scroll: wheel events route to the REPL
+		// viewport regardless of which pane the cursor is over.
+		// Anything else (clicks, motion) is dropped — we don't
+		// support click-to-focus yet.
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			var c tea.Cmd
+			m.repl, c = m.repl.Update(msg)
+			return m, c
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
+			// Two-step exit, like Claude Code / readline: first
+			// Ctrl+C clears the input draft so a half-typed prompt
+			// doesn't disappear forever to a misfire; the second
+			// (with input already empty) actually quits.
+			if strings.TrimSpace(m.repl.InputValue()) != "" {
+				m.repl.ClearInput()
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 		switch msg.String() {
@@ -189,6 +239,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var c tea.Cmd
 		m.sync, c = m.sync.Update(msg)
 		cmds = append(cmds, c)
+		// Status bar mirrors the most recent sync activity.
+		m.status = m.status.Update(msg)
+		return m, tea.Batch(cmds...)
+
+	case views.ChatActivityMsg:
+		// Status bar snapshots agent_start/agent_end here so the
+		// "Agents: N" counter updates the moment a run kicks off,
+		// not after the bar's next refresh.
+		m.status = m.status.Update(msg)
+		// Re-arm the chat-activity pump and let the REPL append the
+		// inline event line.
+		var cmds []tea.Cmd
+		if m.chatCh != nil {
+			cmds = append(cmds, views.PumpChatActivity(m.chatCh))
+		}
+		var c tea.Cmd
+		m.repl, c = m.repl.Update(msg)
+		cmds = append(cmds, c)
 		return m, tea.Batch(cmds...)
 	}
 
@@ -203,6 +271,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, c)
 	m.sync, c = m.sync.Update(msg)
 	cmds = append(cmds, c)
+	// Status bar snapshots gate + sync state from the same broadcast.
+	m.status = m.status.Update(msg)
 	return m, tea.Batch(cmds...)
 }
 
@@ -210,42 +280,35 @@ func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return ""
 	}
-	// Three-pane layout:
-	//   ┌─ gate (1/3 W) ──┬─ sync (2/3 W) ──┐
-	//   │                 │                 │
-	//   ├─ REPL (full W) ────────────────────┤
-	//   └────────────────────────────────────┘
-	top := lipgloss.JoinHorizontal(lipgloss.Top, m.gate.View(), m.sync.View())
-	return lipgloss.JoinVertical(lipgloss.Left, top, m.repl.View())
+	// Single-pane layout: REPL takes the full window minus a
+	// 1-line status strip pinned to the bottom that summarizes
+	// gate + sync state. Detail views are accessible via /gate
+	// and /sync subcommands. Mirrors the Claude Code "everything
+	// scrolls in one column" UX the user asked for.
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.repl.View(),
+		m.status.View(),
+	)
 }
 
 // layout recomputes child sizes from the latest window dimensions.
-// Top row is roughly 40% of the window; gate gets 1/3 of the width,
-// sync gets the remaining 2/3. REPL gets whatever vertical space is
-// left after the top row and the joining newline.
+// REPL gets the full width and all height minus one row reserved
+// for the status bar at the bottom. Gate + Sync still receive
+// SetSize so the /gate and /sync detail commands render correctly
+// when the user shells out to them.
 func (m *model) layout() {
-	topHeight := m.height * 2 / 5
-	if topHeight < 8 {
-		topHeight = 8
+	statusHeight := 1
+	replHeight := m.height - statusHeight
+	if replHeight < 4 {
+		replHeight = 4
 	}
-	if topHeight > m.height-4 {
-		// Always leave room for at least the REPL prompt + a couple
-		// of output lines, even on tiny windows.
-		topHeight = m.height - 4
-	}
-
-	gateWidth := m.width / 3
-	syncWidth := m.width - gateWidth
-	if gateWidth < 24 {
-		gateWidth = 24
-	}
-	if syncWidth < m.width-gateWidth {
-		syncWidth = m.width - gateWidth
-	}
-
-	m.gate.SetSize(gateWidth, topHeight)
-	m.sync.SetSize(syncWidth, topHeight)
-	m.repl.SetSize(m.width, m.height-topHeight-1)
+	m.repl.SetSize(m.width, replHeight)
+	m.status.SetSize(m.width, statusHeight)
+	// Gate/Sync are background sinks now — give them sensible
+	// defaults so any list/view their /command paths show is
+	// shaped to the window.
+	m.gate.SetSize(m.width, replHeight)
+	m.sync.SetSize(m.width, replHeight)
 }
 
 // setFocus moves input focus between sub-views and updates each

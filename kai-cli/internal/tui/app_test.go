@@ -26,7 +26,7 @@ func TestLayoutDoesNotPanic(t *testing.T) {
 		{8, 8},     // pathological
 	}
 	for _, s := range sizes {
-		m := initialModel(Options{}, nil, nil)
+		m := initialModel(Options{}, nil, nil, nil)
 		m2, _ := m.Update(tea.WindowSizeMsg{Width: s.w, Height: s.h})
 		out := m2.View()
 		// Just confirm we got non-empty output for non-zero sizes.
@@ -40,7 +40,7 @@ func TestLayoutDoesNotPanic(t *testing.T) {
 // the documented keystrokes. Doesn't drive the full event loop —
 // just verifies the model's setFocus path.
 func TestFocusToggle(t *testing.T) {
-	m := initialModel(Options{}, nil, nil)
+	m := initialModel(Options{}, nil, nil, nil)
 	if m.focused != focusREPL {
 		t.Fatalf("default focus should be REPL, got %v", m.focused)
 	}
@@ -64,7 +64,7 @@ func TestFocusToggle(t *testing.T) {
 // TestSyncErrorRendersInPane confirms a watcher startup failure shows
 // up as text inside the sync pane rather than crashing the TUI.
 func TestSyncErrorRendersInPane(t *testing.T) {
-	m := initialModel(Options{}, nil, errStub("watcher couldn't start"))
+	m := initialModel(Options{}, nil, nil, errStub("watcher couldn't start"))
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	out := m2.View()
 	if !strings.Contains(out, "watcher couldn't start") {

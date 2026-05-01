@@ -27,6 +27,14 @@ type Kailab struct {
 	BaseURL    string
 	AuthToken  string
 	HTTPClient *http.Client
+
+	// InitialBackoff is the first sleep between retry attempts.
+	// Doubles each attempt up to MaxBackoff. Zero falls back to a
+	// 1-second default so production behavior is unchanged unless a
+	// caller (typically a test) explicitly shrinks it.
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	MaxAttempts    int
 }
 
 // NewKailab builds a Kailab provider. baseURL is kai-server's URL
@@ -50,6 +58,12 @@ func NewKailab(baseURL, authToken string) *Kailab {
 // shape, posts it, and translates the response back. Error messages
 // from upstream are forwarded verbatim so the user sees the real
 // upstream reason (rate limit, invalid model, no credit, etc.).
+//
+// Transient upstream errors (429 rate-limit, 529 overloaded, 502/503/
+// 504 gateway hiccups, network errors) are retried with exponential
+// backoff before surfacing. Non-transient errors (400 invalid request,
+// 401 unauthorized, 404, 413 too-large) bubble up immediately — no
+// amount of retrying fixes them and the user wants the real reason.
 func (k *Kailab) Send(ctx context.Context, req Request) (Response, error) {
 	if k.BaseURL == "" {
 		return Response{}, fmt.Errorf("kailab provider: BaseURL not set")
@@ -66,6 +80,56 @@ func (k *Kailab) Send(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("kailab provider: marshaling request: %w", err)
 	}
 
+	maxAttempts := k.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	backoff := k.InitialBackoff
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+	maxBackoff := k.MaxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 60 * time.Second
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := k.sendOnce(ctx, body)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		// Honor cancellation immediately — don't retry through a
+		// user-initiated Ctrl+C.
+		if cerr := ctx.Err(); cerr != nil {
+			return Response{}, cerr
+		}
+		if !isTransient(err) || attempt == maxAttempts {
+			return Response{}, err
+		}
+		// Sleep with cancellation awareness. tea.Tick semantics: the
+		// timer fires once; ctx.Done() preempts it.
+		t := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return Response{}, ctx.Err()
+		case <-t.C:
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+	return Response{}, lastErr
+}
+
+// sendOnce performs a single HTTP round-trip. Returns a typed
+// transientError for retryable upstream conditions; everything else
+// is returned as a regular error.
+func (k *Kailab) sendOnce(ctx context.Context, body []byte) (Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST",
 		k.BaseURL+"/api/v1/llm/messages", bytes.NewReader(body))
 	if err != nil {
@@ -80,17 +144,23 @@ func (k *Kailab) Send(ctx context.Context, req Request) (Response, error) {
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return Response{}, fmt.Errorf("kailab provider: sending request: %w", err)
+		// Network errors (DNS, connection reset, EOF mid-stream,
+		// timeout) are transient — the next attempt may succeed.
+		return Response{}, &transientError{cause: fmt.Errorf("kailab provider: sending request: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return Response{}, fmt.Errorf("kailab provider: reading response: %w", err)
+		return Response{}, &transientError{cause: fmt.Errorf("kailab provider: reading response: %w", err)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Response{}, fmt.Errorf("kailab provider: %d: %s",
+		errMsg := fmt.Errorf("kailab provider: %d: %s",
 			resp.StatusCode, strings.TrimSpace(string(respBody)))
+		if isRetryableStatus(resp.StatusCode) {
+			return Response{}, &transientError{cause: errMsg}
+		}
+		return Response{}, errMsg
 	}
 
 	var raw anthropicResponse
@@ -98,6 +168,61 @@ func (k *Kailab) Send(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("kailab provider: parsing response: %w", err)
 	}
 	return parseAnthropicResponse(raw), nil
+}
+
+// transientError marks an error as worth retrying. Wrapping (rather
+// than a status-code int) keeps the public API status-code-agnostic
+// for future provider implementations that signal retry-worthiness
+// differently (e.g. direct-Anthropic via SDK).
+type transientError struct{ cause error }
+
+func (t *transientError) Error() string { return t.cause.Error() }
+func (t *transientError) Unwrap() error { return t.cause }
+
+func isTransient(err error) bool {
+	var te *transientError
+	return errAs(err, &te)
+}
+
+// errAs is a thin wrapper around errors.As to keep the import
+// surface obvious and let us tweak matching later without hunting
+// through call sites.
+func errAs(err error, target interface{}) bool {
+	type unwrapper interface{ Unwrap() error }
+	for err != nil {
+		if t, ok := target.(**transientError); ok {
+			if v, ok2 := err.(*transientError); ok2 {
+				*t = v
+				return true
+			}
+		}
+		u, ok := err.(unwrapper)
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
+
+// isRetryableStatus picks the upstream codes that warrant a retry:
+//
+//   - 408 request timeout (intermediary)
+//   - 425 too early (rare, but transient by definition)
+//   - 429 rate-limited (Anthropic throttling)
+//   - 500 server error (genuine intermittent failure)
+//   - 502/503/504 gateway hiccups
+//   - 529 overloaded (Anthropic-specific "we're saturated")
+//
+// Notably *not* retryable: 400 (bad request — won't fix itself),
+// 401 (auth — needs login), 403, 404, 413 (too-large — needs
+// compaction, not a retry).
+func isRetryableStatus(code int) bool {
+	switch code {
+	case 408, 425, 429, 500, 502, 503, 504, 529:
+		return true
+	}
+	return false
 }
 
 // --- request translation ---------------------------------------------

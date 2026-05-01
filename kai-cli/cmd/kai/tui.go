@@ -80,11 +80,18 @@ func runCodeTUI(cmd *cobra.Command, args []string) error {
 		defer liveSync.Stop()
 	}
 
+	planner := buildPlannerServices(asGraphDB(db), kaiDir, cwd, liveSync)
+	if planner != nil {
+		// Pass the binary's version through so the startup banner
+		// can show "kai v0.16.0" instead of "kai vdev". Single
+		// source of truth lives in main.go's Version var.
+		planner.Version = Version
+	}
 	return tui.Run(context.Background(), tui.Options{
 		DB:      asGraphDB(db),
 		KaiDir:  kaiDir,
 		WorkDir: cwd,
-		Planner: buildPlannerServices(asGraphDB(db), kaiDir, cwd, liveSync),
+		Planner: planner,
 	})
 }
 
